@@ -1,8 +1,8 @@
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
-from enum import StrEnum
-from typing import Dict, List, NotRequired, Optional, Tuple, TypedDict
+from enum import Flag, StrEnum
+from typing import Dict, List, NotRequired, Optional, Tuple, TypeVar, TypedDict
 
 MODBUS_VALUE_TYPES = float|int|str
 
@@ -40,12 +40,21 @@ class UOM:
     PCT = "percent"
     TEXT = "text"
     UNKNOWN = None
-    
+class Read(Flag):
+    REQUESTED = 0b0001
+    """Read when requested (default)"""
+    ALWAYS = 0b0010
+    """Always read the value when reading point values"""
+    STARTUP = 0b0100
+    """Read during startup and when REQUESTED"""
+    STARTUP_ALWAYS = ALWAYS | STARTUP
+    """Read during startup and ALWAYS"""
+
 class ModbusPointExtras(TypedDict):
     unit_of_measurement: NotRequired[str|None]
     """Unit of measurement for the value, UOM class contains the standard units, defaults to None"""
-    always_read: NotRequired[bool|None]
-    """Indication if the point should always be read from the device. If not True, the point will only be read if explicitly requested"""
+    read: NotRequired[Read|None]
+    """Flags for the read operation, defaults to REQUESTED"""
     
 @dataclass(kw_only=True)
 class ModbusDatapoint:
@@ -98,23 +107,25 @@ class ModbusSetpoint:
     
 class ModbusDatapointData:
     point: ModbusDatapoint
-    read: bool
+    read: bool = False
+    read_flags: Read = Read.REQUESTED
     value: MODBUS_VALUE_TYPES|None = None
     unit_of_measurement: str|None = None
     def __init__(self, point: ModbusDatapoint):
         self.point = point
-        self.read = point.extra is not None and "always_read" in point.extra and point.extra["always_read"] == True
+        self.read_flags = self.read_flags if point.extra is None or "read" not in point.extra or point.extra["read"] is None else point.extra["read"]
         self.unit_of_measurement = point.extra["unit_of_measurement"] if point.extra is not None and "unit_of_measurement" in point.extra else None
 
 
 class ModbusSetpointData:
     point: ModbusSetpoint
-    read: bool
+    read: bool = False
+    read_flags: Read = Read.REQUESTED
     value: MODBUS_VALUE_TYPES|None = None
     unit_of_measurement: str|None = None
     def __init__(self, point: ModbusSetpoint):
         self.point = point
-        self.read = point.extra is not None and "always_read" in point.extra and point.extra["always_read"] == True
+        self.read_flags = self.read_flags if point.extra is None or "read" not in point.extra or point.extra["read"] is None else point.extra["read"]
         self.unit_of_measurement = point.extra["unit_of_measurement"] if point.extra is not None and "unit_of_measurement" in point.extra else None
 
 @dataclass()
@@ -141,6 +152,8 @@ class ModbusDeviceInfo:
     version: VersionInfo
     identification: ModbusDeviceIdenfication|None
 
+MODBUS_POINT_TYPE = TypeVar("MODBUS_POINT_TYPE", ModbusDatapoint, ModbusSetpoint)
+
 class ModbusDevice(ABC):
     _ready: bool = False
     _device_info: ModbusDeviceInfo
@@ -148,7 +161,7 @@ class ModbusDevice(ABC):
     def __init__(self, device_info: ModbusDeviceInfo) -> None:
         self._device_info = device_info
     
-    def instantiate(self, device_info: ModbusDeviceInfo) -> None:
+    def instantiate(self) -> None:
         """
         Sets up the device for usage and raises errors if device has issues.
         Raises:
@@ -183,6 +196,13 @@ class ModbusDevice(ABC):
     @abstractmethod
     def get_datapoints_for_read(self) -> List[ModbusDatapoint]:
         raise NotImplementedError("Method not implemented")
+    @abstractmethod
+    def get_initial_datapoints_for_read(self) -> List[ModbusDatapoint]:
+        """Returns the initial datapoints to read during startup, these are normally the version datapoints"""
+        raise NotImplementedError("Method not implemented")
+    @abstractmethod
+    def get_initial_setpoints_for_read(self) -> List[ModbusSetpoint]:
+        """Returns the initial setpoints to read during startup, these are normally the version datapoints"""
     @abstractmethod
     def get_max_value(self, key: ModbusSetpointKey) -> float|int|None:
         raise NotImplementedError("Method not implemented")
@@ -246,7 +266,7 @@ class ModbusDeviceBase(ModbusDevice):
     def model_name(self) -> str:
         return self._attr_model_name
     
-    def instantiate(self, device_info: ModbusDeviceInfo) -> None:
+    def instantiate(self) -> None:
         if not self._attr_manufacturer:
             raise ValueError("Manufacturer not set")
         if not self._attr_model_name:
@@ -270,6 +290,16 @@ class ModbusDeviceBase(ModbusDevice):
     
     def get_datapoints_for_read(self) -> List[ModbusDatapoint]:
         return [value.point for value in self._datapoints.values() if value.read]
+    
+    def get_initial_datapoints_for_read(self) -> List[ModbusDatapoint]:
+        result:List[ModbusDatapoint] = [value.point for key, value in self._datapoints.items() 
+                                        if value.read_flags & Read.STARTUP or key in ModbusVersionPointKey]
+        return result
+
+    def get_initial_setpoints_for_read(self) -> List[ModbusSetpoint]:
+        result:List[ModbusSetpoint] = [value.point for key, value in self._setpoints.items() 
+                                        if value.read_flags & Read.STARTUP or key in ModbusVersionPointKey]
+        return result
 
     def get_max_value(self, key: ModbusSetpointKey) -> float | int | None:
         if self.provides(key):
@@ -334,32 +364,38 @@ class ModbusDeviceBase(ModbusDevice):
         return False
 
     def provides(self, key: ModbusPointKey) -> bool:
-        return key in self._datapoints or key in self._setpoints
+        if isinstance(key, ModbusDatapointKey):
+            return key in self._datapoints
+        elif isinstance(key, ModbusSetpointKey):
+            return key in self._setpoints
+        return False
 
     def set_read(self, key: ModbusPointKey, read: bool) -> bool:
         """
         Sets the read state for the point. Returns the new read state.
         If the device sets the always_read to True in the configuration for the key, the read state can never be set to False.
         """
-        if key in self._datapoints:
-            self._datapoints[key].read = read
+        if isinstance(key, ModbusDatapointKey):
+            pointdata = self._datapoints.get(key)
+            if pointdata is not None:
+                pointdata.read = read or bool(pointdata.read_flags & (Read.ALWAYS))
             return True
-        elif key in self._setpoints:
-            data = self._setpoints[key]
-            if data.point.read_address is not None:
-                data.read = read
+        elif isinstance(key, ModbusSetpointKey):
+            pointdata = self._setpoints.get(key)
+            if pointdata is not None and pointdata.point.read_address is not None:
+                pointdata.read = read or bool(pointdata.read_flags & (Read.ALWAYS))
                 return True
         return False
     
     def _set_value(self, key: ModbusPointKey, value: MODBUS_VALUE_TYPES) -> Tuple[MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None]:
         old_value:MODBUS_VALUE_TYPES|None = None
         assigned_value:MODBUS_VALUE_TYPES|None = None
-        if key in self._datapoints:
+        if isinstance(key, ModbusDatapointKey):
             data = self._datapoints.get(key)
             if data is not None:
                 old_value = data.value
                 assigned_value = data.value = value
-        elif key in self._setpoints:
+        elif isinstance(key, ModbusSetpointKey):
             data = self._setpoints.get(key)
             if data is not None:
                 assigned_value = data.value = value
@@ -385,8 +421,23 @@ class ModbusDeviceBase(ModbusDevice):
             major_val = major[1] if major is not None and major[1] is not None else 0
             minor_val = minor[1] if minor is not None and minor[1] is not None else 0
             patch_val = patch[1] if patch is not None and patch[1] is not None else 0
-            self._device_info.version = VersionInfo(major=int(major_val), minor=int(minor_val), patch=int(patch_val))
-            
+            new_version = VersionInfo(major=int(major_val), minor=int(minor_val), patch=int(patch_val))
+            old_version = self._device_info.version
+            if new_version != old_version:
+                self._device_info.version = new_version
+                self._version_updated(old_version, new_version)
+    
+    def _version_updated(self, old_version: VersionInfo, new_version: VersionInfo) -> None:
+        """
+        Called when the version of the device has changed, including during initial data read.
+        It can be used to update the device with new features or remove old ones.
+        
+        Remember to call 'self.instantiate()' if changes have been made to the device,
+        to setup the device for usage with the new changes.
+        
+        During the initial data read, old_version is Major=0, Minor=0, Patch=0.
+        """
+        pass 
         
 class MODIFIER:
     @staticmethod

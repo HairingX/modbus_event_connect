@@ -67,10 +67,10 @@ async def test_datapoint(testdata: TestData):
     client = testdata.client
     success = await client.connect(credentials.username, "DEVICE_ID", credentials.hostname)
     assert success
-    await client.request_datapoint_data()
+    await client.request_initial_data()
     event = asyncio.Event()
     def callback(oldval:MODBUS_VALUE_TYPES|None, newval:MODBUS_VALUE_TYPES|None):
         _LOGGER.debug(f"{ModbusTestDatapointKey.MAJOR_VERSION}: {oldval if oldval is not None else 'None'} -> {newval if newval is not None else 'None'}")
         event.set()
     client.subscribe(ModbusTestDatapointKey.MAJOR_VERSION, callback)
-    assert await event.wait()
+    assert await asyncio.wait_for(event.wait(), 5)

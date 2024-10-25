@@ -105,7 +105,7 @@ class ModbusTCPEventConnect(ModbusEventConnect):
                                        )
         if self._attr_adapter.provides_model(device_info):
             _LOGGER.debug(f"Going to load model")
-            self._attr_adapter.instantiate(device_info)
+            self._attr_adapter.load_device_model(device_info)
             _LOGGER.debug(f"Loaded model for {self._attr_adapter.model_name} - {device_info}")
             return True
         else:

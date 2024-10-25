@@ -13,13 +13,12 @@ class ModbusDeviceAdapter(ModbusDevice):
     def __init__(self):
         pass
     
-    def instantiate(self, device_info: ModbusDeviceInfo) -> None:
+    def load_device_model(self, device_info: ModbusDeviceInfo) -> None:
         self._device_info = device_info
         model_to_load = self._translate_to_model(device_info)
         if model_to_load == None:
             raise Exception("Invalid model")
         loaded_model = model_to_load(device_info)
-        loaded_model.instantiate(device_info)
         self._loaded_model = loaded_model
      
     def _translate_to_model(self, device_info: ModbusDeviceInfo) -> Callable[[ModbusDeviceInfo], ModbusDevice]|None:
@@ -41,6 +40,11 @@ class ModbusDeviceAdapter(ModbusDevice):
 
     def get_datapoints_for_read(self) -> List[ModbusDatapoint]:
         return self._get_loaded_model().get_datapoints_for_read()
+
+    def get_initial_datapoints_for_read(self) -> List[ModbusDatapoint]:
+        return self._get_loaded_model().get_initial_datapoints_for_read()
+    def get_initial_setpoints_for_read(self) -> List[ModbusSetpoint]:
+        return self._get_loaded_model().get_initial_setpoints_for_read()
 
     @property
     def ready(self): return self._loaded_model is not None and self._loaded_model.ready

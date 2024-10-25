@@ -1,8 +1,8 @@
 
 from abc import ABC, abstractmethod
-from typing import Callable, Dict, List, Tuple, TypeVar
+from typing import Any, Callable, Dict, List, Tuple
 
-from .modbus_models import MODBUS_VALUE_TYPES, ModbusDatapoint, ModbusDatapointKey, ModbusPointKey, ModbusSetpoint, ModbusSetpointKey
+from .modbus_models import MODBUS_POINT_TYPE, MODBUS_VALUE_TYPES, ModbusDatapoint, ModbusDatapointKey, ModbusPointKey, ModbusSetpoint, ModbusSetpointKey
 from .modbus_deviceadapter import ModbusDeviceAdapter
 
 class ModbusEventConnect(ABC):
@@ -37,6 +37,17 @@ class ModbusEventConnect(ABC):
     def manufacturer(self): return self._attr_adapter.manufacturer
     @property
     def model_name(self) -> str: return self._attr_adapter.model_name
+    
+    async def request_initial_data(self) -> None:
+        """Request the initial value of all subscribed datapoints and setpoints. All subscribers will be notified of the new value if changed."""
+        values:List[Tuple[Any, MODBUS_VALUE_TYPES]] = []
+        datapoints = self._attr_adapter.get_initial_datapoints_for_read()
+        if len(datapoints) > 0: 
+            values.extend(await self._request_datapoint_data(datapoints))
+        setpoints = self._attr_adapter.get_initial_setpoints_for_read()
+        if len(setpoints) > 0: 
+            values.extend(await self._request_setpoint_data(setpoints))
+        self._set_values(values)
     
     async def request_datapoint_data(self) -> None:
         """Request the current value of all subscribed datapoints. All subscribers will be notified of the new value if changed."""
@@ -76,7 +87,6 @@ class ModbusEventConnect(ABC):
             else: 
                 subscribers.remove(update_method)
     
-    MODBUS_POINT_TYPE = TypeVar("MODBUS_POINT_TYPE", ModbusDatapoint, ModbusSetpoint)
     def _set_values(self, kv: List[Tuple[MODBUS_POINT_TYPE, MODBUS_VALUE_TYPES]]) -> None:
         result = self._attr_adapter.set_values([(point.key, value) for point, value in kv])
         self._notify_subscribers(result)

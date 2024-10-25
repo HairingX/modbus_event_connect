@@ -1,4 +1,5 @@
 # import contextlib
+import contextlib
 from dataclasses import dataclass
 import threading
 import time
@@ -22,8 +23,6 @@ SOCKET_BUFFER_SIZE = 512
 KEEP_ALIVE_TIMEOUT = 20 # Seconds with no response to try reconnecting
 REQUEST_TIMEOUT = 10
 SEQUENCE_ID_MAX = 65535 # 65535 = 2^16-1 = 0xFFFF
-
-MODBUS_POINT_TYPE = TypeVar("MODBUS_POINT_TYPE", ModbusDatapoint, ModbusSetpoint)
 
 class MicroNabtoConnectionErrorType(StrEnum):
     AUTHENTICATION_ERROR = "authentication_error"
@@ -71,7 +70,8 @@ class Request:
         self.sequence_id = sequence_id
     async def wait_for_response(self, timeout:float = REQUEST_TIMEOUT) -> bool:
         self._loop = asyncio.get_running_loop()
-        await asyncio.wait_for(self._event.wait(), timeout)
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(self._event.wait(), timeout)
         self.response_time = time.time()
         return self._event.is_set()
     def notify_waiters(self) -> None:

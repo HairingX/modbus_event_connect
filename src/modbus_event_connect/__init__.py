@@ -13,6 +13,7 @@ from .modbus_models import (
         ModbusVersionPointKey,
         MODBUS_VALUE_TYPES,
         MODIFIER,
+        Read,
         UOM,
         VersionInfo,
         )
@@ -36,6 +37,7 @@ __all__ = [
     "ModbusVersionPointKey",
     "MODBUS_VALUE_TYPES",
     "MODIFIER",
+    "Read",
     "UOM",
     "MicroNabtoEventConnect",
     "MicroNabtoModbusDeviceInfo",
