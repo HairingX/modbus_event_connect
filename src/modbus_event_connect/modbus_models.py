@@ -10,7 +10,9 @@ class ModbusPointKey(StrEnum):
     pass
 
 class ModbusDatapointKey(ModbusPointKey):
-    pass
+    MAJOR_VERSION = "major_version"
+    MINOR_VERSION = "minor_version"
+    PATCH_VERSION = "patch_version"
 
 class ModbusSetpointKey(ModbusPointKey):
     pass
