@@ -120,7 +120,7 @@ class ModbusTCPEventConnect(ModbusEventConnect):
     async def _request_datapoint_data(self, points: List[ModbusDatapoint]) -> List[Tuple[ModbusDatapoint, MODBUS_VALUE_TYPES]]:
         kv:List[Tuple[ModbusDatapoint, MODBUS_VALUE_TYPES]] = []
         for batch in self.batch_reads(points):
-            data: List[int] | None = self._client.read_holding_registers(batch[0].read_address, len(batch))  # type: ignore
+            data: List[int] | None = self._client.read_input_registers(batch[0].read_address, len(batch))  # type: ignore
             if data is None:
                 _LOGGER.error(f"Failed to read data for {batch[0].read_address}-{batch[-1].read_address}")
                 continue
@@ -131,7 +131,7 @@ class ModbusTCPEventConnect(ModbusEventConnect):
     async def _request_setpoint_data(self, points: List[ModbusSetpoint]) -> List[Tuple[ModbusSetpoint, MODBUS_VALUE_TYPES]]:
         kv:List[Tuple[ModbusSetpoint, MODBUS_VALUE_TYPES]] = []
         for batch in self.batch_reads(points):
-            data:List[int]|None = self._client.read_input_registers(batch[0].read_address, len(batch)) # type: ignore
+            data:List[int]|None = self._client.read_holding_registers(batch[0].read_address, len(batch)) # type: ignore
             if data is None: 
                 _LOGGER.error(f"Failed to read data for {batch[0].read_address}-{batch[-1].read_address}")
                 continue
