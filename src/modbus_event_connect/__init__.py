@@ -20,7 +20,7 @@ from .micro_nabto.micro_nabto_connection import ( MicroNabtoModbusDeviceInfo )
 from .micro_nabto.micro_nabto_event_connect import ( MicroNabtoEventConnect )
 from .modbus_tcp.modbus_tcp_event_connect import ( ModbusTCPEventConnect )
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 __all__ = [
     "ModbusDevice",
     "ModbusDeviceAdapter",

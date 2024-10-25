@@ -6,9 +6,6 @@ from .micro_nabto_connection import CONNECT_TIMEOUT, DEVICE_PORT,  MicroNabtoCon
 
 _LOGGER = logging.getLogger(__name__)
 
-DATAPOINT_UPDATEINTERVAL = 10
-SETPOINT_UPDATEINTERVAL = 180
-
 class MicroNabtoErrorType(StrEnum):
     #connection errors
     AUTHENTICATION_ERROR = MicroNabtoConnectionErrorType.AUTHENTICATION_ERROR

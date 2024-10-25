@@ -1,6 +1,6 @@
 from enum import Enum
 import logging
-from typing import AsyncGenerator, Generator, Sequence, TypeVar
+from typing import Generator, Sequence, TypeVar
 from pyModbusTCP.client import ModbusClient # type: ignore
 
 from ..modbus_event_connect import *
@@ -8,8 +8,6 @@ from ..modbus_models import *
 
 _LOGGER = logging.getLogger(__name__)
 
-DATAPOINT_UPDATEINTERVAL = 10
-SETPOINT_UPDATEINTERVAL = 180
 DEVICE_PORT = 502
 CONNECT_TIMEOUT = 10
 UNIT_ID = 1
@@ -73,7 +71,7 @@ class ModbusTCPEventConnect(ModbusEventConnect):
     
     _client: ModbusClient|None = None# ModbusClient(host="", port=0, unit_id=0, auto_open=False, auto_close=False)
     
-    def is_connected(self) -> bool: return self._client is not None and self._client.is_open and self._attr_adapter._ready
+    def is_connected(self) -> bool: return self._client is not None and self._client.is_open and self._attr_adapter.ready
     def get_connection_error(self) -> str|None: 
         if self._client is None: return None
         if int(self._client.last_error) == ModbusTCPErrorCode.NO_ERROR: return None # type: ignore
@@ -119,23 +117,27 @@ class ModbusTCPEventConnect(ModbusEventConnect):
         if self._client is not None:
             self._client.close()
         
-    async def _request_datapoint_data(self, points: List[ModbusDatapoint]) -> AsyncGenerator[Tuple[ModbusDatapoint, MODBUS_VALUE_TYPES], None]:
+    async def _request_datapoint_data(self, points: List[ModbusDatapoint]) -> List[Tuple[ModbusDatapoint, MODBUS_VALUE_TYPES]]:
+        kv:List[Tuple[ModbusDatapoint, MODBUS_VALUE_TYPES]] = []
         for batch in self.batch_reads(points):
             data: List[int] | None = self._client.read_holding_registers(batch[0].read_address, len(batch))  # type: ignore
             if data is None:
                 _LOGGER.error(f"Failed to read data for {batch[0].read_address}-{batch[-1].read_address}")
                 continue
             for i, value in enumerate(data):
-                yield batch[i], value
+                kv.append((batch[i], value))
+        return kv
     
-    async def _request_setpoint_data(self, points: List[ModbusSetpoint]) -> AsyncGenerator[Tuple[ModbusSetpoint, MODBUS_VALUE_TYPES], None]:
+    async def _request_setpoint_data(self, points: List[ModbusSetpoint]) -> List[Tuple[ModbusSetpoint, MODBUS_VALUE_TYPES]]:
+        kv:List[Tuple[ModbusSetpoint, MODBUS_VALUE_TYPES]] = []
         for batch in self.batch_reads(points):
             data:List[int]|None = self._client.read_input_registers(batch[0].read_address, len(batch)) # type: ignore
             if data is None: 
                 _LOGGER.error(f"Failed to read data for {batch[0].read_address}-{batch[-1].read_address}")
                 continue
             for i, value in enumerate(data):
-                yield batch[i], value
+                kv.append((batch[i], value))
+        return kv    
     
     DATAPOINT_TYPE = TypeVar('DATAPOINT_TYPE', bound=ModbusDatapoint|ModbusSetpoint)
     def batch_reads(self, points:Sequence[DATAPOINT_TYPE]) -> Generator[List[DATAPOINT_TYPE], None, None]:
