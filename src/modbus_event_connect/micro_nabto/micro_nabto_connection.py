@@ -1,6 +1,7 @@
 # import contextlib
 import contextlib
 from dataclasses import dataclass
+import sys
 import threading
 import time
 import asyncio
@@ -70,8 +71,10 @@ class Request:
         self.sequence_id = sequence_id
     async def wait_for_response(self, timeout:float = REQUEST_TIMEOUT) -> bool:
         self._loop = asyncio.get_running_loop()
-        with contextlib.suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(self._event.wait(), timeout)
+        if not getattr(sys, 'gettrace', None):
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(self._event.wait(), timeout)
+        else:   await asyncio.wait_for(self._event.wait(), timeout)
         self.response_time = time.time()
         return self._event.is_set()
     def notify_waiters(self) -> None:

@@ -35,8 +35,7 @@ class MicroNabtoEventConnect(ModbusEventConnect):
             self._attr_adapter.load_device_model(device_info)
             _LOGGER.debug(f"Loaded model for {self._attr_adapter.model_name} - {device_info}")
             await self.request_initial_data()
-            await self.request_datapoint_data()
-            await self.request_setpoint_data()
+            _LOGGER.debug(f"Fetched initial data")
             return True
         else:
             _LOGGER.error(f"No model available for {device_info}")

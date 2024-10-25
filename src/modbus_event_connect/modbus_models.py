@@ -8,12 +8,29 @@ MODBUS_VALUE_TYPES = float|int|str
 
 class ModbusPointKey(StrEnum):
     pass
-
 class ModbusDatapointKey(ModbusPointKey):
-    pass
+    """
+    Datapoint keys, which is used to identify the datapoints. 
+    
+    Assign all keys 'auto()' ex. 'MY_KEY = auto()' OR ModbusVersionPointKey.XXX
+    """
+    #name:  The name of the member being defined (e.g. ‘RED’).
+    #start: The start value for the Enum; the default is 1.
+    #count: The number of members currently defined, not including this one.
+    #last_values: A list of the previous values.
+    @staticmethod
+    def _generate_next_value_(name:str, start:int, count:int, last_values:List[str]) -> str:
+        return f"datapoint_{name.lower()}"
 
 class ModbusSetpointKey(ModbusPointKey):
-    pass
+    """
+    Setpoint keys, which is used to identify the setpoints. 
+    
+    Assign all keys 'auto()' ex. 'MY_KEY = auto()' OR ModbusVersionPointKey.XXX
+    """
+    @staticmethod
+    def _generate_next_value_(name:str, start:int, count:int, last_values:List[str]) -> str:
+        return f"setpoint_{name.lower()}"
 
 class ModbusVersionPointKey(ModbusDatapointKey):
     """Default datapoint keys, which is used to identify the version of the device"""
@@ -379,11 +396,15 @@ class ModbusDeviceBase(ModbusDevice):
             pointdata = self._datapoints.get(key)
             if pointdata is not None:
                 pointdata.read = read or bool(pointdata.read_flags & (Read.ALWAYS))
+                #if point is only having value when requested, and read is set to False, then clear the value
+                if not pointdata.read and bool(pointdata.read_flags == Read.REQUESTED): pointdata.value = None
             return True
         elif isinstance(key, ModbusSetpointKey):
             pointdata = self._setpoints.get(key)
             if pointdata is not None and pointdata.point.read_address is not None:
                 pointdata.read = read or bool(pointdata.read_flags & (Read.ALWAYS))
+                #if point is only having value when requested, and read is set to False, then clear the value
+                if not pointdata.read and bool(pointdata.read_flags == Read.REQUESTED): pointdata.value = None
                 return True
         return False
     
@@ -401,27 +422,35 @@ class ModbusDeviceBase(ModbusDevice):
                 assigned_value = data.value = value
         return (old_value, assigned_value)
     
-    #TODO: Implement this method, to allow us to check version changes in a single go, istead of 3 individual events
-    #make sure the vsion change can be overriden by the device, to allow for custom version handling. Ex. add or remove features based on version.
     def set_values(self, kv: List[Tuple[ModbusPointKey, MODBUS_VALUE_TYPES]]) -> Dict[ModbusPointKey, Tuple[MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None]]:
         result = dict[ModbusPointKey, Tuple[MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None]]()
         for key, value in kv:
             old_value, new_value = self._set_value(key, value)
             result[key] = (old_value, new_value)
         
-        self._update_if_version_changed(result)
+        self._set_version_if_changed(result)
         return result
     
-    def _update_if_version_changed(self, valuesset:Dict[ModbusPointKey, Tuple[MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None]]) -> None:
-        major = valuesset.get(ModbusVersionPointKey.MAJOR_VERSION)
-        minor = valuesset.get(ModbusVersionPointKey.MINOR_VERSION)
-        patch = valuesset.get(ModbusVersionPointKey.PATCH_VERSION)
+    def _set_version_if_changed(self, valuesset:Dict[ModbusPointKey, Tuple[MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None]]) -> None:
+        majortuple = valuesset.get(ModbusVersionPointKey.MAJOR_VERSION)
+        minortuple = valuesset.get(ModbusVersionPointKey.MINOR_VERSION)
+        patchtuple = valuesset.get(ModbusVersionPointKey.PATCH_VERSION)
         
-        if major is not None or minor is not None or patch is not None:
-            major_val = major[1] if major is not None and major[1] is not None else 0
-            minor_val = minor[1] if minor is not None and minor[1] is not None else 0
-            patch_val = patch[1] if patch is not None and patch[1] is not None else 0
-            new_version = VersionInfo(major=int(major_val), minor=int(minor_val), patch=int(patch_val))
+        if majortuple is not None or minortuple is not None or patchtuple is not None:
+            new_major = majortuple[1] if majortuple is not None else None
+            new_minor = minortuple[1] if minortuple is not None else None
+            new_patch = patchtuple[1] if patchtuple is not None else None
+            current_major = self.get_value(ModbusVersionPointKey.MAJOR_VERSION)
+            current_minor = self.get_value(ModbusVersionPointKey.MINOR_VERSION)
+            current_patch = self.get_value(ModbusVersionPointKey.PATCH_VERSION)
+            if current_major is None: current_major = 0
+            if current_minor is None: current_minor = 0
+            if current_patch is None: current_patch = 0
+            
+            major = new_major if new_major is not None else current_major
+            minor = new_minor if new_minor is not None else current_minor
+            patch = new_patch if new_patch is not None else current_patch
+            new_version = VersionInfo(major=int(major), minor=int(minor), patch=int(patch))
             old_version = self._device_info.version
             if new_version != old_version:
                 self._device_info.version = new_version

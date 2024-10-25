@@ -9,7 +9,7 @@ from credentials import Credentials
 import logging
 
 from src.modbus_event_connect.micro_nabto.micro_nabto_connection import Request
-from src.modbus_event_connect import MODBUS_VALUE_TYPES
+from src.modbus_event_connect import MODBUS_VALUE_TYPES, ModbusPointKey
 from models.micro_nabto_test_models import ModbusTestDatapointKey, ModbusTestMicroNabto
 import asyncio
 
@@ -62,15 +62,15 @@ async def test_connect(testdata: TestData):
     success = await client.connect(credentials.username, "DEVICE_ID", credentials.hostname)
     assert success
 
-async def test_datapoint(testdata: TestData):
+async def test_request_datapoint_data(testdata: TestData):
     credentials = testdata.credentials
     client = testdata.client
     success = await client.connect(credentials.username, "DEVICE_ID", credentials.hostname)
     assert success
-    await client.request_initial_data()
     event = asyncio.Event()
-    def callback(oldval:MODBUS_VALUE_TYPES|None, newval:MODBUS_VALUE_TYPES|None):
-        _LOGGER.debug(f"{ModbusTestDatapointKey.MAJOR_VERSION}: {oldval if oldval is not None else 'None'} -> {newval if newval is not None else 'None'}")
+    def callback(key: ModbusPointKey, oldval:MODBUS_VALUE_TYPES|None, newval:MODBUS_VALUE_TYPES|None):
+        _LOGGER.debug(f"{key}: {oldval if oldval is not None else 'None'} -> {newval if newval is not None else 'None'}")
         event.set()
-    client.subscribe(ModbusTestDatapointKey.MAJOR_VERSION, callback)
+    client.subscribe(ModbusTestDatapointKey.TEMPERATURE, callback)
+    await client.request_datapoint_data()
     assert await asyncio.wait_for(event.wait(), 5)

@@ -107,6 +107,8 @@ class ModbusTCPEventConnect(ModbusEventConnect):
             _LOGGER.debug(f"Going to load model")
             self._attr_adapter.load_device_model(device_info)
             _LOGGER.debug(f"Loaded model for {self._attr_adapter.model_name} - {device_info}")
+            await self.request_initial_data()
+            _LOGGER.debug(f"Fetched initial data")
             return True
         else:
             _LOGGER.error(f"No model available for {device_info}")

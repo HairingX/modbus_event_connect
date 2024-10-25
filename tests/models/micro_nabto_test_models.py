@@ -1,3 +1,4 @@
+from enum import auto
 import logging
 from collections.abc import Callable
 from src.modbus_event_connect import *
@@ -5,7 +6,8 @@ from src.modbus_event_connect import *
 _LOGGER = logging.getLogger(__name__)
 
 class ModbusTestDatapointKey(ModbusDatapointKey):
-    MAJOR_VERSION = "major_version"
+    MAJOR_VERSION = ModbusVersionPointKey.MAJOR_VERSION
+    TEMPERATURE = auto()
     
 class ModbusTestDevice(ModbusDeviceBase):
     def __init__(self, device_info: ModbusDeviceInfo):
@@ -15,6 +17,7 @@ class ModbusTestDevice(ModbusDeviceBase):
         self._attr_model_name="TEST"
         self._attr_datapoints = [
             ModbusDatapoint(key=ModbusTestDatapointKey.MAJOR_VERSION, read_address=1, divider=1, signed=True),
+            ModbusDatapoint(key=ModbusTestDatapointKey.TEMPERATURE, read_address=27, divider=10, signed=True),
         ]
         self._attr_setpoints = []
 

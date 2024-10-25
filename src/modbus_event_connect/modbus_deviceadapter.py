@@ -19,6 +19,7 @@ class ModbusDeviceAdapter(ModbusDevice):
         if model_to_load == None:
             raise Exception("Invalid model")
         loaded_model = model_to_load(device_info)
+        loaded_model.instantiate()
         self._loaded_model = loaded_model
      
     def _translate_to_model(self, device_info: ModbusDeviceInfo) -> Callable[[ModbusDeviceInfo], ModbusDevice]|None:

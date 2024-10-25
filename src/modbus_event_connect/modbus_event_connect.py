@@ -2,12 +2,12 @@
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, List, Tuple
 
-from .modbus_models import MODBUS_POINT_TYPE, MODBUS_VALUE_TYPES, ModbusDatapoint, ModbusDatapointKey, ModbusPointKey, ModbusSetpoint, ModbusSetpointKey
+from .modbus_models import MODBUS_POINT_TYPE, MODBUS_VALUE_TYPES, ModbusDatapoint, ModbusPointKey, ModbusSetpoint
 from .modbus_deviceadapter import ModbusDeviceAdapter
 
 class ModbusEventConnect(ABC):
     _attr_adapter: ModbusDeviceAdapter
-    _subscribers: Dict[ModbusPointKey, List[Callable[[MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None], None]]] = {}
+    _subscribers: Dict[ModbusPointKey, List[Callable[[ModbusPointKey, MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None], None]]] = {}
     """Callable[old_value, new_value]"""
     
     @abstractmethod
@@ -39,7 +39,7 @@ class ModbusEventConnect(ABC):
     def model_name(self) -> str: return self._attr_adapter.model_name
     
     async def request_initial_data(self) -> None:
-        """Request the initial value of all subscribed datapoints and setpoints. All subscribers will be notified of the new value if changed."""
+        """Request the current value of all points used in initialization, ex. version."""
         values:List[Tuple[Any, MODBUS_VALUE_TYPES]] = []
         datapoints = self._attr_adapter.get_initial_datapoints_for_read()
         if len(datapoints) > 0: 
@@ -61,12 +61,12 @@ class ModbusEventConnect(ABC):
         if len(points) == 0: return
         self._set_values(await self._request_setpoint_data(points))
     
-    def subscribe(self, key: ModbusDatapointKey|ModbusSetpointKey, update_method: Callable[[MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None], None]):
+    def subscribe(self, key: ModbusPointKey, update_method: Callable[[ModbusPointKey, MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None], None]):
         """
             Subscribe to a datapoint or setpoint value change.
             
             :param key: The key of the datapoint or setpoint to subscribe to.
-            :param update_method: The method to call when the value changes. The Callable will receive old_value and new_value as the two inputs.
+            :param update_method: The method to call when the value changes. The Callable will receive the key, old_value and new_value as the inputs.
             """
         if key not in self._subscribers:
             self._subscribers[key] = []
@@ -74,9 +74,9 @@ class ModbusEventConnect(ABC):
         self._subscribers[key].append(update_method)
         value = self._attr_adapter.get_value(key)
         if value is not None:
-            update_method(None, value)
+            update_method(key, None, value)
     
-    def unsubscribe(self, key: ModbusDatapointKey|ModbusSetpointKey, update_method: Callable[[MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None], None]):
+    def unsubscribe(self, key: ModbusPointKey, update_method: Callable[[ModbusPointKey, MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None], None]):
         """Remove a subscription to a datapoint or setpoint value change."""
         subscribers = self._subscribers.get(key)
         if subscribers is None: return
@@ -96,4 +96,4 @@ class ModbusEventConnect(ABC):
             subscribers = self._subscribers.get(key)
             if subscribers is None: return
             for subscriber in subscribers:
-                subscriber(old_value, new_value)
+                subscriber(key, old_value, new_value)

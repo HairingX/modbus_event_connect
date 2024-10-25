@@ -1,11 +1,12 @@
 from collections.abc import Callable
+from enum import auto
 from src.modbus_event_connect import *
 
 class ModbusTestDatapointKey(ModbusDatapointKey):
-    MAJOR_VERSION = "major_version"
+    MAJOR_VERSION = auto()
     
 class ModbusTestSetpointKey(ModbusSetpointKey):
-    MY_SETPOINT = "my_setpoint"
+    MY_SETPOINT = auto()
     
 class ModbusTestDevice(ModbusDeviceBase):
     def __init__(self, device_info: ModbusDeviceInfo):
