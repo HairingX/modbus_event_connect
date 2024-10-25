@@ -1,9 +1,10 @@
 # Modbus Event Connect
 
-Welcome to **Modbus Event Connect** – a user-friendly Python library designed to simplify the configuration of Modbus devices. Whether you're connecting via TCP or Unabto, Modbus Event Connect has got you covered.
+Welcome to **Modbus Event Connect** – a user-friendly, event-driven Python library designed to simplify the configuration of Modbus devices and interact with them in an event-driven way. Whether you're connecting via TCP or Unabto, Modbus Event Connect has got you covered.
 
 ## Features
 
+- **Event-Driven Architecture**: React to changes and events in real-time.
 - **Easy Configuration**: Intuitive setup for Modbus devices.
 - **Flexible Connectivity**: Supports connection through TCP or Unabto.
 - **User-Friendly**: Handles the interaction; you just define the Modbus register items.
@@ -44,26 +45,25 @@ Welcome to **Modbus Event Connect** – a user-friendly Python library designed 
             return MyModbusDevice
 
     class MyModbusTCPEventConnect(ModbusTCPEventConnect):
-    _attr_adapter = MyModbusDeviceAdapter()
+        _attr_adapter = MyModbusDeviceAdapter()
     ```
 
 ## Documentation
 ### Client Capabilities
 
-The Modbus EventConnect offers a range of methods to facilitate seamless interaction with Modbus devices. Key features include:
+The Modbus Event Connect offers a range of methods to facilitate seamless interaction with Modbus devices. Key features include:
 
 - **Subscribe**: Easily subscribe to data points and receive updates.
 - **Unsubscribe**: Manage your subscriptions effortlessly.
 - **Comprehensive Methods**: A variety of methods to handle different Modbus operations.
 
-Let the EventConnect handle the communication, allowing you to focus on responding to changes and managing your Modbus devices efficiently.
-
+Let the Event Connect handle the communication, allowing you to focus on responding to changes and managing your Modbus devices efficiently.
 
 ## Disclaimer
 
 Modbus Event Connect is provided "as is", without warranty of any kind. The authors and contributors are not responsible for any damage or data loss that may occur from using this library. Users are solely responsible for ensuring the proper and safe operation of their Modbus devices.
 
-
 ## License
 
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+
