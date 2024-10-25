@@ -73,7 +73,7 @@ class ModbusTCPEventConnect(ModbusEventConnect):
     
     _client: ModbusClient|None = None# ModbusClient(host="", port=0, unit_id=0, auto_open=False, auto_close=False)
     
-    def is_connected(self) -> bool: return self._client is not None and self._client.is_open and self._attr_adapter.ready
+    def is_connected(self) -> bool: return self._client is not None and self._client.is_open and self._attr_adapter._ready
     def get_connection_error(self) -> str|None: 
         if self._client is None: return None
         if int(self._client.last_error) == ModbusTCPErrorCode.NO_ERROR: return None # type: ignore

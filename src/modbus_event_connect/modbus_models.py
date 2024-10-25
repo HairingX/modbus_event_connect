@@ -10,13 +10,17 @@ class ModbusPointKey(StrEnum):
     pass
 
 class ModbusDatapointKey(ModbusPointKey):
-    MAJOR_VERSION = "major_version"
-    MINOR_VERSION = "minor_version"
-    PATCH_VERSION = "patch_version"
+    pass
 
 class ModbusSetpointKey(ModbusPointKey):
     pass
 
+class ModbusVersionPointKey(ModbusDatapointKey):
+    """Default datapoint keys, which is used to identify the version of the device"""
+    MAJOR_VERSION = "major_version"
+    MINOR_VERSION = "minor_version"
+    PATCH_VERSION = "patch_version"
+    
 class UOM:
     SECONDS = "seconds"
     MINUTES = "minutes"
@@ -138,7 +142,7 @@ class ModbusDeviceInfo:
     identification: ModbusDeviceIdenfication|None
 
 class ModbusDevice(ABC):
-    ready: bool = False
+    _ready: bool = False
     _device_info: ModbusDeviceInfo
     
     def __init__(self, device_info: ModbusDeviceInfo) -> None:
@@ -150,8 +154,10 @@ class ModbusDevice(ABC):
         Raises:
             ValueError: If the an attribute is not set.
         """
-        self.ready = True
+        self._ready = True
     
+    @property
+    def ready(self) -> bool: return self._ready
     @property
     def device_id(self) -> str: return self._device_info.device_id
     @property
@@ -211,8 +217,8 @@ class ModbusDevice(ABC):
     def set_read(self, key: ModbusPointKey, read: bool) -> bool:
         raise NotImplementedError("Method not implemented")
     @abstractmethod
-    def set_value(self, key: ModbusPointKey, value: MODBUS_VALUE_TYPES) -> Tuple[MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None]:
-        """Sets the value for the key and returns the old and new value"""
+    def set_values(self, kv: List[Tuple[ModbusPointKey, MODBUS_VALUE_TYPES]]) -> Dict[ModbusPointKey, Tuple[MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None]]:
+        """Sets the values for the keys and returns a list with the old and new values"""
         raise NotImplementedError("Method not implemented")
     
 class ModbusDeviceBase(ModbusDevice):
@@ -345,7 +351,7 @@ class ModbusDeviceBase(ModbusDevice):
                 return True
         return False
     
-    def set_value(self, key: ModbusPointKey, value: MODBUS_VALUE_TYPES) -> Tuple[MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None]:
+    def _set_value(self, key: ModbusPointKey, value: MODBUS_VALUE_TYPES) -> Tuple[MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None]:
         old_value:MODBUS_VALUE_TYPES|None = None
         assigned_value:MODBUS_VALUE_TYPES|None = None
         if key in self._datapoints:
@@ -359,6 +365,29 @@ class ModbusDeviceBase(ModbusDevice):
                 assigned_value = data.value = value
         return (old_value, assigned_value)
     
+    #TODO: Implement this method, to allow us to check version changes in a single go, istead of 3 individual events
+    #make sure the vsion change can be overriden by the device, to allow for custom version handling. Ex. add or remove features based on version.
+    def set_values(self, kv: List[Tuple[ModbusPointKey, MODBUS_VALUE_TYPES]]) -> Dict[ModbusPointKey, Tuple[MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None]]:
+        result = dict[ModbusPointKey, Tuple[MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None]]()
+        for key, value in kv:
+            old_value, new_value = self._set_value(key, value)
+            result[key] = (old_value, new_value)
+        
+        self._update_if_version_changed(result)
+        return result
+    
+    def _update_if_version_changed(self, valuesset:Dict[ModbusPointKey, Tuple[MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None]]) -> None:
+        major = valuesset.get(ModbusVersionPointKey.MAJOR_VERSION)
+        minor = valuesset.get(ModbusVersionPointKey.MINOR_VERSION)
+        patch = valuesset.get(ModbusVersionPointKey.PATCH_VERSION)
+        
+        if major is not None or minor is not None or patch is not None:
+            major_val = major[1] if major is not None and major[1] is not None else 0
+            minor_val = minor[1] if minor is not None and minor[1] is not None else 0
+            patch_val = patch[1] if patch is not None and patch[1] is not None else 0
+            self._device_info.version = VersionInfo(major=int(major_val), minor=int(minor_val), patch=int(patch_val))
+            
+        
 class MODIFIER:
     @staticmethod
     def flip_bool(value:float|int) -> float|int:

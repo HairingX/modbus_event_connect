@@ -1,13 +1,13 @@
 
 from abc import ABC, abstractmethod
-from typing import AsyncGenerator, Callable, Dict, List, Tuple
+from typing import Callable, Dict, List, Tuple, TypeVar
 
-from .modbus_models import MODBUS_VALUE_TYPES, ModbusDatapoint, ModbusDatapointKey, ModbusSetpoint, ModbusSetpointKey
+from .modbus_models import MODBUS_VALUE_TYPES, ModbusDatapoint, ModbusDatapointKey, ModbusPointKey, ModbusSetpoint, ModbusSetpointKey
 from .modbus_deviceadapter import ModbusDeviceAdapter
 
 class ModbusEventConnect(ABC):
     _attr_adapter: ModbusDeviceAdapter
-    _subscribers: Dict[ModbusDatapointKey|ModbusSetpointKey, List[Callable[[MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None], None]]] = {}
+    _subscribers: Dict[ModbusPointKey, List[Callable[[MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None], None]]] = {}
     """Callable[old_value, new_value]"""
     
     @abstractmethod
@@ -17,10 +17,10 @@ class ModbusEventConnect(ABC):
     def stop(self) -> None:
         raise NotImplementedError("Method not implemented")
     @abstractmethod
-    def _request_datapoint_data(self, points: List[ModbusDatapoint]) -> AsyncGenerator[Tuple[ModbusDatapoint, MODBUS_VALUE_TYPES], None]:
+    async def _request_datapoint_data(self, points: List[ModbusDatapoint]) -> List[Tuple[ModbusDatapoint, MODBUS_VALUE_TYPES]]:
         raise NotImplementedError("Method not implemented")
     @abstractmethod
-    def _request_setpoint_data(self, points: List[ModbusSetpoint]) -> AsyncGenerator[Tuple[ModbusSetpoint, MODBUS_VALUE_TYPES], None]:
+    async def _request_setpoint_data(self, points: List[ModbusSetpoint]) -> List[Tuple[ModbusSetpoint, MODBUS_VALUE_TYPES]]:
         raise NotImplementedError("Method not implemented")
         
     @property
@@ -41,14 +41,14 @@ class ModbusEventConnect(ABC):
     async def request_datapoint_data(self) -> None:
         """Request the current value of all subscribed datapoints. All subscribers will be notified of the new value if changed."""
         points = self._attr_adapter.get_datapoints_for_read()
-        async for point, value in self._request_datapoint_data(points):
-            self._set_value(point.key, value)
+        if len(points) == 0: return
+        self._set_values(await self._request_datapoint_data(points))
             
     async def request_setpoint_data(self) -> None:
         """Request the current value of all subscribed setpoints. All subscribers will be notified of the new value if changed."""
         points = self._attr_adapter.get_setpoints_for_read()
-        async for point, value in self._request_setpoint_data(points):
-            self._set_value(point.key, value)
+        if len(points) == 0: return
+        self._set_values(await self._request_setpoint_data(points))
     
     def subscribe(self, key: ModbusDatapointKey|ModbusSetpointKey, update_method: Callable[[MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None], None]):
         """
@@ -76,12 +76,14 @@ class ModbusEventConnect(ABC):
             else: 
                 subscribers.remove(update_method)
     
-    def _set_value(self, key: ModbusDatapointKey|ModbusSetpointKey, value: MODBUS_VALUE_TYPES):
-        oldval, newval = self._attr_adapter.set_value(key, value)
-        self._notify_subscribers(key, oldval, newval)
+    MODBUS_POINT_TYPE = TypeVar("MODBUS_POINT_TYPE", ModbusDatapoint, ModbusSetpoint)
+    def _set_values(self, kv: List[Tuple[MODBUS_POINT_TYPE, MODBUS_VALUE_TYPES]]) -> None:
+        result = self._attr_adapter.set_values([(point.key, value) for point, value in kv])
+        self._notify_subscribers(result)
     
-    def _notify_subscribers(self, key: ModbusDatapointKey|ModbusSetpointKey, old_value: MODBUS_VALUE_TYPES|None, new_value: MODBUS_VALUE_TYPES|None):
-        subscribers = self._subscribers.get(key)
-        if subscribers is None: return
-        for subscriber in subscribers:
-            subscriber(old_value, new_value)
+    def _notify_subscribers(self, kv: Dict[ModbusPointKey, Tuple[MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None]]) -> None:
+        for key, (old_value, new_value) in kv.items():
+            subscribers = self._subscribers.get(key)
+            if subscribers is None: return
+            for subscriber in subscribers:
+                subscriber(old_value, new_value)

@@ -21,7 +21,6 @@ class ModbusDeviceAdapter(ModbusDevice):
         loaded_model = model_to_load(device_info)
         loaded_model.instantiate(device_info)
         self._loaded_model = loaded_model
-        self.ready = True
      
     def _translate_to_model(self, device_info: ModbusDeviceInfo) -> Callable[[ModbusDeviceInfo], ModbusDevice]|None:
         """Translate the model to the correct device model, must be implemented in the subclass"""
@@ -43,6 +42,8 @@ class ModbusDeviceAdapter(ModbusDevice):
     def get_datapoints_for_read(self) -> List[ModbusDatapoint]:
         return self._get_loaded_model().get_datapoints_for_read()
 
+    @property
+    def ready(self): return self._loaded_model is not None and self._loaded_model.ready
     @property
     def device_id(self): return self._get_loaded_model().device_id
     @property
@@ -92,7 +93,7 @@ class ModbusDeviceAdapter(ModbusDevice):
     def set_read(self, key: ModbusPointKey, read: bool) -> bool:
         return self._get_loaded_model().set_read(key, read)
 
-    def set_value(self, key: ModbusPointKey, value: MODBUS_VALUE_TYPES) -> Tuple[MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None]:
-        return self._get_loaded_model().set_value(key, value)
+    def set_values(self, kv: List[Tuple[ModbusPointKey, MODBUS_VALUE_TYPES]]) -> Dict[ModbusPointKey, Tuple[MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None]]:
+        return self._get_loaded_model().set_values(kv)
     
     #endregion ModbusDevice

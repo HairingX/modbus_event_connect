@@ -23,6 +23,8 @@ KEEP_ALIVE_TIMEOUT = 20 # Seconds with no response to try reconnecting
 REQUEST_TIMEOUT = 10
 SEQUENCE_ID_MAX = 65535 # 65535 = 2^16-1 = 0xFFFF
 
+MODBUS_POINT_TYPE = TypeVar("MODBUS_POINT_TYPE", ModbusDatapoint, ModbusSetpoint)
+
 class MicroNabtoConnectionErrorType(StrEnum):
     AUTHENTICATION_ERROR = "authentication_error"
     INVALID_ACTION = "invalid_action"
@@ -69,7 +71,7 @@ class Request:
         self.sequence_id = sequence_id
     async def wait_for_response(self, timeout:float = REQUEST_TIMEOUT) -> bool:
         self._loop = asyncio.get_running_loop()
-        await self._event.wait()
+        await asyncio.wait_for(self._event.wait(), timeout)
         self.response_time = time.time()
         return self._event.is_set()
     def notify_waiters(self) -> None:
@@ -93,8 +95,8 @@ class RequestConnection(Request):
         
 class RequestData(Request):
     _data: List[MODBUS_VALUE_TYPES]
-    points: Sequence[ModbusDatapoint | ModbusSetpoint]= []
-    def __init__(self, sequence_id:int, points:List[ModbusDatapoint]|List[ModbusSetpoint]) -> None:
+    points = []
+    def __init__(self, sequence_id:int, points:List[MODBUS_POINT_TYPE]) -> None:
         super().__init__(sequence_id)
         self.points = points
     def set_data(self, value:List[MODBUS_VALUE_TYPES]) -> None:
@@ -277,7 +279,7 @@ class MicroNabtoConnection:
         request = self._enqueue_connect_request(self._connected.device)
         return self._send_connect_request(request)
 
-    def _enqueue_request(self, points:List[ModbusDatapoint]|List[ModbusSetpoint]) -> RequestData:
+    def _enqueue_request(self, points:List[MODBUS_POINT_TYPE]) -> RequestData:
         self._sequence_id = sequence_id = 1 if self._sequence_id + 1 > SEQUENCE_ID_MAX else self._sequence_id + 1
         request = RequestData(sequence_id, points)
         self._requests[sequence_id] = request
@@ -440,6 +442,10 @@ class MicroNabtoConnection:
         requestdata = self._requests.get(sequence_id)
         if requestdata is None:
             _LOGGER.debug(f"Response ignored. Request for points not found for sequence id: {sequence_id}")
+            return
+        if len(requestdata.points) == 0:
+            _LOGGER.debug(f"Response ignored. Empty response received for sequence id: {sequence_id}")
+            requestdata.set_data([])
             return
         point = requestdata.points[0]
         if isinstance(point, ModbusDatapoint):

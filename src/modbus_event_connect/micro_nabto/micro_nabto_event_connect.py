@@ -32,11 +32,13 @@ class MicroNabtoEventConnect(ModbusEventConnect):
         device_info = await self._connection.connect(email, device_id, device_host, device_port, timeout)
         if device_info is None:
             return False
-        
+                
         if self._attr_adapter.provides_model(device_info):
             _LOGGER.debug(f"Going to load model")
             self._attr_adapter.instantiate(device_info)
             _LOGGER.debug(f"Loaded model for {self._attr_adapter.model_name} - {device_info}")
+            await self.request_datapoint_data()
+            await self.request_setpoint_data()
             return True
         else:
             _LOGGER.error(f"No model available for {device_info}")
@@ -46,15 +48,16 @@ class MicroNabtoEventConnect(ModbusEventConnect):
     def stop(self) -> None:
         self._connection.stop_listening()
         
-    async def _request_datapoint_data(self, points: List[ModbusDatapoint]) -> AsyncGenerator[Tuple[ModbusDatapoint, MODBUS_VALUE_TYPES], None]:
-        points = self._attr_adapter.get_datapoints_for_read()
+    async def _request_datapoint_data(self, points: List[ModbusDatapoint]) -> List[Tuple[ModbusDatapoint, MODBUS_VALUE_TYPES]]:
         data = await self._connection.request_datapoint_data(points)
+        kv:List[Tuple[ModbusDatapoint, MODBUS_VALUE_TYPES]] = []
         for point, value in data.values():
-            yield point, value
+            kv.append((point, value))
+        return kv
     
-    async def _request_setpoint_data(self, points: List[ModbusSetpoint]) -> AsyncGenerator[Tuple[ModbusSetpoint, MODBUS_VALUE_TYPES], None]:
-        if not self._connection.is_connected(): return
-        points = self._attr_adapter.get_setpoints_for_read()
+    async def _request_setpoint_data(self, points: List[ModbusSetpoint]) -> List[Tuple[ModbusSetpoint, MODBUS_VALUE_TYPES]]:
         data = await self._connection.request_setpoint_data(points)
+        kv:List[Tuple[ModbusSetpoint, MODBUS_VALUE_TYPES]] = []
         for point, value in data.values():
-            yield point, value
+            kv.append((point, value))
+        return kv
