@@ -12,7 +12,7 @@ class ModbusDatapointKey(ModbusPointKey):
     """
     Datapoint keys, which is used to identify the datapoints. 
     
-    Assign all keys 'auto()' ex. 'MY_KEY = auto()' OR ModbusVersionPointKey.XXX
+    Assign all keys 'auto()' ex. 'MY_KEY = auto()'
     """
     #name:  The name of the member being defined (e.g. ‘RED’).
     #start: The start value for the Enum; the default is 1.
@@ -26,18 +26,12 @@ class ModbusSetpointKey(ModbusPointKey):
     """
     Setpoint keys, which is used to identify the setpoints. 
     
-    Assign all keys 'auto()' ex. 'MY_KEY = auto()' OR ModbusVersionPointKey.XXX
+    Assign all keys 'auto()' ex. 'MY_KEY = auto()'
     """
     @staticmethod
     def _generate_next_value_(name:str, start:int, count:int, last_values:List[str]) -> str:
         return f"setpoint_{name.lower()}"
 
-class ModbusVersionPointKey(ModbusDatapointKey):
-    """Default datapoint keys, which is used to identify the version of the device"""
-    MAJOR_VERSION = "major_version"
-    MINOR_VERSION = "minor_version"
-    PATCH_VERSION = "patch_version"
-    
 class UOM:
     SECONDS = "seconds"
     MINUTES = "minutes"
@@ -57,6 +51,7 @@ class UOM:
     PCT = "percent"
     TEXT = "text"
     UNKNOWN = None
+    
 class Read(Flag):
     REQUESTED = 0b0001
     """Read when requested (default)"""
@@ -257,18 +252,29 @@ class ModbusDevice(ABC):
     def set_values(self, kv: List[Tuple[ModbusPointKey, MODBUS_VALUE_TYPES]]) -> Dict[ModbusPointKey, Tuple[MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None]]:
         """Sets the values for the keys and returns a list with the old and new values"""
         raise NotImplementedError("Method not implemented")
-    
+
+class VersionInfoKeys:
+    def __init__(self, major: ModbusPointKey|None=None, minor: ModbusPointKey|None=None, patch: ModbusPointKey|None=None):
+        self.major = major
+        self.minor = minor
+        self.patch = patch
+    major: ModbusPointKey|None
+    minor: ModbusPointKey|None
+    patch: ModbusPointKey|None
+
 class ModbusDeviceBase(ModbusDevice):
+    _attr_datapoints: List[ModbusDatapoint]
+    """Datapoints for the device. Must be assigned in the __init__ method"""
+    _attr_default_extras = dict[ModbusPointKey, ModbusPointExtras]()
+    """Default extras for the device. Can be assigned in the __init__ method"""
     _attr_manufacturer:str = ""
     """Manufacturer of the device. Must be assigned in the __init__ method"""
     _attr_model_name:str = ""
     """Model name of the device. Must be assigned in the __init__ method"""
-    _attr_datapoints: List[ModbusDatapoint]
-    """Datapoints for the device. Must be assigned in the __init__ method"""
+    _attr_version_keys: VersionInfoKeys 
+    """Keys used to get the version info"""
     _attr_setpoints: List[ModbusSetpoint]
     """Setpoints for the device. Must be assigned in the __init__ method"""
-    _attr_default_extras = dict[ModbusPointKey, ModbusPointExtras]()
-    """Default extras for the device. Can be assigned in the __init__ method"""
     
     _datapoints = dict[ModbusDatapointKey, ModbusDatapointData]()
     _setpoints = dict[ModbusSetpointKey, ModbusSetpointData]()
@@ -292,6 +298,8 @@ class ModbusDeviceBase(ModbusDevice):
             raise ValueError("Datapoints not set")
         if not hasattr(self, '_attr_setpoints'):
             raise ValueError("Setpoints not set")
+        if not hasattr(self, '_attr_version_keys'):
+            raise ValueError("Version keys not set")
         
         for point in self._attr_datapoints:
             point.extra = point.extra or self._attr_default_extras.get(point.key)
@@ -309,13 +317,15 @@ class ModbusDeviceBase(ModbusDevice):
         return [value.point for value in self._datapoints.values() if value.read]
     
     def get_initial_datapoints_for_read(self) -> List[ModbusDatapoint]:
+        version_keys = {self._attr_version_keys.major, self._attr_version_keys.minor, self._attr_version_keys.patch}
         result:List[ModbusDatapoint] = [value.point for key, value in self._datapoints.items() 
-                                        if value.read_flags & Read.STARTUP or key in ModbusVersionPointKey]
+                                        if value.read_flags & Read.STARTUP or key in version_keys]
         return result
 
     def get_initial_setpoints_for_read(self) -> List[ModbusSetpoint]:
+        version_keys = {self._attr_version_keys.major, self._attr_version_keys.minor, self._attr_version_keys.patch}
         result:List[ModbusSetpoint] = [value.point for key, value in self._setpoints.items() 
-                                        if value.read_flags & Read.STARTUP or key in ModbusVersionPointKey]
+                                        if value.read_flags & Read.STARTUP or key in version_keys]
         return result
 
     def get_max_value(self, key: ModbusSetpointKey) -> float | int | None:
@@ -432,17 +442,17 @@ class ModbusDeviceBase(ModbusDevice):
         return result
     
     def _set_version_if_changed(self, valuesset:Dict[ModbusPointKey, Tuple[MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None]]) -> None:
-        majortuple = valuesset.get(ModbusVersionPointKey.MAJOR_VERSION)
-        minortuple = valuesset.get(ModbusVersionPointKey.MINOR_VERSION)
-        patchtuple = valuesset.get(ModbusVersionPointKey.PATCH_VERSION)
+        majortuple = valuesset.get(self._attr_version_keys.major) if self._attr_version_keys.major is not None else None
+        minortuple = valuesset.get(self._attr_version_keys.minor) if self._attr_version_keys.minor is not None else None
+        patchtuple = valuesset.get(self._attr_version_keys.patch) if self._attr_version_keys.patch is not None else None
         
         if majortuple is not None or minortuple is not None or patchtuple is not None:
             new_major = majortuple[1] if majortuple is not None else None
             new_minor = minortuple[1] if minortuple is not None else None
             new_patch = patchtuple[1] if patchtuple is not None else None
-            current_major = self.get_value(ModbusVersionPointKey.MAJOR_VERSION)
-            current_minor = self.get_value(ModbusVersionPointKey.MINOR_VERSION)
-            current_patch = self.get_value(ModbusVersionPointKey.PATCH_VERSION)
+            current_major = self.get_value(self._attr_version_keys.major) if self._attr_version_keys.major is not None else None
+            current_minor = self.get_value(self._attr_version_keys.minor) if self._attr_version_keys.minor is not None else None
+            current_patch = self.get_value(self._attr_version_keys.patch) if self._attr_version_keys.patch is not None else None
             if current_major is None: current_major = 0
             if current_minor is None: current_minor = 0
             if current_patch is None: current_patch = 0
