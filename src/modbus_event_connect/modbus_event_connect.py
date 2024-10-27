@@ -24,15 +24,7 @@ class ModbusEventConnect(ABC):
         raise NotImplementedError("Method not implemented")
         
     @property
-    def version(self): return self._attr_adapter.version
-    @property
-    def device_host(self): return self._attr_adapter.device_host
-    @property
-    def device_id(self): return self._attr_adapter.device_id
-    @property
-    def device_port(self): return self._attr_adapter.device_port
-    @property
-    def identification(self): return self._attr_adapter.identification
+    def device_info(self): return self._attr_adapter.device_info
     @property
     def manufacturer(self): return self._attr_adapter.manufacturer
     @property

@@ -50,20 +50,11 @@ class ModbusDeviceAdapter(ModbusDevice):
     @property
     def ready(self): return self._loaded_model is not None and self._loaded_model.ready
     @property
-    def device_id(self): return self._get_loaded_model().device_id
-    @property
-    def device_host(self): return self._get_loaded_model().device_host
-    @property
-    def device_port(self): return self._get_loaded_model().device_port
-    @property
-    def identification(self): return self._get_loaded_model().identification
+    def device_info(self): return self._get_loaded_model().device_info
     @property
     def manufacturer(self): return self._get_loaded_model().manufacturer
     @property
     def model_name(self): return self._get_loaded_model().model_name
-    @property
-    def version(self): return self._get_loaded_model().version
-    
     
     def get_max_value(self, key: ModbusSetpointKey) -> float|int|None:
         return self._get_loaded_model().get_max_value(key)

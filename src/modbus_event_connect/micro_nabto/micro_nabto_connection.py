@@ -412,7 +412,7 @@ class MicroNabtoConnection:
             device_id=request.device.device_id, 
             device_host=request.device.address[0], 
             device_port=request.device.address[1],
-            version=VersionInfo(0, 0, 0),
+            version=VersionInfo(),#correct version is set later
             identification=None,
             device_number=device_number, 
             device_model=device_model, 

@@ -100,7 +100,7 @@ class ModbusTCPEventConnect(ModbusEventConnect):
         device_info = ModbusDeviceInfo(device_id=device_id, 
                                        device_host=device_host,
                                        device_port=device_port,
-                                       version=VersionInfo(0, 0, 0),
+                                       version=VersionInfo(),
                                        identification=identification,
                                        )
         if self._attr_adapter.provides_model(device_info):
