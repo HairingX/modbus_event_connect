@@ -86,10 +86,10 @@ class ModbusDeviceAdapter(ModbusDevice):
     def provides(self, key: ModbusPointKey) -> bool:
         return self._get_loaded_model().provides(key)
 
-    def set_read(self, key: ModbusPointKey, read: bool) -> bool:
-        return self._get_loaded_model().set_read(key, read)
+    def set_read(self, key: ModbusPointKey, read: bool, *, force: bool=False) -> bool:
+        return self._get_loaded_model().set_read(key, read, force=force)
 
-    def set_values(self, kv: List[Tuple[ModbusPointKey, MODBUS_VALUE_TYPES]]) -> Dict[ModbusPointKey, Tuple[MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None]]:
+    def set_values(self, kv: List[Tuple[ModbusPointKey, MODBUS_VALUE_TYPES|None]]) -> Dict[ModbusPointKey, Tuple[MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None]]:
         return self._get_loaded_model().set_values(kv)
     
     #endregion ModbusDevice

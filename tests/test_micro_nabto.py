@@ -21,11 +21,12 @@ class TestData:
     data = dict[str, Any]()
     credentials: Credentials
     
-@pytest.fixture
-def testdata():
+@pytest.fixture(scope="session")
+async def testdata():
     #setup
     credentials = Credentials(["username", "hostname"])
     client = ModbusTestMicroNabto()
+    await client.connect(credentials.username, "DEVICE_ID", credentials.hostname)
     # 
     yield TestData(client=client, credentials=credentials)
     #teardown
@@ -57,16 +58,12 @@ async def test_connection_request_asyncio_loop():
     await request.wait_for_response()
 
 async def test_connect(testdata: TestData):
-    credentials = testdata.credentials
     client = testdata.client
-    success = await client.connect(credentials.username, "DEVICE_ID", credentials.hostname)
-    assert success
+    assert client.is_connected
+    assert client.get_value(ModbusTestDatapointKey.MAJOR_VERSION) is not None
 
 async def test_request_datapoint_data(testdata: TestData):
-    credentials = testdata.credentials
     client = testdata.client
-    success = await client.connect(credentials.username, "DEVICE_ID", credentials.hostname)
-    assert success
     event = asyncio.Event()
     def callback(key: ModbusPointKey, oldval:MODBUS_VALUE_TYPES|None, newval:MODBUS_VALUE_TYPES|None):
         _LOGGER.debug(f"{key}: {oldval if oldval is not None else 'None'} -> {newval if newval is not None else 'None'}")
@@ -74,3 +71,19 @@ async def test_request_datapoint_data(testdata: TestData):
     client.subscribe(ModbusTestDatapointKey.TEMPERATURE, callback)
     await client.request_datapoint_data()
     assert await asyncio.wait_for(event.wait(), 5)
+    assert client.get_value(ModbusTestDatapointKey.TEMPERATURE) is not None
+
+async def test_request_datapoint_data_invalid_address(testdata: TestData):
+    client = testdata.client
+    event1 = asyncio.Event()
+    event2 = asyncio.Event()
+    events = {ModbusTestDatapointKey.INVALID: event1, ModbusTestDatapointKey.TEMPERATURE: event2}
+    def callback(key: ModbusPointKey, oldval:MODBUS_VALUE_TYPES|None, newval:MODBUS_VALUE_TYPES|None):
+        _LOGGER.debug(f"{key}: {oldval if oldval is not None else 'None'} -> {newval if newval is not None else 'None'}")
+        if key in events: events[key].set()
+    client.subscribe(ModbusTestDatapointKey.INVALID, callback)
+    client.subscribe(ModbusTestDatapointKey.TEMPERATURE, callback)
+    await client.request_datapoint_data()
+    await asyncio.wait_for(asyncio.gather(event1.wait(), event2.wait()), 15)
+    assert client.get_value(ModbusTestDatapointKey.INVALID) is None
+    assert client.get_value(ModbusTestDatapointKey.TEMPERATURE) is not None

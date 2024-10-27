@@ -31,6 +31,7 @@ class MicroNabtoConnectionErrorType(StrEnum):
     LISTEN_THREAD_CLOSED = "listen_thread_closed"
     SOCKET_CLOSED = "socket_closed"
     TIMEOUT = "timeout"
+    INVALID_ADDRESS = "invalid_address"
 
 class DeviceInfo:
     device_id:str
@@ -74,7 +75,7 @@ class Request:
         if not getattr(sys, 'gettrace', None):
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(self._event.wait(), timeout)
-        else:   await asyncio.wait_for(self._event.wait(), timeout)
+        else:   await self._event.wait()
         self.response_time = time.time()
         return self._event.is_set()
     def notify_waiters(self) -> None:
@@ -105,9 +106,10 @@ class RequestData(Request):
     def set_data(self, value:List[MODBUS_VALUE_TYPES]) -> None:
         self._data = value
         self.notify_waiters()
-    def get_values(self) -> List[MODBUS_VALUE_TYPES]:
+    def get_values(self) -> List[MODBUS_VALUE_TYPES]|None:
         if len(self.points) != len(self._data):
-            raise ValueError("Number of points and response data does not match")
+            # raise ValueError("Number of points and response data does not match")
+            return None
         return self._data
         
         
@@ -118,7 +120,7 @@ class MicroNabtoConnection:
     
     _client_id:bytes = randint(0,0xffffffff).to_bytes(4, 'big') # Our client ID can be anything.
     _server_id:bytes = b'\x00\x00\x00\x00' # This is our ID optained from the uNabto service on device.
-    _connection_error:MicroNabtoConnectionErrorType|None = None
+    _last_error:MicroNabtoConnectionErrorType|None = None
     _socket:socket.socket|None = None
     _listen_thread_open = False
     _discovered_devices:Dict[str, DeviceInfo] =  {}
@@ -130,9 +132,12 @@ class MicroNabtoConnection:
         self._config_values = config_values if config_values is not None else DEFAULT_CONFIG_VALUES
         self.start_listening()
   
+    @property
     def is_connected(self): return self._connected is not None
-    def get_discovered_devices(self): return self._discovered_devices
-    def get_connection_error(self): return self._connection_error
+    @property
+    def discovered_devices(self): return self._discovered_devices
+    @property
+    def last_error(self): return self._last_error
    
     def start_listening(self) -> bool:
         """If not already listening, start listening for incoming data"""
@@ -165,7 +170,7 @@ class MicroNabtoConnection:
         Returns:
             ModbusDeviceInfo|None: The device info if connected, otherwise None
         """
-        self._connection_error = None
+        self._last_error = None
         self._connected = None
         self._email = email
         
@@ -176,7 +181,7 @@ class MicroNabtoConnection:
             deviceinfo = await self._discover_device(device_id, timeout)
             
         if deviceinfo is None: 
-            self._connection_error = MicroNabtoConnectionErrorType.TIMEOUT 
+            self._last_error = MicroNabtoConnectionErrorType.TIMEOUT 
             return None
         _LOGGER.debug(f"Connecting to device: {deviceinfo.device_id} with address: {deviceinfo.address}")
         request = self._enqueue_connect_request(deviceinfo)
@@ -201,15 +206,17 @@ class MicroNabtoConnection:
         self._socket = None
         socket.close()
  
-    async def request_datapoint_data(self, points: List[ModbusDatapoint]) -> Dict[ModbusDatapointKey, Tuple[ModbusDatapoint, MODBUS_VALUE_TYPES]]:
+    async def request_datapoint_data(self, points: List[ModbusDatapoint]) -> Dict[ModbusDatapointKey, Tuple[ModbusDatapoint, MODBUS_VALUE_TYPES]]|None:
+        """Request the current value of the points. If response failed, returns None"""
         connected = self._connected
-        if connected is None or self._socket is None or not self.is_connected(): return dict()
+        if connected is None or self._socket is None or not self.is_connected: return dict()
         Payload = MicroNabtoPayloadCrypt(MicroNabtoCommandBuilder.build_datapoint_read_command(self._map_points_to_read_args(points)))
         request = self._enqueue_request(points)
         try:
             self._socket.sendto(MicroNabtoPacketBuilder().build_packet(self._client_id, self._server_id, MicroNabtoPacketType.DATA, request.sequence_id, [Payload]), connected.device.address)
             await request.wait_for_response()
             values = request.get_values()
+            if values is None: return None
             return {point.key: (point, value) for point, value in zip(points, values)}
         except Exception as e:
             _LOGGER.error(f"Error requesting datapoint data: {e}")
@@ -217,15 +224,17 @@ class MicroNabtoConnection:
         finally:
             self._dequeue_request(request)
     
-    async def request_setpoint_data(self, points: List[ModbusSetpoint]) -> Dict[ModbusSetpointKey, Tuple[ModbusSetpoint, MODBUS_VALUE_TYPES]]:
+    async def request_setpoint_data(self, points: List[ModbusSetpoint]) -> Dict[ModbusSetpointKey, Tuple[ModbusSetpoint, MODBUS_VALUE_TYPES]]|None:
+        """Request the current value of the points. If response failed, returns None"""
         connected = self._connected
-        if connected is None or self._socket is None or not self.is_connected(): return dict()
+        if connected is None or self._socket is None or not self.is_connected: return dict()
         Payload = MicroNabtoPayloadCrypt(MicroNabtoCommandBuilder.build_setpoint_read_command(self._map_points_to_read_args(points)))
         request = self._enqueue_request(points)
         try:
             self._socket.sendto(MicroNabtoPacketBuilder().build_packet(self._client_id, self._server_id, MicroNabtoPacketType.DATA, request.sequence_id, [Payload]), connected.device.address)
             await request.wait_for_response()
             values = request.get_values()
+            if values is None: return None
             return {point.key: (point, value) for point, value in zip(points, values)}
         except Exception as e:
             _LOGGER.error(f"Error requesting setpoint data: {e}")
@@ -255,10 +264,10 @@ class MicroNabtoConnection:
 
     def _send_connect_request(self, request:RequestConnection) -> bool:
         if self._socket == None: 
-            self._connection_error = MicroNabtoConnectionErrorType.SOCKET_CLOSED
+            self._last_error = MicroNabtoConnectionErrorType.SOCKET_CLOSED
             return False
         if self._listen_thread_open == False: 
-            self._connection_error = MicroNabtoConnectionErrorType.LISTEN_THREAD_CLOSED
+            self._last_error = MicroNabtoConnectionErrorType.LISTEN_THREAD_CLOSED
             return False
         ipx_payload = MicroNabtoPayloadIPX()
         cp_id_payload = MicroNabtoPayloadCP_ID(self._email)
@@ -277,7 +286,7 @@ class MicroNabtoConnection:
 
     def _send_reconnect_request(self) -> bool:
         if self._connected is None: 
-            self._connection_error = MicroNabtoConnectionErrorType.INVALID_ACTION
+            self._last_error = MicroNabtoConnectionErrorType.INVALID_ACTION
             return False
         request = self._enqueue_connect_request(self._connected.device)
         return self._send_connect_request(request)
@@ -315,16 +324,16 @@ class MicroNabtoConnection:
     async def _wait_for_connection(self, deviceinfo:DeviceInfo) -> bool:
         """Wait for connection to be tried"""
         connection_timeout = time.time() + 3
-        while self._connection_error is None and not self._is_connected(deviceinfo.device_id):
+        while self._last_error is None and not self._is_connected(deviceinfo.device_id):
             if time.time() > connection_timeout:
-                self._connection_error = MicroNabtoConnectionErrorType.TIMEOUT
+                self._last_error = MicroNabtoConnectionErrorType.TIMEOUT
             await asyncio.sleep(0.2)
         return self._is_connected(deviceinfo.device_id)
             
     def _receive_thread(self) -> None:
         while self._listen_thread_open:
             self._handle_receive()          
-            if self.is_connected():
+            if self.is_connected:
                 if time.time() - self._last_response > self._config_values.keep_alive_timeout and time.time() - self._last_reconnect > 3:
                     # If we have not received any data for a while, try to reconnect. Limit to every 3 seconds.
                     self._send_reconnect_request()
@@ -377,7 +386,7 @@ class MicroNabtoConnection:
                 self._send_device_info_request(connection_request)
             else:
                 _LOGGER.error("Received unsucessfull response")
-                self._connection_error = MicroNabtoConnectionErrorType.AUTHENTICATION_ERROR
+                self._last_error = MicroNabtoConnectionErrorType.AUTHENTICATION_ERROR
         elif (packet_type == MicroNabtoPacketType.DATA.value): # 0x16
             _LOGGER.debug(f"Data packet: {message[16]}")
             # We only care about data packets with crypt payload. 
@@ -457,10 +466,15 @@ class MicroNabtoConnection:
         else: #if isinstance(point, ModbusSetpoint):
             _LOGGER.debug(f"Is a setpoint response")
             self._parse_setpoint_response(requestdata, response_payload)
-
+        
     def _parse_datapoint_response(self, requestdata:RequestData, response_payload:bytes) -> None:
         response_length = int.from_bytes(response_payload[0:2])
         values = list[MODBUS_VALUE_TYPES]()
+        if len(requestdata.points) != response_length:
+            _LOGGER.warning(f"Datapoint read failed. Requested points: {len(requestdata.points)}, response data: {response_length}")
+            self._last_error = MicroNabtoConnectionErrorType.INVALID_ADDRESS
+            requestdata.set_data(values)
+            return
         for position in range(response_length):
             point = requestdata.points[position]
             payload_slice = response_payload[2+position*2:4+position*2]
@@ -473,6 +487,11 @@ class MicroNabtoConnection:
     def _parse_setpoint_response(self, requestdata:RequestData, response_payload:bytes) -> None:
         response_length = int.from_bytes(response_payload[1:3])
         values = list[MODBUS_VALUE_TYPES]()
+        if len(requestdata.points) != response_length:
+            _LOGGER.warning(f"Setpoint read failed. Requested points: {len(requestdata.points)}, response data: {response_length}")
+            self._last_error = MicroNabtoConnectionErrorType.INVALID_ADDRESS
+            requestdata.set_data(values)
+            return        
         for position in range(response_length):
             point = requestdata.points[position]
             payload_slice = response_payload[3+position*2:5+position*2]

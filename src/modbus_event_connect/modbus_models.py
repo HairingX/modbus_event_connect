@@ -71,37 +71,37 @@ class ModbusPointExtras(TypedDict):
 @dataclass(kw_only=True)
 class ModbusDatapoint:
     key: ModbusDatapointKey
-    extra: Optional[ModbusPointExtras|None] = None
+    extra: Optional[ModbusPointExtras] = None
     #read
     read_address: int
     signed: bool
     """indication of the data being signed or unsigned (default=True)"""
-    divider: Optional[int|None] = None
+    divider: int = 1
     """Applied to the register value in the order: 1: divider, 2: offset, 3: modifier"""
-    offset: Optional[int|None] = None
+    offset: int = 0
     """Applied to the register value in the order: 1: divider, 2: offset, 3: modifier"""
-    read_modifier: Optional[Callable[[float|int], float|int]|None] = None
+    read_modifier: Optional[Callable[[float|int], float|int]] = None
     """Modifier applied to value after it has been parsed by the system. can be used to alter hours to days etc. or round floating values
     Applied to the register value in the order: 1: divider, 2: offset, 3: modifier"""
-    read_obj: Optional[int|None] = None
+    read_obj: int = 0
     """default is 0"""
 
 @dataclass(kw_only=True)
 class ModbusSetpoint:
     key: ModbusSetpointKey
-    extra: Optional[ModbusPointExtras|None] = None
+    extra: Optional[ModbusPointExtras] = None
     #read
-    read_address: Optional[int|None] = None
+    read_address: Optional[int] = None
     signed: bool
     """indication of the data being signed or unsigned (default=True)"""
-    divider: Optional[int|None] = None
+    divider: int = 1
     """Applied to the register value in the order: 1: divider, 2: offset, 3: modifier"""
-    offset: Optional[int|None] = None
+    offset: int = 0
     """Applied to the register value in the order: 1: divider, 2: offset, 3: modifier"""
-    read_modifier: Optional[Callable[[float|int], float|int]|None] = None
+    read_modifier: Optional[Callable[[float|int], float|int]] = None
     """Modifier applied to value after it has been parsed by the system. can be used to alter hours to days etc. or round floating values
     Applied to the register value in the order: 1: divider, 2: offset, 3: modifier"""
-    read_obj: Optional[int|None] = None
+    read_obj: int = 0
     """default is 0"""
     #write
     max: int
@@ -109,11 +109,11 @@ class ModbusSetpoint:
     min: int
     """min value in the register"""
     write_address: int|None = None
-    step: Optional[int|None] = None
+    step: Optional[int] = None
     """step size in register value, if unset will default to the divider"""
-    write_modifier: Optional[Callable[[float|int], float|int]|None] = None
+    write_modifier: Optional[Callable[[float|int], float|int]] = None
     """Modifier applied to value before it has been parsed back to register type. can be used to alter hours to days etc. or round floating values"""
-    write_obj: Optional[int|None] = None
+    write_obj: int = 0
     """default is 0"""
 
     
@@ -193,6 +193,8 @@ class ModbusDeviceInfo:
     device_port: int
     version: VersionInfo
     identification: ModbusDeviceIdenfication|None
+    manufacturer:str = ""
+    model_name:str = ""
     
 MODBUS_POINT_TYPE = TypeVar("MODBUS_POINT_TYPE", ModbusDatapoint, ModbusSetpoint)
 
@@ -268,10 +270,10 @@ class ModbusDevice(ABC):
     def provides(self, key: ModbusPointKey) -> bool:
         raise NotImplementedError("Method not implemented")
     @abstractmethod
-    def set_read(self, key: ModbusPointKey, read: bool) -> bool:
+    def set_read(self, key: ModbusPointKey, read: bool, *, force: bool=False) -> bool:
         raise NotImplementedError("Method not implemented")
     @abstractmethod
-    def set_values(self, kv: List[Tuple[ModbusPointKey, MODBUS_VALUE_TYPES]]) -> Dict[ModbusPointKey, Tuple[MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None]]:
+    def set_values(self, kv: List[Tuple[ModbusPointKey, MODBUS_VALUE_TYPES|None]]) -> Dict[ModbusPointKey, Tuple[MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None]]:
         """Sets the values for the keys and returns a list with the old and new values"""
         raise NotImplementedError("Method not implemented")
 
@@ -280,9 +282,9 @@ class ModbusDeviceBase(ModbusDevice):
     """Datapoints for the device. Must be assigned in the __init__ method"""
     _attr_default_extras = dict[ModbusPointKey, ModbusPointExtras]()
     """Default extras for the device. Can be assigned in the __init__ method"""
-    _attr_manufacturer:str = ""
+    _attr_manufacturer:str
     """Manufacturer of the device. Must be assigned in the __init__ method"""
-    _attr_model_name:str = ""
+    _attr_model_name:str
     """Model name of the device. Must be assigned in the __init__ method"""
     _attr_version_keys: VersionInfoKeys 
     """Keys used to get the version info"""
@@ -315,6 +317,9 @@ class ModbusDeviceBase(ModbusDevice):
         if not hasattr(self, '_attr_version_keys'):
             raise ValueError("Version keys not set")
         
+        self._device_info.manufacturer = self._attr_manufacturer
+        self._device_info.model_name = self._attr_model_name
+        
         for point in self._attr_datapoints:
             point.extra = point.extra or self._attr_default_extras.get(point.key)
         self._datapoints = {point.key: ModbusDatapointData(point) for point in self._attr_datapoints}
@@ -324,6 +329,7 @@ class ModbusDeviceBase(ModbusDevice):
         self._setpoints = {point.key: ModbusSetpointData(point) for point in self._attr_setpoints}
         
         self._version_point_keys = self._attr_version_keys.to_set()
+        self._ready = True
     
     def get_datapoint(self, key: ModbusDatapointKey) -> ModbusDatapoint | None:
         data = self._datapoints.get(key)
@@ -411,28 +417,34 @@ class ModbusDeviceBase(ModbusDevice):
             return key in self._setpoints
         return False
 
-    def set_read(self, key: ModbusPointKey, read: bool) -> bool:
+    def set_read(self, key: ModbusPointKey, read: bool, *, force: bool=False) -> bool:
         """
         Sets the read state for the point. Returns the new read state.
-        If the device sets the always_read to True in the configuration for the key, the read state can never be set to False.
+        
+        Args:
+            key: The key of the datapoint or setpoint to set the read state for.
+            read: The new read state.
+            force: If the read state should be forced to the new state, even if the point is set to always read.
         """
         if isinstance(key, ModbusDatapointKey):
             pointdata = self._datapoints.get(key)
             if pointdata is not None:
-                pointdata.read = read or bool(pointdata.read_flags & (Read.ALWAYS))
+                if force: pointdata.read = read
+                else: pointdata.read = read or bool(pointdata.read_flags & (Read.ALWAYS))
                 #if point is only having value when requested, and read is set to False, then clear the value
                 if not pointdata.read and bool(pointdata.read_flags == Read.REQUESTED): pointdata.value = None
             return True
         elif isinstance(key, ModbusSetpointKey):
             pointdata = self._setpoints.get(key)
             if pointdata is not None and pointdata.point.read_address is not None:
-                pointdata.read = read or bool(pointdata.read_flags & (Read.ALWAYS))
+                if force: pointdata.read = read
+                else: pointdata.read = read or bool(pointdata.read_flags & (Read.ALWAYS))
                 #if point is only having value when requested, and read is set to False, then clear the value
                 if not pointdata.read and bool(pointdata.read_flags == Read.REQUESTED): pointdata.value = None
                 return True
         return False
     
-    def _set_value(self, key: ModbusPointKey, value: MODBUS_VALUE_TYPES) -> Tuple[MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None]:
+    def _set_value(self, key: ModbusPointKey, value: MODBUS_VALUE_TYPES|None) -> Tuple[MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None]:
         old_value:MODBUS_VALUE_TYPES|None = None
         assigned_value:MODBUS_VALUE_TYPES|None = None
         if isinstance(key, ModbusDatapointKey):
@@ -446,7 +458,7 @@ class ModbusDeviceBase(ModbusDevice):
                 assigned_value = data.value = value
         return (old_value, assigned_value)
     
-    def set_values(self, kv: List[Tuple[ModbusPointKey, MODBUS_VALUE_TYPES]]) -> Dict[ModbusPointKey, Tuple[MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None]]:
+    def set_values(self, kv: List[Tuple[ModbusPointKey, MODBUS_VALUE_TYPES|None]]) -> Dict[ModbusPointKey, Tuple[MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None]]:
         result = dict[ModbusPointKey, Tuple[MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None]]()
         for key, value in kv:
             old_value, new_value = self._set_value(key, value)
@@ -535,28 +547,28 @@ class ModbusParser:
 
     @staticmethod
     def get_point_divider(point:ModbusDatapoint|ModbusSetpoint) -> int: 
-        return 1 if point.divider is None else point.divider
+        return point.divider
     @staticmethod
     def get_point_offset(point:ModbusDatapoint|ModbusSetpoint) -> int: 
-        return 0 if point.offset is None else point.offset
+        return point.offset
     @staticmethod
     def get_point_read_address(point:ModbusDatapoint|ModbusSetpoint) -> int|None: 
         return point.read_address
     @staticmethod
     def get_point_read_obj(point:ModbusDatapoint|ModbusSetpoint) -> int: 
-        return 0 if point.read_obj is None else point.read_obj
+        return point.read_obj
     @staticmethod
     def get_point_write_address(point:ModbusSetpoint) -> int|None: 
         return point.write_address
     @staticmethod
     def get_point_write_obj(point:ModbusSetpoint) -> int: 
-        return 0 if point.write_obj is None else point.write_obj
+        return point.write_obj
     @staticmethod
     def get_point_signed(point:ModbusDatapoint|ModbusSetpoint) -> bool: 
         return point.signed
     @staticmethod
     def get_point_step(point:ModbusSetpoint) -> int: 
-        return 1 if point.step is None else point.step
+        return point.divider if point.step is None else point.step
     @staticmethod
     def get_point_max(point:ModbusSetpoint) -> int: 
         return point.max

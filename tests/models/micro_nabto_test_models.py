@@ -8,6 +8,7 @@ _LOGGER = logging.getLogger(__name__)
 class ModbusTestDatapointKey(ModbusDatapointKey):
     MAJOR_VERSION = auto()
     TEMPERATURE = auto()
+    INVALID = auto()
     
 class ModbusTestDevice(ModbusDeviceBase):
     def __init__(self, device_info: ModbusDeviceInfo):
@@ -19,6 +20,7 @@ class ModbusTestDevice(ModbusDeviceBase):
         self._attr_datapoints = [
             ModbusDatapoint(key=ModbusTestDatapointKey.MAJOR_VERSION, read_address=1, divider=1, signed=True),
             ModbusDatapoint(key=ModbusTestDatapointKey.TEMPERATURE, read_address=27, divider=10, signed=True),
+            ModbusDatapoint(key=ModbusTestDatapointKey.INVALID, read_address=9191, divider=1, signed=True),
         ]
         self._attr_setpoints = []
 

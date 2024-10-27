@@ -1,4 +1,4 @@
-from enum import Enum
+from enum import IntEnum
 import logging
 from typing import Generator, Sequence, TypeVar
 from pyModbusTCP.client import ModbusClient # type: ignore
@@ -14,7 +14,7 @@ UNIT_ID = 1
 AUTO_OPEN = True
 AUTO_CLOSE = False
 
-class ModbusTCPErrorCode(Enum):
+class ModbusTCPErrorCode(IntEnum):
     NO_ERROR = 0
     NAME_RESOLVE = 1
     CONNECT_FAILED = 2
@@ -54,7 +54,7 @@ class ModbusTCPErrorType(StrEnum):
     #local errors
     UNSUPPORTED_MODEL = "unsupported_model"
 
-class ModbusExceptCode(Enum):
+class ModbusExceptCode(IntEnum):
     EXP_NONE = 0x00
     EXP_ILLEGAL_FUNCTION = 0x01
     EXP_DATA_ADDRESS = 0x02
@@ -71,8 +71,10 @@ class ModbusTCPEventConnect(ModbusEventConnect):
     
     _client: ModbusClient|None = None# ModbusClient(host="", port=0, unit_id=0, auto_open=False, auto_close=False)
     
+    @property
     def is_connected(self) -> bool: return self._client is not None and self._client.is_open and self._attr_adapter.ready
-    def get_connection_error(self) -> str|None: 
+    @property
+    def last_error(self) -> str|None: 
         if self._client is None: return None
         if int(self._client.last_error) == ModbusTCPErrorCode.NO_ERROR: return None # type: ignore
         if int(self._client.last_error) == ModbusTCPErrorCode.EXCEPT_ERROR: return self._client.last_except_as_txt # type: ignore
@@ -119,26 +121,72 @@ class ModbusTCPEventConnect(ModbusEventConnect):
         if self._client is not None:
             self._client.close()
         
-    async def _request_datapoint_data(self, points: List[ModbusDatapoint]) -> List[Tuple[ModbusDatapoint, MODBUS_VALUE_TYPES]]:
-        kv:List[Tuple[ModbusDatapoint, MODBUS_VALUE_TYPES]] = []
+    async def _request_datapoint_data(self, points: List[ModbusDatapoint]) -> List[Tuple[ModbusDatapoint, MODBUS_VALUE_TYPES|None]]:
+        kv:List[Tuple[ModbusDatapoint, MODBUS_VALUE_TYPES|None]] = []
+        if self._client is None: return kv
         for batch in self.batch_reads(points):
             data: List[int] | None = self._client.read_input_registers(batch[0].read_address, len(batch))  # type: ignore
-            if data is None:
-                _LOGGER.error(f"Failed to read data for {batch[0].read_address}-{batch[-1].read_address}")
-                continue
-            for i, value in enumerate(data):
-                kv.append((batch[i], value))
+            if data is not None:
+                for i, value in enumerate(data):
+                    kv.append((batch[i], value))
+            else:
+                last_error: int|None = self._client.last_error # type: ignore
+                if last_error == ModbusTCPErrorCode.EXCEPT_ERROR: 
+                    last_except: int|None = self._client.last_except # type: ignore
+                    if last_except == ModbusExceptCode.EXP_ILLEGAL_FUNCTION:
+                        _LOGGER.error(f"Device does not support reading datapoints registers, inform developer that the device '{self.device_info}' has this error")
+                    if last_except == ModbusExceptCode.EXP_DATA_ADDRESS:
+                        if len(points) == 1:
+                            point = points[0]
+                            kv.append((points[0], None))
+                            self._handle_invalid_address(point)
+                        else:
+                            _LOGGER.warning(f"Device failed to read {len(points)} datapoints. Some datapoints may not be available. Checking each datapoint individually.")
+                            for point in points:
+                                data = self._client.read_input_registers(point.read_address, 1)  # type: ignore
+                                if data is not None:
+                                    kv.append((point, data[0]))
+                                elif self._client.last_error == ModbusTCPErrorCode.EXCEPT_ERROR and self._client.last_except == ModbusExceptCode.EXP_DATA_ADDRESS: # type: ignore
+                                    kv.append((point, None))
+                                    self._handle_invalid_address(point)
+                    else: 
+                        _LOGGER.error(f"Failed to read data for {[point.key for point in points]}")
+                else: 
+                    _LOGGER.error(f"Failed to read data for {[point.key for point in points]}")
         return kv
     
-    async def _request_setpoint_data(self, points: List[ModbusSetpoint]) -> List[Tuple[ModbusSetpoint, MODBUS_VALUE_TYPES]]:
-        kv:List[Tuple[ModbusSetpoint, MODBUS_VALUE_TYPES]] = []
+    async def _request_setpoint_data(self, points: List[ModbusSetpoint]) -> List[Tuple[ModbusSetpoint, MODBUS_VALUE_TYPES|None]]:
+        kv:List[Tuple[ModbusSetpoint, MODBUS_VALUE_TYPES|None]] = []
         for batch in self.batch_reads(points):
             data:List[int]|None = self._client.read_holding_registers(batch[0].read_address, len(batch)) # type: ignore
-            if data is None: 
+            if data is not None:
+                for i, value in enumerate(data):
+                    kv.append((batch[i], value))
+            else:
                 _LOGGER.error(f"Failed to read data for {batch[0].read_address}-{batch[-1].read_address}")
-                continue
-            for i, value in enumerate(data):
-                kv.append((batch[i], value))
+                last_error: int|None = self._client.last_error # type: ignore
+                if last_error == ModbusTCPErrorCode.EXCEPT_ERROR: 
+                    last_except: int|None = self._client.last_except # type: ignore
+                    if last_except == ModbusExceptCode.EXP_ILLEGAL_FUNCTION:
+                        _LOGGER.error(f"Device does not support reading setpoints registers, inform developer that the device '{self.device_info}' has this error")
+                    if last_except == ModbusExceptCode.EXP_DATA_ADDRESS:
+                        if len(points) == 1:
+                            point = points[0]
+                            kv.append((points[0], None))
+                            self._handle_invalid_address(point)
+                        else:
+                            _LOGGER.warning(f"Device failed to read {len(points)} setpoints. Some setpoints may not be available. Checking each setpoint individually.")
+                            for point in points:
+                                data = self._client.read_input_registers(point.read_address, 1)  # type: ignore
+                                if data is not None:
+                                    kv.append((point, data[0]))
+                                elif self._client.last_error == ModbusTCPErrorCode.EXCEPT_ERROR and self._client.last_except == ModbusExceptCode.EXP_DATA_ADDRESS: # type: ignore
+                                    kv.append((point, None))
+                                    self._handle_invalid_address(point)
+                    else: 
+                        _LOGGER.error(f"Failed to read data for {[point.key for point in points]}")
+                else: 
+                    _LOGGER.error(f"Failed to read data for {[point.key for point in points]}")
         return kv    
     
     DATAPOINT_TYPE = TypeVar('DATAPOINT_TYPE', bound=ModbusDatapoint|ModbusSetpoint)
