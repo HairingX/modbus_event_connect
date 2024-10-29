@@ -1,6 +1,6 @@
 from enum import IntEnum
 import logging
-from typing import Generator, Sequence, TypeVar
+from typing import Generator, Sequence
 from pyModbusTCP.client import ModbusClient # type: ignore
 
 from ..modbus_event_connect import *
@@ -13,7 +13,7 @@ CONNECT_TIMEOUT = 10
 UNIT_ID = 1
 AUTO_OPEN = True
 AUTO_CLOSE = False
-
+REQUEST_LENGTH_MAX = 125
 class ModbusTCPErrorCode(IntEnum):
     NO_ERROR = 0
     NAME_RESOLVE = 1
@@ -125,10 +125,12 @@ class ModbusTCPEventConnect(ModbusEventConnect):
         kv:List[Tuple[ModbusDatapoint, MODBUS_VALUE_TYPES|None]] = []
         if self._client is None: return kv
         for batch in self.batch_reads(points):
-            data: List[int] | None = self._client.read_input_registers(batch[0].read_address, len(batch))  # type: ignore
+            last = batch[-1]
+            first = batch[0]
+            read_length = last.read_address+last.read_length - first.read_address
+            data: List[int] | None = self._client.read_input_registers(batch[0].read_address, read_length)  # type: ignore
             if data is not None:
-                for i, value in enumerate(data):
-                    kv.append((batch[i], value))
+                self._append_data(kv, batch, data)
             else:
                 last_error: int|None = self._client.last_error # type: ignore
                 if last_error == ModbusTCPErrorCode.EXCEPT_ERROR: 
@@ -145,7 +147,7 @@ class ModbusTCPEventConnect(ModbusEventConnect):
                             for point in points:
                                 data = self._client.read_input_registers(point.read_address, 1)  # type: ignore
                                 if data is not None:
-                                    kv.append((point, data[0]))
+                                    self._append_data(kv, [point], data)
                                 elif self._client.last_error == ModbusTCPErrorCode.EXCEPT_ERROR and self._client.last_except == ModbusExceptCode.EXP_DATA_ADDRESS: # type: ignore
                                     kv.append((point, None))
                                     self._handle_invalid_address(point)
@@ -158,10 +160,13 @@ class ModbusTCPEventConnect(ModbusEventConnect):
     async def _request_setpoint_data(self, points: List[ModbusSetpoint]) -> List[Tuple[ModbusSetpoint, MODBUS_VALUE_TYPES|None]]:
         kv:List[Tuple[ModbusSetpoint, MODBUS_VALUE_TYPES|None]] = []
         for batch in self.batch_reads(points):
-            data:List[int]|None = self._client.read_holding_registers(batch[0].read_address, len(batch)) # type: ignore
+            last = batch[-1]
+            first = batch[0]
+            if last.read_address is None or first.read_address is None: continue # never true, just to make typecheck happy
+            read_length = last.read_address+last.read_length - first.read_address
+            data:List[int]|None = self._client.read_holding_registers(batch[0].read_address, read_length) # type: ignore
             if data is not None:
-                for i, value in enumerate(data):
-                    kv.append((batch[i], value))
+                self._append_data(kv, batch, data)
             else:
                 _LOGGER.error(f"Failed to read data for {batch[0].read_address}-{batch[-1].read_address}")
                 last_error: int|None = self._client.last_error # type: ignore
@@ -179,7 +184,7 @@ class ModbusTCPEventConnect(ModbusEventConnect):
                             for point in points:
                                 data = self._client.read_input_registers(point.read_address, 1)  # type: ignore
                                 if data is not None:
-                                    kv.append((point, data[0]))
+                                    self._append_data(kv, [point], data)
                                 elif self._client.last_error == ModbusTCPErrorCode.EXCEPT_ERROR and self._client.last_except == ModbusExceptCode.EXP_DATA_ADDRESS: # type: ignore
                                     kv.append((point, None))
                                     self._handle_invalid_address(point)
@@ -189,8 +194,23 @@ class ModbusTCPEventConnect(ModbusEventConnect):
                     _LOGGER.error(f"Failed to read data for {[point.key for point in points]}")
         return kv    
     
-    DATAPOINT_TYPE = TypeVar('DATAPOINT_TYPE', bound=ModbusDatapoint|ModbusSetpoint)
-    def batch_reads(self, points:Sequence[DATAPOINT_TYPE]) -> Generator[List[DATAPOINT_TYPE], None, None]:
+    def _append_data(self, kv: List[Tuple[MODBUS_POINT_TYPE, MODBUS_VALUE_TYPES|None]], points: List[MODBUS_POINT_TYPE], data: List[int]) -> None:
+        i = 0
+        for point in points:
+            values = data[i:i+point.read_length]
+            value = self._parse_point_read_value(point, values)
+            kv.append((point, value))
+            i+= point.read_length
+    
+    def _parse_point_read_value(self, point: ModbusDatapoint|ModbusSetpoint, values: List[int]) -> MODBUS_VALUE_TYPES|None:
+        """
+        Parse the read value to the correct value type. 
+        The values are the raw values from the register read, each item is a register address.
+        A value can be a single value or a list of values, depending on the number of addresses the point value is stored in.
+        """
+        return ModbusParser.parse_value(values, point)
+    
+    def batch_reads(self, points:Sequence[MODBUS_POINT_TYPE]) -> Generator[List[MODBUS_POINT_TYPE], None, None]:
         """
         Returns the points to read in batches, where the read_address values are in sequence. 
         If the sequence is broken, a new batch is started
@@ -202,8 +222,8 @@ class ModbusTCPEventConnect(ModbusEventConnect):
                 continue
             elif len(batch) == 0:
                 batch.append(point)
-            elif batch[-1].read_address is None: continue # just here to stop the compiler from complaining, never true.
-            elif batch[-1].read_address + 1 == point.read_address:
+            elif (batch[-1].read_address is not None and batch[0].read_address is not None and # they are never none.
+                  batch[-1].read_address + 1 == point.read_address and ( point.read_address + point.read_length - batch[0].read_address) <= REQUEST_LENGTH_MAX):
                 batch.append(point)
             else:
                 yield batch

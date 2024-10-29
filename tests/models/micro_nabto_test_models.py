@@ -18,7 +18,7 @@ class ModbusTestDevice(ModbusDeviceBase):
         self._attr_model_name="TEST"
         self._attr_version_keys = VersionInfoKeys(datapoint_major=ModbusTestDatapointKey.MAJOR_VERSION)
         self._attr_datapoints = [
-            ModbusDatapoint(key=ModbusTestDatapointKey.MAJOR_VERSION, read_address=1, divider=1, signed=True),
+            ModbusDatapoint(key=ModbusTestDatapointKey.MAJOR_VERSION, read_address=1, divider=1, signed=False),
             ModbusDatapoint(key=ModbusTestDatapointKey.TEMPERATURE, read_address=27, divider=10, signed=True),
             ModbusDatapoint(key=ModbusTestDatapointKey.INVALID, read_address=9191, divider=1, signed=True),
         ]

@@ -97,5 +97,5 @@ class ModbusEventConnect(ABC):
                 subscriber(key, old_value, new_value)
                 
     def _handle_invalid_address(self, point: ModbusDatapoint|ModbusSetpoint) -> None:
-        _LOGGER.error(f"Failed to read data for '{point.key}', the address '{point.read_obj}:{point.read_address}' is not available. Inform developer that the device '{self.device_info}' has this error.")
+        _LOGGER.error(f"Failed to read data for '{point.key}', the address '{point.read_obj}:{point.read_address}{None if point.read_length == 1 or point.read_address is None else f'-{point.read_address+point.read_length}'}' is not available. Inform developer that the device '{self.device_info}' has this error.")
         self._attr_adapter.set_read(point.key, False, force=True)
