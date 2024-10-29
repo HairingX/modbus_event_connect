@@ -47,10 +47,19 @@ class ModbusDatapoint:
     read_address: int
     read_length: int = 1
     """Number of registers the point is using. Defaults to 1"""
-    signed: bool
-    """indication of the data being signed or unsigned (positive only)"""
+    signed: bool = False
+    """indication of the data being signed or unsigned (positive only). Defaults to False"""
     divider: int = 1
     """Applied to the register value in the order: 1: divider, 2: offset, 3: modifier"""
+    max: int = 0
+    """
+    max value in the register. If the value is greater than this, it will be seen as invalid. 
+    Defaults to read_length * 16bit (signed max value).
+    
+    If set to -1, the value will be set to (read_length * 2^16) - 1. the max value for the value will be seen as invalid.
+    """
+    min: int = 0
+    """min value in the register. If the value is less than this, it will be seen as invalid."""
     offset: int = 0
     """Applied to the register value in the order: 1: divider, 2: offset, 3: modifier"""
     read_modifier: Optional[Callable[[float|int], float|int]] = None
@@ -58,7 +67,7 @@ class ModbusDatapoint:
     Applied to the register value in the order: 1: divider, 2: offset, 3: modifier"""
     read_obj: int = 0
     """default is 0"""
-    value_type: str = ModbusValueType.INT
+    value_type: str = ModbusValueType.AUTO
     """The type of value the point is using"""
 
 @dataclass(kw_only=True)
@@ -69,10 +78,19 @@ class ModbusSetpoint:
     read_address: Optional[int] = None
     read_length: int = 1
     """Number of registers the point is using. Defaults to 1"""
-    signed: bool
-    """indication of the data being signed or unsigned (positive only)"""
+    signed: bool = False
+    """indication of the data being signed or unsigned (positive only). Defaults to False"""
     divider: int = 1
     """Applied to the register value in the order: 1: divider, 2: offset, 3: modifier"""
+    max: int = 0
+    """
+    max value in the register. If the value is greater than this, it will be seen as invalid. 
+    Defaults to read_length * 16bit (signed max value).
+    
+    If set to -1, the value will be set to (read_length * 2^16) - 1. the max value for the value will be seen as invalid.
+    """
+    min: int = 0
+    """min value in the register. If the value is less than this, it will be seen as invalid"""
     offset: int = 0
     """Applied to the register value in the order: 1: divider, 2: offset, 3: modifier"""
     read_modifier: Optional[Callable[[float|int], float|int]] = None
@@ -81,11 +99,7 @@ class ModbusSetpoint:
     read_obj: int = 0
     """default is 0"""
     #write
-    max: int = 0
-    """max value in the register"""
-    min: int = 0
-    """min value in the register"""
-    value_type: str = ModbusValueType.INT
+    value_type: str = ModbusValueType.AUTO
     """The type of value the point is using"""
     write_address: int|None = None
     write_length: int = 1
@@ -309,22 +323,22 @@ class ModbusDeviceBase(ModbusDevice):
         if not hasattr(self, '_attr_version_keys'):
             raise ValueError("Version keys not set")
         
-        for point in self._attr_datapoints:
+        #check for shared errors in the datapoints and setpoints
+        for point in self._attr_datapoints + self._attr_setpoints:
             if point.read_length < 1: raise ValueError(f"Setpoint {point.key} has a read_length less than 1")
-           
+            if point.max == 0: point.max = point.read_length * 2^16
+            if point.max == -1: point.max = point.read_length * 2^16 - 1
+            if point.max < 0: raise ValueError(f"Setpoint {point.key} has an invalid negative max value")
+            if point.min > point.max: raise ValueError(f"Setpoint {point.key} has min value greater than max value")
+        
+        #check for errors in the setpoints
         for point in self._attr_setpoints:
             if point.read_address is None and point.write_address is None:
                 raise ValueError(f"Setpoint {point.key} has no read_address or write_address")
-            if point.write_address is not None:
-                if point.min < 0: raise ValueError(f"Setpoint {point.key} has a negative min value")
-                if point.max < 0: raise ValueError(f"Setpoint {point.key} has a negative max value")
-                if point.min == 0 and point.max == 0: raise ValueError(f"Setpoint {point.key} has no valid min-max value")
-                if point.min > point.max: raise ValueError(f"Setpoint {point.key} has min value greater than max value")
             if point.read_modifier is not None and point.read_address is None:
                 raise ValueError(f"Setpoint {point.key} has a read_modifier but no read_address")
             if point.write_modifier is not None and point.write_address is None:
                 raise ValueError(f"Setpoint {point.key} has a write_modifier but no write_address")
-            if point.read_length < 1: raise ValueError(f"Setpoint {point.key} has a read_length less than 1")
             if point.write_length < 1: raise ValueError(f"Setpoint {point.key} has a write_length less than 1")
          
         self._device_info.manufacturer = self._attr_manufacturer
@@ -520,7 +534,7 @@ class ModbusDeviceBase(ModbusDevice):
         """
         pass 
         
-class MODIFIER:
+class Modifier:
     @staticmethod
     def flip_bool(value:float|int) -> float|int:
         """Flips the true/false state 
@@ -561,14 +575,34 @@ class ModbusParser:
     
     @staticmethod
     def parse_value(values: List[int], point: ModbusDatapoint|ModbusSetpoint) -> float|int|str|None:
+        if point.value_type == ModbusValueType.AUTO:
+            if point.divider == 1:
+                return ModbusParser.parse_int(values, point)
+            return ModbusParser.parse_float(values, point)
+        if point.value_type == ModbusValueType.INT:
+            return ModbusParser.parse_int(values, point)
         if point.value_type == ModbusValueType.UTF8 or point.value_type == ModbusValueType.ASCII:
             return ModbusParser.parse_str(values, point.value_type)
-        if point.value_type == ModbusValueType.FLOAT or (
-            point.value_type == ModbusValueType.INT and point.divider > 1):
-            return ModbusParser.parse_float(values, point.signed)
-        if point.value_type == ModbusValueType.INT:
-            return ModbusParser.parse_int(values)
+        if point.value_type == ModbusValueType.FLOAT:
+            return ModbusParser.parse_float(values, point)
         return None
+
+    @staticmethod
+    def parse_float(values: List[int], point: ModbusDatapoint|ModbusSetpoint) -> float:
+        return ModbusParser.parse_int(values, point) / point.divider
+
+    @staticmethod
+    def parse_int(values: List[int], point: ModbusDatapoint|ModbusSetpoint) -> int:
+        # Combine the list of 16-bit integers into a single integer
+        result = reduce(lambda acc, val: (acc << 16) | val, values, 0)
+        if point.signed:
+            # Calculate the total number of bits
+            total_bits = 16 * len(values)
+            # Check if the sign bit is set
+            if result & (1 << (total_bits - 1)):
+                # Adjust for signed value
+                result -= 1 << total_bits
+        return result
     
     @staticmethod
     def parse_str(values: List[int], encoding: str) -> str:
@@ -576,25 +610,6 @@ class ModbusParser:
         byte_array = b''.join(value.to_bytes(2, byteorder='big') for value in values)
         # Decode the byte array as a UTF-8 string and strip null bytes
         return byte_array.decode(encoding, errors='replace').rstrip(NONE_BYTE)
-
-    @staticmethod
-    def parse_int(values: List[int], signed: bool = False) -> int:
-        # Combine the list of 16-bit integers into a single integer
-        result = reduce(lambda acc, val: (acc << 16) | val, values, 0)
-        
-        if signed:
-            # Calculate the total number of bits
-            total_bits = 16 * len(values)
-            # Check if the sign bit is set
-            if result & (1 << (total_bits - 1)):
-                # Adjust for signed value
-                result -= 1 << total_bits
-        
-        return result
-
-    @staticmethod
-    def parse_float(values: List[int], divider: int) -> float:
-        return ModbusParser.parse_int(values, signed=True) / divider
     
     @staticmethod
     def get_point_divider(point:ModbusDatapoint|ModbusSetpoint) -> int: 
@@ -621,10 +636,10 @@ class ModbusParser:
     def get_point_step(point:ModbusSetpoint) -> int: 
         return point.divider if point.step is None else point.step
     @staticmethod
-    def get_point_max(point:ModbusSetpoint) -> int: 
+    def get_point_max(point:ModbusDatapoint|ModbusSetpoint) -> int: 
         return point.max
     @staticmethod
-    def get_point_min(point:ModbusSetpoint) -> int: 
+    def get_point_min(point:ModbusDatapoint|ModbusSetpoint) -> int: 
         return point.min
     @staticmethod
     def get_point_read_modifier(point:ModbusDatapoint|ModbusSetpoint) -> Callable[[float|int], float|int]|None: 

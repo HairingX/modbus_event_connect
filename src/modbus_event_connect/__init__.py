@@ -1,26 +1,33 @@
 from .modbus_event_connect import ( ModbusEventConnect )
 from .modbus_deviceadapter import ( ModbusDeviceAdapter )
 from .modbus_models import ( 
-        MODBUS_VALUE_TYPES,
         ModbusDatapoint, 
+        ModbusDatapointData,
         ModbusDatapointKey, 
         ModbusDevice, 
         ModbusDeviceBase, 
+        ModbusDeviceIdenfication,
         ModbusDeviceInfo,
         ModbusParser,
         ModbusPointKey, 
         ModbusSetpoint, 
+        ModbusSetpointData,
         ModbusSetpointKey, 
         ModbusValueType,
-        MODIFIER,
-        Read,
-        UOM,
+        Modifier,
         VersionInfo,
         VersionInfoKeys,
         )
 from .micro_nabto.micro_nabto_connection import ( MicroNabtoModbusDeviceInfo )
 from .micro_nabto.micro_nabto_event_connect import ( MicroNabtoEventConnect )
 from .modbus_tcp.modbus_tcp_event_connect import ( ModbusTCPEventConnect )
+from .constants import ( 
+        MODBUS_VALUE_TYPES, 
+        ModbusValueType,
+        Read,
+        UOM, 
+        ValueLimits, 
+        )
 
 __version__ = "0.1.6"
 __all__ = [
@@ -28,21 +35,26 @@ __all__ = [
     "MicroNabtoModbusDeviceInfo",
     "MODBUS_VALUE_TYPES",
     "ModbusDatapoint",
+    "ModbusDatapointData",
     "ModbusDatapointKey",
     "ModbusDevice",
     "ModbusDeviceAdapter",
     "ModbusDeviceBase",
+    "ModbusDeviceIdenfication",
     "ModbusDeviceInfo",
     "ModbusEventConnect",
+    "ModbusValueType",
     "ModbusParser",
     "ModbusPointKey",
     "ModbusSetpoint",
+    "ModbusSetpointData",
     "ModbusSetpointKey",
     "ModbusTCPEventConnect",
     "ModbusValueType",
-    "MODIFIER",
+    "Modifier",
     "Read",
     "UOM",
+    "ValueLimits",
     "VersionInfo",
     "VersionInfoKeys",
 ]

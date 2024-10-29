@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 
 from credentials import Credentials
 
-from src.modbus_event_connect.constants import VALUE_UNSIGNED_2BYTES_MAX
+from src.modbus_event_connect.constants import ValueLimits
 from src.modbus_event_connect import MODBUS_VALUE_TYPES, ModbusPointKey
 from models.modbus_tcp_test_models import ModbusTestDatapointKey, ModbusTestSetpointKey, ModbusTestTCP
 import asyncio
@@ -48,7 +48,7 @@ async def test_request_setpoint_value_type_bigint(testdata: TestData):
     value = client.get_value(key)
     assert value is not None
     assert isinstance(value, int)
-    assert value > VALUE_UNSIGNED_2BYTES_MAX, f"Expected value greater than {VALUE_UNSIGNED_2BYTES_MAX}, got {value}"
+    assert value > ValueLimits.INT16_MAX, f"Expected value greater than {ValueLimits.INT16_MAX}, got {value}"
     _LOGGER.debug(f"fromtimestamp(UTC): {datetime.fromtimestamp(value, UTC)}")
     
 async def test_request_setpoint_value_type_int(testdata: TestData):
