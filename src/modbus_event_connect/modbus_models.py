@@ -153,16 +153,22 @@ class ModbusDeviceIdenfication:
 
 @dataclass(kw_only=True)
 class VersionInfo:
-    address_space_major: int = 0
-    """Address space with registers, major version number. Often used for backwards compatible changes"""
-    address_space_minor: int = 0
-    """Address space with registers, minor version number. Often used for backwards compatible changes"""
-    address_patch: int = 0
-    """Address space with registers, patch version number. Often used for bug fixes"""
+    datapoint_major: int = 0
+    """Datapoint address space, major version number. Often used for backwards compatible changes"""
+    datapoint_minor: int = 0
+    """Datapoint address space, minor version number. Often used for backwards compatible changes"""
+    datapoint_patch: int = 0
+    """Datapoint address space, patch version number. Often used for bug fixes"""
     hardware_major: int = 0
     """Hardware version, major version number"""
     hardware_minor: int = 0
     """Hardware version, minor version number"""
+    setpoint_major: int = 0
+    """Setpoint version, major version number. Often used for backwards compatible changes"""
+    setpoint_minor: int = 0
+    """Setpoint version, minor version number. Often used for backwards compatible changes"""
+    setpoint_patch: int = 0
+    """Setpoint version, patch version number. Often used for bug fixes"""
     software_major: int = 0
     """Software version, major version number. Often used for backwards compatible changes"""
     software_minor: int = 0
@@ -172,18 +178,23 @@ class VersionInfo:
 
 @dataclass(kw_only=True)
 class VersionInfoKeys:
-    address_major: ModbusPointKey|None=None
-    address_minor: ModbusPointKey|None=None
-    address_patch: ModbusPointKey|None=None
+    datapoint_major: ModbusPointKey|None=None
+    datapoint_minor: ModbusPointKey|None=None
+    datapoint_patch: ModbusPointKey|None=None
     hardware_major: ModbusPointKey|None=None
     hardware_minor: ModbusPointKey|None=None
+    setpoint_major: ModbusPointKey|None=None
+    setpoint_minor: ModbusPointKey|None=None
+    setpoint_patch: ModbusPointKey|None=None
     software_major: ModbusPointKey|None=None
     software_minor: ModbusPointKey|None=None
     software_patch: ModbusPointKey|None=None
     def to_set(self) -> Set[ModbusPointKey]:
-        return set(key for key in [self.address_major, self.address_minor, self.address_patch, 
+        return set(key for key in [self.datapoint_major, self.datapoint_minor, self.datapoint_patch, 
                                 self.hardware_major, self.hardware_minor, 
-                                self.software_major, self.software_minor, self.software_patch] 
+                                self.setpoint_major, self.setpoint_minor, self.setpoint_patch,
+                                self.software_major, self.software_minor, self.software_patch
+                                ] 
                 if key is not None)
 
 @dataclass(kw_only=True)
@@ -468,17 +479,21 @@ class ModbusDeviceBase(ModbusDevice):
         return result
     
     def _set_version_if_changed(self, valuesset:Dict[ModbusPointKey, Tuple[MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None]]) -> None:
-        address_major = self._extract_version_value(self._attr_version_keys.address_major, valuesset, 0)
-        address_minor = self._extract_version_value(self._attr_version_keys.address_minor, valuesset, 0)
-        address_patch = self._extract_version_value(self._attr_version_keys.address_patch, valuesset, 0)
+        address_major = self._extract_version_value(self._attr_version_keys.datapoint_major, valuesset, 0)
+        address_minor = self._extract_version_value(self._attr_version_keys.datapoint_minor, valuesset, 0)
+        address_patch = self._extract_version_value(self._attr_version_keys.datapoint_patch, valuesset, 0)
         hardware_major = self._extract_version_value(self._attr_version_keys.hardware_major, valuesset, 0)
         hardware_minor = self._extract_version_value(self._attr_version_keys.hardware_minor, valuesset, 0)
+        setpoint_major = self._extract_version_value(self._attr_version_keys.setpoint_major, valuesset, 0)
+        setpoint_minor = self._extract_version_value(self._attr_version_keys.setpoint_minor, valuesset, 0)
+        setpoint_patch = self._extract_version_value(self._attr_version_keys.setpoint_patch, valuesset, 0)
         software_major = self._extract_version_value(self._attr_version_keys.software_major, valuesset, 0)
         software_minor = self._extract_version_value(self._attr_version_keys.software_minor, valuesset, 0)
         software_patch = self._extract_version_value(self._attr_version_keys.software_patch, valuesset, 0)
         
-        new_version = VersionInfo(address_space_major=address_major, address_space_minor=address_minor, address_patch=address_patch, 
+        new_version = VersionInfo(datapoint_major=address_major, datapoint_minor=address_minor, datapoint_patch=address_patch, 
                                   hardware_major=hardware_major, hardware_minor=hardware_minor, 
+                                  setpoint_major=setpoint_major, setpoint_minor=setpoint_minor, setpoint_patch=setpoint_patch,
                                   software_major=software_major, software_minor=software_minor, software_patch=software_patch)
         old_version = self._device_info.version
         if new_version != old_version:
