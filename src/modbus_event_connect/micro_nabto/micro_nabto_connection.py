@@ -1,7 +1,6 @@
 # import contextlib
 import contextlib
 from dataclasses import dataclass
-import sys
 import threading
 import time
 import asyncio
@@ -72,10 +71,9 @@ class Request:
         self.sequence_id = sequence_id
     async def wait_for_response(self, timeout:float = REQUEST_TIMEOUT) -> bool:
         self._loop = asyncio.get_running_loop()
-        if not getattr(sys, 'gettrace', None):
-            with contextlib.suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(self._event.wait(), timeout)
-        else:   await self._event.wait()
+        # await self._event.wait(); _LOGGER.warning("Debugger is active. Waiting for response without timeout")
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(self._event.wait(), timeout)
         self.response_time = time.time()
         return self._event.is_set()
     def notify_waiters(self) -> None:
@@ -87,7 +85,6 @@ class Request:
 class RequestConnection(Request):
     device: DeviceInfo
     _data: MicroNabtoModbusDeviceInfo|None = None
-    points: Sequence[ModbusDatapoint | ModbusSetpoint]
     def __init__(self, sequence_id:int, device:DeviceInfo) -> None:
         super().__init__(sequence_id)
         self.device = device
@@ -98,15 +95,15 @@ class RequestConnection(Request):
         return self._data
         
 class RequestData(Request):
-    _data: List[MODBUS_VALUE_TYPES]
+    _data: List[MODBUS_VALUE_TYPES|None]
     points = []
     def __init__(self, sequence_id:int, points:List[MODBUS_POINT_TYPE]) -> None:
         super().__init__(sequence_id)
         self.points = points
-    def set_data(self, value:List[MODBUS_VALUE_TYPES]) -> None:
+    def set_data(self, value:List[MODBUS_VALUE_TYPES|None]) -> None:
         self._data = value
         self.notify_waiters()
-    def get_values(self) -> List[MODBUS_VALUE_TYPES]|None:
+    def get_values(self) -> List[MODBUS_VALUE_TYPES|None]|None:
         if len(self.points) != len(self._data):
             # raise ValueError("Number of points and response data does not match")
             return None
@@ -206,7 +203,7 @@ class MicroNabtoConnection:
         self._socket = None
         socket.close()
  
-    async def request_datapoint_data(self, points: List[ModbusDatapoint]) -> Dict[ModbusDatapointKey, Tuple[ModbusDatapoint, MODBUS_VALUE_TYPES]]|None:
+    async def request_datapoint_data(self, points: List[ModbusDatapoint]) -> Dict[ModbusDatapointKey, Tuple[ModbusDatapoint, MODBUS_VALUE_TYPES|None]]|None:
         """Request the current value of the points. If response failed, returns None"""
         connected = self._connected
         if connected is None or self._socket is None or not self.is_connected: return dict()
@@ -224,7 +221,7 @@ class MicroNabtoConnection:
         finally:
             self._dequeue_request(request)
     
-    async def request_setpoint_data(self, points: List[ModbusSetpoint]) -> Dict[ModbusSetpointKey, Tuple[ModbusSetpoint, MODBUS_VALUE_TYPES]]|None:
+    async def request_setpoint_data(self, points: List[ModbusSetpoint]) -> Dict[ModbusSetpointKey, Tuple[ModbusSetpoint, MODBUS_VALUE_TYPES|None]]|None:
         """Request the current value of the points. If response failed, returns None"""
         connected = self._connected
         if connected is None or self._socket is None or not self.is_connected: return dict()
@@ -469,7 +466,7 @@ class MicroNabtoConnection:
         
     def _parse_datapoint_response(self, requestdata:RequestData, response_payload:bytes) -> None:
         response_length = int.from_bytes(response_payload[0:2])
-        values = list[MODBUS_VALUE_TYPES]()
+        values = list[MODBUS_VALUE_TYPES|None]()
         if len(requestdata.points) != response_length:
             _LOGGER.warning(f"Datapoint read failed. Requested points: {len(requestdata.points)}, response data: {response_length}")
             self._last_error = MicroNabtoConnectionErrorType.INVALID_ADDRESS
@@ -478,15 +475,18 @@ class MicroNabtoConnection:
         for position in range(response_length):
             point = requestdata.points[position]
             payload_slice = response_payload[2+position*2:4+position*2]
-            signed = ModbusParser.get_point_signed(point)
-            new_value = ModbusParser.parse_from_modbus_value(point=point, value=int.from_bytes(payload_slice, 'big', signed=signed))
-            values.append(new_value)
+            value_array = ModbusParser.bytes_to_values(payload_slice, ModbusParser.get_point_read_length_bytes(point))
+            value = ModbusParser.values_to_value(value_array, point)
+            values.append(value)
+            # signed = ModbusParser.get_point_signed(point)
+            # new_value = ModbusParser.apply_offset_divider_modifier(point=point, value=int.from_bytes(payload_slice, 'big', signed=signed))
+            # values.append(new_value)
             # _LOGGER.debug(f"New Datapoint value set: {valueKey} = {self.values[valueKey]} (old={old_value}), rawVal={int.from_bytes(payload_slice, 'big', signed=signed)}, point={point}")
         requestdata.set_data(values)
      
     def _parse_setpoint_response(self, requestdata:RequestData, response_payload:bytes) -> None:
         response_length = int.from_bytes(response_payload[1:3])
-        values = list[MODBUS_VALUE_TYPES]()
+        values = list[MODBUS_VALUE_TYPES|None]()
         if len(requestdata.points) != response_length:
             _LOGGER.warning(f"Setpoint read failed. Requested points: {len(requestdata.points)}, response data: {response_length}")
             self._last_error = MicroNabtoConnectionErrorType.INVALID_ADDRESS
@@ -495,8 +495,11 @@ class MicroNabtoConnection:
         for position in range(response_length):
             point = requestdata.points[position]
             payload_slice = response_payload[3+position*2:5+position*2]
-            signed = ModbusParser.get_point_signed(point)
-            new_value = ModbusParser.parse_from_modbus_value(point=point, value=int.from_bytes(payload_slice, 'big', signed=signed))
-            values.append(new_value)
+            value_array = ModbusParser.bytes_to_values(payload_slice, ModbusParser.get_point_read_length_bytes(point))
+            value = ModbusParser.values_to_value(value_array, point)
+            values.append(value)
+            # signed = ModbusParser.get_point_signed(point)
+            # new_value = ModbusParser.apply_offset_divider_modifier(point=point, value=int.from_bytes(payload_slice, 'big', signed=signed))
+            # result.append(new_value)
             # _LOGGER.debug(f"New Setpoint value set: {valueKey} = {self.values[valueKey]} (old={old_value}), rawVal={int.from_bytes(payload_slice, 'big', signed=signed)}, point={point}")
         requestdata.set_data(values)

@@ -326,11 +326,14 @@ class ModbusDeviceBase(ModbusDevice):
         #check for shared errors in the datapoints and setpoints
         for point in self._attr_datapoints + self._attr_setpoints:
             if point.read_length < 1: raise ValueError(f"Setpoint {point.key} has a read_length less than 1")
-            if point.max == 0: point.max = point.read_length * 2^16
-            if point.max == -1: point.max = point.read_length * 2^16 - 1
+            if point.max == 0: point.max = (1 << (point.read_length * 2 * 8)) - 1 #set max to the max value for the register length
+            if point.max == -1: point.max = (1 << (point.read_length * 2 * 8)) - 2 #set max to the max value for the register length -1 
             if point.max < 0: raise ValueError(f"Setpoint {point.key} has an invalid negative max value")
             if point.min > point.max: raise ValueError(f"Setpoint {point.key} has min value greater than max value")
-        
+            if point.value_type not in [ModbusValueType.AUTO, ModbusValueType.FLOAT, ModbusValueType.INT]:
+                # value_type is a string encoding
+                if point.read_modifier is not None: raise ValueError(f"Setpoint {point.key} has a read_modifier set, but value_type is a string encoding. Modifiers are not supported for strings.")
+            
         #check for errors in the setpoints
         for point in self._attr_setpoints:
             if point.read_address is None and point.write_address is None:
@@ -375,13 +378,13 @@ class ModbusDeviceBase(ModbusDevice):
     def get_max_value(self, key: ModbusSetpointKey) -> float | int | None:
         if self.provides(key):
             point = self._setpoints[key].point
-            return ModbusParser.parse_from_modbus_value(point=point, value=point.max)
+            return ModbusParser.apply_offset_divider_modifier(point=point, value=point.max)
         return None
 
     def get_min_value(self, key: ModbusSetpointKey) -> float | int | None:
         if self.provides(key):
             point = self._setpoints[key].point
-            return ModbusParser.parse_from_modbus_value(point=point, value=point.min)
+            return ModbusParser.apply_offset_divider_modifier(point=point, value=point.min)
         return None
 
     def get_setpoint(self, key: ModbusSetpointKey) -> ModbusSetpoint | None:
@@ -552,18 +555,12 @@ class Modifier:
     
 class ModbusParser:
     @staticmethod
-    def parse_to_modbus_value(point:ModbusSetpoint, value: float|int) -> int:
-        divider = ModbusParser.get_point_divider(point)
-        offset = ModbusParser.get_point_offset(point)
-        modifier = ModbusParser.get_point_write_modifier(point)
-        new_value:float|int = value
-        if modifier is not None: new_value = modifier(new_value)
-        if divider > 1: new_value *= divider
-        if offset != 0: new_value -= offset 
-        return int(new_value) #cast to int, modbus writes only accept an int
+    def combine_values(values: List[int]) -> int:
+        # Combine the list of 16-bit integers into a single integer
+        return reduce(lambda acc, val: (acc << 16) | val, values, 0)
 
     @staticmethod
-    def parse_from_modbus_value(point:ModbusDatapoint|ModbusSetpoint, value: int) -> float|int:
+    def apply_offset_divider_modifier(point:ModbusDatapoint|ModbusSetpoint, value: int) -> float|int:
         divider = ModbusParser.get_point_divider(point)
         offset = ModbusParser.get_point_offset(point)
         modifier = ModbusParser.get_point_read_modifier(point)
@@ -574,42 +571,97 @@ class ModbusParser:
         return new_value
     
     @staticmethod
-    def parse_value(values: List[int], point: ModbusDatapoint|ModbusSetpoint) -> float|int|str|None:
+    def revert_offset_divider_modifier(point:ModbusSetpoint, value: float|int) -> float|int:
+        divider = ModbusParser.get_point_divider(point)
+        offset = ModbusParser.get_point_offset(point)
+        modifier = ModbusParser.get_point_write_modifier(point)
+        new_value:float|int = value
+        if modifier is not None: new_value = modifier(new_value)
+        if divider > 1: new_value *= divider
+        if offset != 0: new_value -= offset 
+        return new_value
+    
+    @staticmethod
+    def bytes_to_values(byte_array: bytes, bytes_length: int) -> List[int]:
+        # Ensure the byte array length is even
+        if len(byte_array) % 2 != 0:
+            byte_array += b'\x00'
+        # Split the byte array into 2-byte integers
+        return [int.from_bytes(byte_array[i:i+2], "big") for i in range(0, bytes_length, 2)]
+    
+    @staticmethod
+    def value_to_values(value: MODBUS_VALUE_TYPES, point: ModbusSetpoint, validate: bool = True) -> list[int]|None:
+        if (point.value_type == ModbusValueType.AUTO or 
+            point.value_type == ModbusValueType.INT or
+            point.value_type == ModbusValueType.FLOAT):
+            if isinstance(value, str): raise ValueError(f"Point {point.key} expects {point.value_type}, but value is a string: {value}")
+            return ModbusParser.number_to_values(value, point, validate)
+        else:# point.value_type == ModbusValueType.UTF8 or point.value_type == ModbusValueType.ASCII or some other str encoding
+            if not isinstance(value, str): raise ValueError(f"Point {point.key} expects {point.value_type}, but value is not a string: {value}")
+            return ModbusParser.str_to_values(value, point)
+    
+    @staticmethod
+    def number_to_values(value: float|int, point: ModbusSetpoint, validate: bool = True) -> List[int]:
+        # Revert the offset, divider and modifier from the value, this will ex. make float back to integer
+        result = ModbusParser.revert_offset_divider_modifier(point, value)
+        if isinstance(result, float): 
+            result = round(result)
+        # Ensure the result is within the valid range
+        if validate:
+            if result > ModbusParser.get_point_max(point) or result < ModbusParser.get_point_min(point):
+                raise ValueError("Value out of range")
+        bytes_length = ModbusParser.get_point_read_length_bytes(point)
+        byte_array = result.to_bytes(bytes_length, byteorder='big', signed=point.signed)
+        return ModbusParser.bytes_to_values(byte_array, bytes_length)
+
+    @staticmethod
+    def str_to_values(value: str, point: ModbusDatapoint|ModbusSetpoint) -> List[int]:
+        byte_array = value.encode(point.value_type)
+        return ModbusParser.bytes_to_values(byte_array, ModbusParser.get_point_read_length_bytes(point))
+
+    @staticmethod
+    def values_to_value(value: list[int], point: ModbusDatapoint|ModbusSetpoint) -> MODBUS_VALUE_TYPES|None:
         if point.value_type == ModbusValueType.AUTO:
             if point.divider == 1:
-                return ModbusParser.parse_int(values, point)
-            return ModbusParser.parse_float(values, point)
+                return ModbusParser.values_to_int(value, point)
+            return ModbusParser.values_to_float(value, point)
         if point.value_type == ModbusValueType.INT:
-            return ModbusParser.parse_int(values, point)
-        if point.value_type == ModbusValueType.UTF8 or point.value_type == ModbusValueType.ASCII:
-            return ModbusParser.parse_str(values, point.value_type)
+            return ModbusParser.values_to_int(value, point)
         if point.value_type == ModbusValueType.FLOAT:
-            return ModbusParser.parse_float(values, point)
-        return None
-
+            return ModbusParser.values_to_float(value, point)
+        else:# point.value_type == ModbusValueType.UTF8 or point.value_type == ModbusValueType.ASCII or some other str encoding
+            return ModbusParser.values_to_str(value, point)
+       
     @staticmethod
-    def parse_float(values: List[int], point: ModbusDatapoint|ModbusSetpoint) -> float:
-        return ModbusParser.parse_int(values, point) / point.divider
-
-    @staticmethod
-    def parse_int(values: List[int], point: ModbusDatapoint|ModbusSetpoint) -> int:
+    def values_to_float(value: list[int], point: ModbusDatapoint|ModbusSetpoint) -> float|None:
         # Combine the list of 16-bit integers into a single integer
-        result = reduce(lambda acc, val: (acc << 16) | val, values, 0)
+        result = ModbusParser.combine_values(value)
         if point.signed:
             # Calculate the total number of bits
-            total_bits = 16 * len(values)
+            total_bits = point.read_length * 2 * 8
             # Check if the sign bit is set
             if result & (1 << (total_bits - 1)):
                 # Adjust for signed value
                 result -= 1 << total_bits
+        if result > ModbusParser.get_point_max(point) or result < ModbusParser.get_point_min(point):
+            return None
+        result = ModbusParser.apply_offset_divider_modifier(point, result)
         return result
+
+    @staticmethod
+    def values_to_int(value: list[int], point: ModbusDatapoint|ModbusSetpoint) -> int|None:
+        result = ModbusParser.values_to_float(value, point)
+        if result is None: return None
+        return int(result)
     
     @staticmethod
-    def parse_str(values: List[int], encoding: str) -> str:
+    def values_to_str(value: list[int], point: ModbusDatapoint|ModbusSetpoint) -> str|None:
+        result = ModbusParser.combine_values(value)
+        total_bytes = point.read_length * 2
         # Convert list of 16-bit integers to a byte array using join with a generator expression
-        byte_array = b''.join(value.to_bytes(2, byteorder='big') for value in values)
+        byte_array = result.to_bytes(total_bytes, byteorder='big')
         # Decode the byte array as a UTF-8 string and strip null bytes
-        return byte_array.decode(encoding, errors='replace').rstrip(NONE_BYTE)
+        return byte_array.decode(point.value_type, errors='replace').rstrip(NONE_BYTE)
     
     @staticmethod
     def get_point_divider(point:ModbusDatapoint|ModbusSetpoint) -> int: 
@@ -620,6 +672,10 @@ class ModbusParser:
     @staticmethod
     def get_point_read_address(point:ModbusDatapoint|ModbusSetpoint) -> int|None: 
         return point.read_address
+    @staticmethod
+    def get_point_read_length_bytes(point:ModbusDatapoint|ModbusSetpoint) -> int: 
+        """Returns the number of bytes the point is using"""
+        return (point.read_length*16 + 7) // 8 #round up to the nearest byte
     @staticmethod
     def get_point_read_obj(point:ModbusDatapoint|ModbusSetpoint) -> int: 
         return point.read_obj

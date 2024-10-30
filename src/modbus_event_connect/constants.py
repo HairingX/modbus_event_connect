@@ -40,7 +40,7 @@ class UOM:
     
 class ModbusValueType:
     AUTO = "auto"
-    """Automatically determine the value type (Default)"""
+    """Automatically determine the value type (float|int) (Default)"""
     ASCII = "ascii"
     """Text encoded in ASCII"""
     INT = "int"

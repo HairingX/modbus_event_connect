@@ -208,7 +208,7 @@ class ModbusTCPEventConnect(ModbusEventConnect):
         The values are the raw values from the register read, each item is a register address.
         A value can be a single value or a list of values, depending on the number of addresses the point value is stored in.
         """
-        return ModbusParser.parse_value(values, point)
+        return ModbusParser.values_to_value(values, point)
     
     def batch_reads(self, points:Sequence[MODBUS_POINT_TYPE]) -> Generator[List[MODBUS_POINT_TYPE], None, None]:
         """
