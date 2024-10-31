@@ -194,6 +194,24 @@ class ModbusTCPEventConnect(ModbusEventConnect):
                     _LOGGER.error(f"Failed to read data for {[point.key for point in points]}")
         return kv    
     
+    def _request_setpoint_writes(self, point_values: Sequence[Tuple[ModbusSetpoint, MODBUS_VALUE_TYPES]]) -> bool:
+        for point, value in point_values:
+            self._request_setpoint_write(point, value)
+        return True
+    
+    def _request_setpoint_write(self, point: ModbusSetpoint, value: MODBUS_VALUE_TYPES) -> bool:
+        if point.write_address is None or point.write_address < 1 or self._client is None: return False
+        
+        values = self._parse_point_write_value(point, value)
+        if values is None or len(values) == 0: return False
+        
+        if point.write_length == 1:
+            return self._client.write_single_register(point.write_address, values[0]) == True # type: ignore
+        elif point.write_length > 1:
+            return self._client.write_multiple_registers(point.write_address, values) == True # type: ignore
+        
+        return False
+    
     def _append_data(self, kv: List[Tuple[MODBUS_POINT_TYPE, MODBUS_VALUE_TYPES|None]], points: List[MODBUS_POINT_TYPE], data: List[int]) -> None:
         i = 0
         for point in points:

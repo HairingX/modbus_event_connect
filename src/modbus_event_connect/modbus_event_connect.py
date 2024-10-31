@@ -65,7 +65,6 @@ class ModbusEventConnect(ABC):
     
     def request_setpoint_writes(self, kv: Sequence[Tuple[ModbusSetpointKey, MODBUS_VALUE_TYPES]]) -> bool:
         """Write new values to multiple setpoints."""
-        # create a list of tuples with the setpoint and the value
         point_values = list[Tuple[ModbusSetpoint, MODBUS_VALUE_TYPES]]()
         for key, value in kv:
             setpoint = self._attr_adapter.get_setpoint(key)

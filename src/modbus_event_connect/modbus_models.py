@@ -610,14 +610,14 @@ class ModbusParser:
         if validate:
             if result > ModbusParser.get_point_max(point) or result < ModbusParser.get_point_min(point):
                 raise ValueError("Value out of range")
-        bytes_length = ModbusParser.get_point_read_length_bytes(point)
+        bytes_length = ModbusParser.get_point_write_length_bytes(point)
         byte_array = result.to_bytes(bytes_length, byteorder='big', signed=point.signed)
         return ModbusParser.bytes_to_values(byte_array, bytes_length)
 
     @staticmethod
-    def str_to_values(value: str, point: ModbusDatapoint|ModbusSetpoint) -> List[int]:
+    def str_to_values(value: str, point: ModbusSetpoint) -> List[int]:
         byte_array = value.encode(point.value_type)
-        return ModbusParser.bytes_to_values(byte_array, ModbusParser.get_point_read_length_bytes(point))
+        return ModbusParser.bytes_to_values(byte_array, ModbusParser.get_point_write_length_bytes(point))
 
     @staticmethod
     def values_to_value(value: list[int], point: ModbusDatapoint|ModbusSetpoint) -> MODBUS_VALUE_TYPES|None:
@@ -638,7 +638,7 @@ class ModbusParser:
         result = ModbusParser.combine_values(value)
         if point.signed:
             # Calculate the total number of bits
-            total_bits = point.read_length * 2 * 8
+            total_bits = ModbusParser.get_point_read_length_bits(point)
             # Check if the sign bit is set
             if result & (1 << (total_bits - 1)):
                 # Adjust for signed value
@@ -657,7 +657,7 @@ class ModbusParser:
     @staticmethod
     def values_to_str(value: list[int], point: ModbusDatapoint|ModbusSetpoint) -> str|None:
         result = ModbusParser.combine_values(value)
-        total_bytes = point.read_length * 2
+        total_bytes = ModbusParser.get_point_read_length_bytes(point)
         # Convert list of 16-bit integers to a byte array using join with a generator expression
         byte_array = result.to_bytes(total_bytes, byteorder='big')
         # Decode the byte array as a UTF-8 string and strip null bytes
@@ -677,11 +677,23 @@ class ModbusParser:
         """Returns the number of bytes the point is using"""
         return (point.read_length*16 + 7) // 8 #round up to the nearest byte
     @staticmethod
+    def get_point_read_length_bits(point:ModbusDatapoint|ModbusSetpoint) -> int: 
+        """Returns the number of bytes the point is using"""
+        return ModbusParser.get_point_read_length_bytes(point) * 8
+    @staticmethod
     def get_point_read_obj(point:ModbusDatapoint|ModbusSetpoint) -> int: 
         return point.read_obj
     @staticmethod
     def get_point_write_address(point:ModbusSetpoint) -> int|None: 
         return point.write_address
+    @staticmethod
+    def get_point_write_length_bytes(point:ModbusSetpoint) -> int: 
+        """Returns the number of bytes the point is using"""
+        return (point.write_length*16 + 7) // 8 #round up to the nearest byte
+    @staticmethod
+    def get_point_write_length_bits(point:ModbusSetpoint) -> int: 
+        """Returns the number of bits the point is using"""
+        return ModbusParser.get_point_write_length_bytes(point) * 8
     @staticmethod
     def get_point_write_obj(point:ModbusSetpoint) -> int: 
         return point.write_obj
