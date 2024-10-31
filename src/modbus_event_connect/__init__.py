@@ -29,7 +29,7 @@ from .constants import (
         ValueLimits, 
         )
 
-__version__ = "0.1.6"
+__version__ = "0.1.7"
 __all__ = [
     "MicroNabtoEventConnect",
     "MicroNabtoModbusDeviceInfo",
