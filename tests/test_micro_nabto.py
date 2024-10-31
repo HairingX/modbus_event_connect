@@ -69,7 +69,7 @@ async def test_request_datapoint_data(testdata: TestData):
         _LOGGER.debug(f"{key}: {oldval if oldval is not None else 'None'} -> {newval if newval is not None else 'None'}")
         event.set()
     client.subscribe(ModbusTestDatapointKey.TEMPERATURE, callback)
-    await client.request_datapoint_data()
+    await client.request_datapoint_read()
     assert await asyncio.wait_for(event.wait(), 5)
     assert client.get_value(ModbusTestDatapointKey.TEMPERATURE) is not None
 
@@ -83,7 +83,7 @@ async def test_request_datapoint_data_invalid_address(testdata: TestData):
         if key in events: events[key].set()
     client.subscribe(ModbusTestDatapointKey.INVALID, callback)
     client.subscribe(ModbusTestDatapointKey.TEMPERATURE, callback)
-    await client.request_datapoint_data()
+    await client.request_datapoint_read()
     await asyncio.wait_for(asyncio.gather(event1.wait(), event2.wait()), 15)
     assert client.get_value(ModbusTestDatapointKey.INVALID) is None
     assert client.get_value(ModbusTestDatapointKey.TEMPERATURE) is not None

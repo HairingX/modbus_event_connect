@@ -443,7 +443,7 @@ class ModbusDeviceBase(ModbusDevice):
         elif isinstance(key, ModbusSetpointKey):
             return key in self._setpoints
         return False
-
+    
     def set_read(self, key: ModbusPointKey, read: bool, *, force: bool=False) -> bool:
         """
         Sets the read state for the point. Returns the new read state.

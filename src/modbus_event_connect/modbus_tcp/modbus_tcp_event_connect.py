@@ -121,7 +121,7 @@ class ModbusTCPEventConnect(ModbusEventConnect):
         if self._client is not None:
             self._client.close()
         
-    async def _request_datapoint_data(self, points: List[ModbusDatapoint]) -> List[Tuple[ModbusDatapoint, MODBUS_VALUE_TYPES|None]]:
+    async def _request_datapoint_read(self, points: List[ModbusDatapoint]) -> List[Tuple[ModbusDatapoint, MODBUS_VALUE_TYPES|None]]:
         kv:List[Tuple[ModbusDatapoint, MODBUS_VALUE_TYPES|None]] = []
         if self._client is None: return kv
         for batch in self.batch_reads(points):
@@ -157,7 +157,7 @@ class ModbusTCPEventConnect(ModbusEventConnect):
                     _LOGGER.error(f"Failed to read data for {[point.key for point in points]}")
         return kv
     
-    async def _request_setpoint_data(self, points: List[ModbusSetpoint]) -> List[Tuple[ModbusSetpoint, MODBUS_VALUE_TYPES|None]]:
+    async def _request_setpoint_read(self, points: List[ModbusSetpoint]) -> List[Tuple[ModbusSetpoint, MODBUS_VALUE_TYPES|None]]:
         kv:List[Tuple[ModbusSetpoint, MODBUS_VALUE_TYPES|None]] = []
         for batch in self.batch_reads(points):
             last = batch[-1]
@@ -201,14 +201,6 @@ class ModbusTCPEventConnect(ModbusEventConnect):
             value = self._parse_point_read_value(point, values)
             kv.append((point, value))
             i+= point.read_length
-    
-    def _parse_point_read_value(self, point: ModbusDatapoint|ModbusSetpoint, values: List[int]) -> MODBUS_VALUE_TYPES|None:
-        """
-        Parse the read value to the correct value type. 
-        The values are the raw values from the register read, each item is a register address.
-        A value can be a single value or a list of values, depending on the number of addresses the point value is stored in.
-        """
-        return ModbusParser.values_to_value(values, point)
     
     def batch_reads(self, points:Sequence[MODBUS_POINT_TYPE]) -> Generator[List[MODBUS_POINT_TYPE], None, None]:
         """

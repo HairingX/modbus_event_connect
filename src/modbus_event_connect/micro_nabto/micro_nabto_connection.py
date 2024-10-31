@@ -203,7 +203,7 @@ class MicroNabtoConnection:
         self._socket = None
         socket.close()
  
-    async def request_datapoint_data(self, points: List[ModbusDatapoint]) -> Dict[ModbusDatapointKey, Tuple[ModbusDatapoint, MODBUS_VALUE_TYPES|None]]|None:
+    async def request_datapoint_read(self, points: List[ModbusDatapoint]) -> Dict[ModbusDatapointKey, Tuple[ModbusDatapoint, MODBUS_VALUE_TYPES|None]]|None:
         """Request the current value of the points. If response failed, returns None"""
         connected = self._connected
         if connected is None or self._socket is None or not self.is_connected: return dict()
@@ -221,7 +221,7 @@ class MicroNabtoConnection:
         finally:
             self._dequeue_request(request)
     
-    async def request_setpoint_data(self, points: List[ModbusSetpoint]) -> Dict[ModbusSetpointKey, Tuple[ModbusSetpoint, MODBUS_VALUE_TYPES|None]]|None:
+    async def request_setpoint_read(self, points: List[ModbusSetpoint]) -> Dict[ModbusSetpointKey, Tuple[ModbusSetpoint, MODBUS_VALUE_TYPES|None]]|None:
         """Request the current value of the points. If response failed, returns None"""
         connected = self._connected
         if connected is None or self._socket is None or not self.is_connected: return dict()
@@ -238,6 +238,22 @@ class MicroNabtoConnection:
             raise
         finally:
             self._dequeue_request(request)
+
+    def request_setpoint_write(self, point: ModbusSetpoint, value:List[int]) -> bool:
+        return self.request_setpoint_writes([(point,value)])
+
+    def request_setpoint_writes(self, point_values: Sequence[Tuple[ModbusSetpoint, List[int]]]) -> bool:
+        """Request the current value of the points. If response failed, returns None"""
+        connected = self._connected
+        if connected is None or self._socket is None or not self.is_connected: return False
+        Payload = MicroNabtoPayloadCrypt(MicroNabtoCommandBuilder.build_setpoint_write_command(self._map_points_to_write_args(point_values)))
+        sequence_id = self._generate_sequenceid()
+        try:
+            self._socket.sendto(MicroNabtoPacketBuilder().build_packet(self._client_id, self._server_id, MicroNabtoPacketType.DATA, sequence_id, [Payload]), connected.device.address)
+            return True
+        except Exception as e:
+            _LOGGER.error(f"Error writing to setpoint: {e}")
+        return False
            
     def _is_connected(self, device_id:str|None=None): return self._connected is not None and (device_id is None or self._connected.device.device_id == device_id)
     
@@ -288,8 +304,13 @@ class MicroNabtoConnection:
         request = self._enqueue_connect_request(self._connected.device)
         return self._send_connect_request(request)
 
+    def _generate_sequenceid(self) -> int:
+        with threading.Lock():
+            self._sequence_id = sequence_id = 1 if self._sequence_id + 1 > SEQUENCE_ID_MAX else self._sequence_id + 1
+        return sequence_id
+    
     def _enqueue_request(self, points:List[MODBUS_POINT_TYPE]) -> RequestData:
-        self._sequence_id = sequence_id = 1 if self._sequence_id + 1 > SEQUENCE_ID_MAX else self._sequence_id + 1
+        sequence_id = self._generate_sequenceid()
         request = RequestData(sequence_id, points)
         self._requests[sequence_id] = request
         return request
@@ -437,14 +458,18 @@ class MicroNabtoConnection:
             read_args.append(MicroNabtoCommandBuilderReadArgs(read_obj=read_obj, read_address=read_address))
         return read_args
     
-    def _map_points_to_write_args(self, points: Sequence[ModbusSetpoint], value:int) -> List[MicroNabtoCommandBuilderWriteArgs]:
+    def _map_points_to_write_args(self, point_values: Sequence[Tuple[ModbusSetpoint, List[int]]]) -> List[MicroNabtoCommandBuilderWriteArgs]:
         write_args = list[MicroNabtoCommandBuilderWriteArgs]()
-        for point in points:
-            write_obj = ModbusParser.get_point_write_obj(point)
-            write_address = ModbusParser.get_point_write_address(point)
-            if write_address is None: continue
-            write_args.append(MicroNabtoCommandBuilderWriteArgs(write_obj=write_obj, write_address=write_address, value=value))
+        for point, value in point_values:
+            args = self._map_point_to_write_args(point, value)
+            if args is not None: write_args.append(args)
         return write_args
+    
+    def _map_point_to_write_args(self, point: ModbusSetpoint, value:List[int]) -> MicroNabtoCommandBuilderWriteArgs|None:
+        write_obj = ModbusParser.get_point_write_obj(point)
+        write_address = ModbusParser.get_point_write_address(point)
+        if write_address is None: return None
+        return MicroNabtoCommandBuilderWriteArgs(write_obj=write_obj, write_address=write_address, value=value[0])
         
     def _parse_data_response(self, sequence_id:int, response_payload:bytes) -> None:
         _LOGGER.debug(f"Got dataresponse with sequence id: {sequence_id}")

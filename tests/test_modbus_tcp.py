@@ -43,7 +43,7 @@ async def test_request_setpoint_value_type_bigint(testdata: TestData):
         _LOGGER.debug(f"{key}: {oldval if oldval is not None else 'None'} -> {newval if newval is not None else 'None'}")
         event.set()
     client.subscribe(key, callback)
-    await client.request_setpoint_data()
+    await client.request_setpoint_read()
     assert await asyncio.wait_for(event.wait(), 5)
     value = client.get_value(key)
     assert value is not None
@@ -62,7 +62,7 @@ async def test_request_point_value_type_float(testdata: TestData):
         _LOGGER.debug(f"{key}: {oldval if oldval is not None else 'None'} -> {newval if newval is not None else 'None'}")
         event.set()
     client.subscribe(key, callback)
-    await client.request_datapoint_data()
+    await client.request_datapoint_read()
     assert await asyncio.wait_for(event.wait(), 5)
     value = client.get_value(key)
     assert value is not None
@@ -76,7 +76,7 @@ async def test_request_point_value_type_utf8(testdata: TestData):
         _LOGGER.debug(f"{key}: {oldval if oldval is not None else 'None'} -> {newval if newval is not None else 'None'}")
         event.set()
     client.subscribe(key, callback)
-    await client.request_setpoint_data()
+    await client.request_setpoint_read()
     assert await asyncio.wait_for(event.wait(), 5)
     value = client.get_value(key)
     assert value is not None

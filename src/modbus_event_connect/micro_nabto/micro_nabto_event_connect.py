@@ -1,5 +1,6 @@
 import logging
 
+
 from ..modbus_event_connect import *
 from ..modbus_models import *
 from .micro_nabto_connection import CONNECT_TIMEOUT, DEVICE_PORT,  MicroNabtoConnection, MicroNabtoConnectionErrorType
@@ -48,8 +49,8 @@ class MicroNabtoEventConnect(ModbusEventConnect):
     def stop(self) -> None:
         self._client.stop_listening()
         
-    async def _request_datapoint_data(self, points: List[ModbusDatapoint]) -> List[Tuple[ModbusDatapoint, MODBUS_VALUE_TYPES|None]]:
-        data = await self._client.request_datapoint_data(points)
+    async def _request_datapoint_read(self, points: List[ModbusDatapoint]) -> List[Tuple[ModbusDatapoint, MODBUS_VALUE_TYPES|None]]:
+        data = await self._client.request_datapoint_read(points)
         kv:List[Tuple[ModbusDatapoint, MODBUS_VALUE_TYPES|None]] = []
         if data is not None: 
             for point, value in data.values():
@@ -64,7 +65,7 @@ class MicroNabtoEventConnect(ModbusEventConnect):
                 else:
                     _LOGGER.warning(f"Device failed to read {len(points)} datapoints. Some datapoints may not be available. Checking each datapoint individually.")
                     for point in points:
-                        data = await self._client.request_datapoint_data([point])
+                        data = await self._client.request_datapoint_read([point])
                         if data is not None:
                             kv.append(data[point.key])
                         elif self._client.last_error == MicroNabtoConnectionErrorType.INVALID_ADDRESS:
@@ -74,12 +75,8 @@ class MicroNabtoEventConnect(ModbusEventConnect):
                 _LOGGER.error(f"Failed to read data for {[point.key for point in points]}")
         return kv
     
-    def _handle_invalid_address(self, point: ModbusDatapoint|ModbusSetpoint) -> None:
-        _LOGGER.error(f"Failed to read data for '{point.key}', the address '{point.read_obj}:{point.read_address}' is not available. Inform developer that the device '{self.device_info}' has this error.")
-        self._attr_adapter.set_read(point.key, False, force=True)
-    
-    async def _request_setpoint_data(self, points: List[ModbusSetpoint]) -> List[Tuple[ModbusSetpoint, MODBUS_VALUE_TYPES|None]]:
-        data = await self._client.request_setpoint_data(points)
+    async def _request_setpoint_read(self, points: List[ModbusSetpoint]) -> List[Tuple[ModbusSetpoint, MODBUS_VALUE_TYPES|None]]:
+        data = await self._client.request_setpoint_read(points)
         kv:List[Tuple[ModbusSetpoint, MODBUS_VALUE_TYPES|None]] = []
         if data is not None: 
             for point, value in data.values():
@@ -94,7 +91,7 @@ class MicroNabtoEventConnect(ModbusEventConnect):
                 else:
                     _LOGGER.warning(f"Device failed to read {len(points)} setpoints. Some setpoints may not be available. Checking each setpoint individually.")
                     for point in points:
-                        data = await self._client.request_setpoint_data([point])
+                        data = await self._client.request_setpoint_read([point])
                         if data is not None:
                             kv.append(data[point.key])
                         elif self._client.last_error == MicroNabtoConnectionErrorType.INVALID_ADDRESS:
@@ -103,3 +100,16 @@ class MicroNabtoEventConnect(ModbusEventConnect):
             else: 
                 _LOGGER.error(f"Failed to read data for {[point.key for point in points]}")
         return kv
+    
+    def _handle_invalid_address(self, point: ModbusDatapoint|ModbusSetpoint) -> None:
+        _LOGGER.error(f"Failed to read data for '{point.key}', the address '{point.read_obj}:{point.read_address}' is not available. Inform developer that the device '{self.device_info}' has this error.")
+        self._attr_adapter.set_read(point.key, False, force=True)
+    
+    def _request_setpoint_writes(self, point_values: Sequence[Tuple[ModbusSetpoint, MODBUS_VALUE_TYPES]]) -> bool:
+        pv = list[Tuple[ModbusSetpoint, List[int]]]()
+        for point, value in point_values:
+            parsed_value = ModbusParser.value_to_values(value, point)
+            if parsed_value is None: continue
+            pv.append((point, parsed_value))
+        success = self._client.request_setpoint_writes(pv)
+        return success
