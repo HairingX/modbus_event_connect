@@ -1,7 +1,7 @@
 import logging
 
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Dict, List, Sequence, Tuple
+from typing import Callable, Dict, List, Sequence, Tuple
 
 from .modbus_models import MODBUS_POINT_TYPE, MODBUS_VALUE_TYPES, ModbusDatapoint, ModbusParser, ModbusPointKey, ModbusSetpoint, ModbusSetpointKey
 from .modbus_deviceadapter import ModbusDeviceAdapter
@@ -38,7 +38,7 @@ class ModbusEventConnect(ABC):
     
     async def request_initial_data(self) -> None:
         """Request the current value of all points used in initialization, ex. version."""
-        values:List[Tuple[Any, MODBUS_VALUE_TYPES|None]] = []
+        values:List[Tuple[ModbusDatapoint|ModbusSetpoint, MODBUS_VALUE_TYPES|None]] = []
         datapoints = self._attr_adapter.get_initial_datapoints_for_read()
         if len(datapoints) > 0: 
             values.extend(await self._request_datapoint_read(datapoints))
