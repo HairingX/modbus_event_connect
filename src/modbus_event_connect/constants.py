@@ -38,7 +38,7 @@ class UOM:
     """Unknown unit of measure (Default)"""
     
     
-class ModbusValueType:
+class ModbusValueTypes:
     AUTO = "auto"
     """Automatically determine the value type (float|int) (Default)"""
     ASCII = "ascii"

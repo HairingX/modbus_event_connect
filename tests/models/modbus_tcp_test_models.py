@@ -22,7 +22,7 @@ class ModbusTestDevice(ModbusDeviceBase):
             ModbusDatapoint(key=ModbusTestDatapointKey.TEMPERATURE, read_address=104, max=-1, divider=100, signed=True),
         ]
         self._attr_setpoints = [
-            ModbusSetpoint(key=ModbusTestSetpointKey.LOCATION_NAME, read_address=10, read_length=16, signed=False, value_type=ModbusValueType.UTF8),
+            ModbusSetpoint(key=ModbusTestSetpointKey.LOCATION_NAME, read_address=10, read_length=16, signed=False, value_type=ModbusValueTypes.UTF8),
             ModbusSetpoint(key=ModbusTestSetpointKey.DATETIME,      read_address=28, read_length=2, signed=False),
         ]
 

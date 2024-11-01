@@ -4,7 +4,7 @@ import pytest
 
 
 from src.modbus_event_connect.constants import ValueLimits
-from src.modbus_event_connect import ModbusParser, ModbusValueType
+from src.modbus_event_connect import ModbusParser, ModbusValueTypes
 from models.modbus_parser_test_models import PointFactory
 
 _LOGGER = logging.getLogger(__name__)
@@ -94,7 +94,7 @@ def test_modbusparser_parse_value_float32_low():
     assert value == modbus_value
 
 def test_modbusparser_parse_value_str():
-    point = PointFactory.create_setpoint(read_length=16, value_type=ModbusValueType.UTF8)
+    point = PointFactory.create_setpoint(read_length=16, value_type=ModbusValueTypes.UTF8)
     strval = "My ØÆå String!¤%#"
     values = ModbusParser.value_to_values(strval, point)
     assert values is not None

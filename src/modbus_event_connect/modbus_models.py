@@ -67,7 +67,7 @@ class ModbusDatapoint:
     Applied to the register value in the order: 1: divider, 2: offset, 3: modifier"""
     read_obj: int = 0
     """default is 0"""
-    value_type: str = ModbusValueType.AUTO
+    value_type: str = ModbusValueTypes.AUTO
     """The type of value the point is using"""
 
 @dataclass(kw_only=True)
@@ -99,7 +99,7 @@ class ModbusSetpoint:
     read_obj: int = 0
     """default is 0"""
     #write
-    value_type: str = ModbusValueType.AUTO
+    value_type: str = ModbusValueTypes.AUTO
     """The type of value the point is using"""
     write_address: int|None = None
     write_length: int = 1
@@ -330,7 +330,7 @@ class ModbusDeviceBase(ModbusDevice):
             if point.max == -1: point.max = (1 << (point.read_length * 2 * 8)) - 2 #set max to the max value for the register length -1 
             if point.max < 0: raise ValueError(f"Setpoint {point.key} has an invalid negative max value")
             if point.min > point.max: raise ValueError(f"Setpoint {point.key} has min value greater than max value")
-            if point.value_type not in [ModbusValueType.AUTO, ModbusValueType.FLOAT, ModbusValueType.INT]:
+            if point.value_type not in [ModbusValueTypes.AUTO, ModbusValueTypes.FLOAT, ModbusValueTypes.INT]:
                 # value_type is a string encoding
                 if point.read_modifier is not None: raise ValueError(f"Setpoint {point.key} has a read_modifier set, but value_type is a string encoding. Modifiers are not supported for strings.")
             
@@ -591,12 +591,12 @@ class ModbusParser:
     
     @staticmethod
     def value_to_values(value: MODBUS_VALUE_TYPES, point: ModbusSetpoint, validate: bool = True) -> list[int]|None:
-        if (point.value_type == ModbusValueType.AUTO or 
-            point.value_type == ModbusValueType.INT or
-            point.value_type == ModbusValueType.FLOAT):
+        if (point.value_type == ModbusValueTypes.AUTO or 
+            point.value_type == ModbusValueTypes.INT or
+            point.value_type == ModbusValueTypes.FLOAT):
             if isinstance(value, str): raise ValueError(f"Point {point.key} expects {point.value_type}, but value is a string: {value}")
             return ModbusParser.number_to_values(value, point, validate)
-        else:# point.value_type == ModbusValueType.UTF8 or point.value_type == ModbusValueType.ASCII or some other str encoding
+        else:# point.value_type == ModbusValueTypes.UTF8 or point.value_type == ModbusValueTypes.ASCII or some other str encoding
             if not isinstance(value, str): raise ValueError(f"Point {point.key} expects {point.value_type}, but value is not a string: {value}")
             return ModbusParser.str_to_values(value, point)
     
@@ -621,15 +621,15 @@ class ModbusParser:
 
     @staticmethod
     def values_to_value(value: list[int], point: ModbusDatapoint|ModbusSetpoint) -> MODBUS_VALUE_TYPES|None:
-        if point.value_type == ModbusValueType.AUTO:
+        if point.value_type == ModbusValueTypes.AUTO:
             if point.divider == 1:
                 return ModbusParser.values_to_int(value, point)
             return ModbusParser.values_to_float(value, point)
-        if point.value_type == ModbusValueType.INT:
+        if point.value_type == ModbusValueTypes.INT:
             return ModbusParser.values_to_int(value, point)
-        if point.value_type == ModbusValueType.FLOAT:
+        if point.value_type == ModbusValueTypes.FLOAT:
             return ModbusParser.values_to_float(value, point)
-        else:# point.value_type == ModbusValueType.UTF8 or point.value_type == ModbusValueType.ASCII or some other str encoding
+        else:# point.value_type == ModbusValueTypes.UTF8 or point.value_type == ModbusValueTypes.ASCII or some other str encoding
             return ModbusParser.values_to_str(value, point)
        
     @staticmethod
