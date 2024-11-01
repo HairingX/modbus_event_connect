@@ -18,9 +18,8 @@ from .modbus_models import (
         VersionInfo,
         VersionInfoKeys,
         )
-from .micro_nabto.micro_nabto_connection import ( MicroNabtoModbusDeviceInfo )
-from .micro_nabto.micro_nabto_event_connect import ( MicroNabtoEventConnect )
-from .modbus_tcp.modbus_tcp_event_connect import ( ModbusTCPEventConnect )
+from .micro_nabto import ( MicroNabtoModbusDeviceInfo, MicroNabtoEventConnect )
+from .modbus_tcp import ( ModbusTCPEventConnect )
 from .constants import ( 
         MODBUS_VALUE_TYPES, 
         ModbusValueType,

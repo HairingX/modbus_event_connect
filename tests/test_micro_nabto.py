@@ -1,12 +1,11 @@
-import concurrent.futures
 from dataclasses import dataclass
-# import json
-import threading
 from typing import Any
+import concurrent.futures
+import logging
 import pytest
+import threading
 
 from credentials import Credentials
-import logging
 
 from src.modbus_event_connect.micro_nabto.micro_nabto_connection import Request
 from src.modbus_event_connect import MODBUS_VALUE_TYPES, ModbusPointKey
