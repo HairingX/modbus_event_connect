@@ -103,6 +103,16 @@ def test_modbusparser_parse_value_str():
     assert isinstance(value, str)
     assert value == strval
     
+def test_modbusparser_parse_value_str_overflow():
+    point = PointFactory.create_setpoint(read_length=16, value_type=ModbusValueTypes.UTF8)
+    strval = "0123456789012345678901234567890123456789" # 40 characters
+    values = ModbusParser.value_to_values(strval, point)
+    assert values is not None
+    value = ModbusParser.values_to_value(values, point)
+    assert value is not None
+    assert isinstance(value, str)
+    assert len(value) == 32
+    
 def test_modbusparser_parse_value_invalid():
     point = PointFactory.create_setpoint(read_length=2, max=ValueLimits.UINT32_MAXERR)
     modbus_value = ValueLimits.UINT32

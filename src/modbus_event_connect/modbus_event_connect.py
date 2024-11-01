@@ -36,6 +36,10 @@ class ModbusEventConnect(ABC):
     @property
     def model_name(self) -> str: return self._attr_adapter.model_name
     
+    def provides(self, key: ModbusPointKey) -> bool:
+        """Check if the device provides a datapoint or setpoint."""
+        return self._attr_adapter.provides(key)
+    
     async def request_initial_data(self) -> None:
         """Request the current value of all points used in initialization, ex. version."""
         values:List[Tuple[ModbusDatapoint|ModbusSetpoint, MODBUS_VALUE_TYPES|None]] = []
@@ -134,5 +138,5 @@ class ModbusEventConnect(ABC):
                 subscriber(key, old_value, new_value)
                 
     def _handle_invalid_address(self, point: ModbusDatapoint|ModbusSetpoint) -> None:
-        _LOGGER.error(f"Failed to read data for '{point.key}', the address '{point.read_obj}:{point.read_address}{None if point.read_length == 1 or point.read_address is None else f'-{point.read_address+point.read_length}'}' is not available. Inform developer that the device '{self.device_info}' has this error.")
+        _LOGGER.error(f"Failed to read data for '{point.key}', the address '{point.read_obj}:{point.read_address}{"" if point.read_length == 1 or point.read_address is None else f'-{point.read_address+point.read_length-1}'}' is not available. Inform developer that the device '{self.device_info}' has this error.")
         self._attr_adapter.set_read(point.key, False, force=True)
