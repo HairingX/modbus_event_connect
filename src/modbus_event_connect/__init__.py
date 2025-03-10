@@ -13,19 +13,19 @@ from .modbus_models import (
         ModbusSetpoint, 
         ModbusSetpointData,
         ModbusSetpointKey, 
-        ModbusValueTypes,
+        ModbusValueType,
         Modifier,
         VersionInfo,
         VersionInfoKeys,
         )
 from .micro_nabto import ( MicroNabtoModbusDeviceInfo, MicroNabtoEventConnect )
-from .modbus_tcp import ( ModbusTCPEventConnect )
+from .modbus_tcp import ( ModbusTCPEventConnect, ModbusTCPErrorCode, ModbusExceptCode )
 from .constants import ( 
         MODBUS_VALUE_TYPES, 
-        ModbusValueTypes,
+        ModbusValueType,
         Read,
         UOM, 
-        ValueLimits, 
+        ValueLimit, 
         )
 
 __version__ = "0.1.8"
@@ -48,11 +48,13 @@ __all__ = [
     "ModbusSetpointData",
     "ModbusSetpointKey",
     "ModbusTCPEventConnect",
-    "ModbusValueTypes",
+    "ModbusTCPErrorCode",
+    "ModbusExceptCode",
+    "ModbusValueType",
     "Modifier",
     "Read",
     "UOM",
-    "ValueLimits",
+    "ValueLimit",
     "VersionInfo",
     "VersionInfoKeys",
 ]

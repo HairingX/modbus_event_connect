@@ -38,7 +38,7 @@ class UOM:
     """Unknown unit of measure (Default)"""
     
     
-class ModbusValueTypes:
+class ModbusValueType:
     AUTO = "auto"
     """Automatically determine the value type (float|int) (Default)"""
     ASCII = "ascii"
@@ -61,7 +61,7 @@ class Read(Flag):
     """Read during startup and ALWAYS"""
     
 # Value limits
-class ValueLimits:
+class ValueLimit:
     UINT8 = 255
     UINT16 = 65535
     UINT32 = 4294967295

@@ -8,14 +8,8 @@ from ..modbus_models import *
 
 _LOGGER = logging.getLogger(__name__)
 
-DEVICE_PORT = 502
-CONNECT_TIMEOUT = 10
-UNIT_ID = 1
-AUTO_OPEN = True
-AUTO_CLOSE = False
-REQUEST_LENGTH_MAX = 125
 class ModbusTCPErrorCode(IntEnum):
-    NO_ERROR = 0
+    NONE = 0
     NAME_RESOLVE = 1
     CONNECT_FAILED = 2
     SEND_FAILED = 3
@@ -26,9 +20,13 @@ class ModbusTCPErrorCode(IntEnum):
     """Look at the except error for more details"""
     MB_CRC_ERR = 8
     SOCK_CLOSED = 9
+    
+    UNSUPPORTED_MODEL = 99
+    '''The model is not supported by the adapter'''
 
 class ModbusTCPErrorType(StrEnum):
     #connection errors
+    NONE = ''
     NAME_RESOLVE = 'name_resolve_error'
     CONNECT_FAILED = 'connect_error'
     SEND_FAILED = 'socket_send_error'
@@ -39,50 +37,105 @@ class ModbusTCPErrorType(StrEnum):
     SOCK_CLOSED = 'socket_is_closed'
     
     # Modbus except code
-    EXP_NONE = 'no_exception'
-    EXP_ILLEGAL_FUNCTION = 'illegal_function'
-    EXP_DATA_ADDRESS = 'illegal_data_address'
-    EXP_DATA_VALUE = 'illegal_data_value'
-    EXP_SLAVE_DEVICE_FAILURE = 'slave_device_failure'
-    EXP_ACKNOWLEDGE = 'acknowledge'
-    EXP_SLAVE_DEVICE_BUSY = 'slave_device_busy'
-    EXP_NEGATIVE_ACKNOWLEDGE = 'negative_acknowledge'
-    EXP_MEMORY_PARITY_ERROR = 'memory_parity_error'
-    EXP_GATEWAY_PATH_UNAVAILABLE = 'gateway_path_unavailable'
-    EXP_GATEWAY_TARGET_DEVICE_FAILED_TO_RESPOND = 'gateway_target_device_failed_to_respond'
+    EXCEPT_NONE = 'no_exception'
+    EXCEPT_ILLEGAL_FUNCTION = 'illegal_function'
+    EXCEPT_DATA_ADDRESS = 'illegal_data_address'
+    EXCEPT_DATA_VALUE = 'illegal_data_value'
+    EXCEPT_SLAVE_DEVICE_FAILURE = 'slave_device_failure'
+    EXCEPT_ACKNOWLEDGE = 'acknowledge'
+    EXCEPT_SLAVE_DEVICE_BUSY = 'slave_device_busy'
+    EXCEPT_NEGATIVE_ACKNOWLEDGE = 'negative_acknowledge'
+    EXCEPT_MEMORY_PARITY_ERROR = 'memory_parity_error'
+    EXCEPT_GATEWAY_PATH_UNAVAILABLE = 'gateway_path_unavailable'
+    EXCEPT_GATEWAY_TARGET_DEVICE_FAILED_TO_RESPOND = 'gateway_target_device_failed_to_respond'
     
     #local errors
     UNSUPPORTED_MODEL = "unsupported_model"
 
 class ModbusExceptCode(IntEnum):
-    EXP_NONE = 0x00
-    EXP_ILLEGAL_FUNCTION = 0x01
-    EXP_DATA_ADDRESS = 0x02
-    EXP_DATA_VALUE = 0x03
-    EXP_SLAVE_DEVICE_FAILURE = 0x04
-    EXP_ACKNOWLEDGE = 0x05
-    EXP_SLAVE_DEVICE_BUSY = 0x06
-    EXP_NEGATIVE_ACKNOWLEDGE = 0x07
-    EXP_MEMORY_PARITY_ERROR = 0x08
-    EXP_GATEWAY_PATH_UNAVAILABLE = 0x0A
-    EXP_GATEWAY_TARGET_DEVICE_FAILED_TO_RESPOND = 0x0B
+    NONE = 0x00
+    ILLEGAL_FUNCTION = 0x01
+    DATA_ADDRESS = 0x02
+    DATA_VALUE = 0x03
+    SLAVE_DEVICE_FAILURE = 0x04
+    ACKNOWLEDGE = 0x05
+    SLAVE_DEVICE_BUSY = 0x06
+    NEGATIVE_ACKNOWLEDGE = 0x07
+    MEMORY_PARITY_ERROR = 0x08
+    GATEWAY_PATH_UNAVAILABLE = 0x0A
+    GATEWAY_TARGET_DEVICE_FAILED_TO_RESPOND = 0x0B
 
 class ModbusTCPEventConnect(ModbusEventConnect):
     
     _client: ModbusClient|None = None# ModbusClient(host="", port=0, unit_id=0, auto_open=False, auto_close=False)
+    _device_id: str
+    _connection_error: Tuple[ModbusTCPErrorType, ModbusTCPErrorCode] = (ModbusTCPErrorType.NONE, ModbusTCPErrorCode.NONE)
+    '''The custom connection error that occured during the last connection attempt'''
+    DEFAULT_PORT = 502
+    DEFAULT_CONNECT_TIMEOUT = 10
+    DEFAULT_UNIT_ID = 1
+    DEFAULT_AUTO_OPEN = True
+    DEFAULT_AUTO_CLOSE = False
+    DEFAULT_REQUEST_LENGTH_MAX = 125
+
+    @property
+    def device_id(self) -> str: return self._device_id
     
+    @property
+    def port(self) -> int|None:
+        if self._client is None:
+            return None
+        return self._client.port
+    @property
+    def host(self) -> str|None:
+        if self._client is None:
+            return None
+        return self._client.host
+    @property
+    def unit_id(self) -> int|None:
+        if self._client is None:
+            return None
+        return self._client.unit_id
+    @property
+    def auto_open(self) -> bool|None:
+        if self._client is None:
+            return None
+        return self._client.auto_open
+    @property
+    def auto_close(self) -> bool|None:
+        if self._client is None:
+            return None
+        return self._client.auto_close
     @property
     def is_connected(self) -> bool: return self._client is not None and self._client.is_open and self._attr_adapter.ready
     @property
-    def last_error(self) -> str|None: 
+    def last_error(self) -> int: 
+        if self._connection_error[1] != ModbusTCPErrorCode.NONE: return self._connection_error[1]
+        if self._client is None: return ModbusTCPErrorCode.NONE
+        return int(self._client.last_error)  # type: ignore
+    @property
+    def last_except(self) -> int: 
+        if self._client is None: return ModbusExceptCode.NONE
+        return int(self._client.last_except)  # type: ignore
+    @property
+    def last_error_txt(self) -> str|None: 
+        if self._connection_error[0] != ModbusTCPErrorType.NONE: return self._connection_error[0]
         if self._client is None: return None
-        if int(self._client.last_error) == ModbusTCPErrorCode.NO_ERROR: return None # type: ignore
+        if int(self._client.last_error) == ModbusTCPErrorCode.NONE: return None # type: ignore
         if int(self._client.last_error) == ModbusTCPErrorCode.EXCEPT_ERROR: return self._client.last_except_as_txt # type: ignore
         return self._client.last_error_as_txt # type: ignore
          
-    async def connect(self, device_id:str, device_host:str, device_port:int=DEVICE_PORT, unit_id:int=UNIT_ID, auto_open:bool=AUTO_OPEN, auto_close:bool=AUTO_CLOSE, timeout:float = CONNECT_TIMEOUT) -> bool:
+    async def connect(self, device_id:str, host:str, port:int|None=None, unit_id:int|None=None, timeout:float|None=None, auto_open:bool|None=None, auto_close:bool|None=None) -> bool:
+        self._connection_error = (ModbusTCPErrorType.NONE, ModbusTCPErrorCode.NONE)
+        self._device_id = device_id
+        if port is None or port < 1 or port > 65535: port = self.DEFAULT_PORT
+        if unit_id is None or unit_id < 1: unit_id = self.DEFAULT_UNIT_ID
+        if timeout is None or timeout < 1: timeout = self.DEFAULT_CONNECT_TIMEOUT
+        if auto_open is None or auto_open < 1: auto_open = self.DEFAULT_AUTO_OPEN
+        if auto_close is None or auto_close < 1: auto_close = self.DEFAULT_AUTO_CLOSE
+        
         self.stop()
-        self._client = ModbusClient(host=device_host, port=device_port, unit_id=unit_id, auto_open=auto_open, auto_close=auto_close)
+        self._client = ModbusClient(host=host, port=port, unit_id=unit_id, timeout=timeout, auto_open=auto_open, auto_close=auto_close)
         success = self._client.open()
         if not success: return False
         device_identification = self._client.read_device_identification()
@@ -100,8 +153,8 @@ class ModbusTCPEventConnect(ModbusEventConnect):
         _LOGGER.debug(f"Device identification: {identification if identification is not None else self._client.last_except_as_full_txt}")
         
         device_info = ModbusDeviceInfo(device_id=device_id, 
-                                       device_host=device_host,
-                                       device_port=device_port,
+                                       device_host=host,
+                                       device_port=port,
                                        version=VersionInfo(),
                                        identification=identification,
                                        )
@@ -114,7 +167,7 @@ class ModbusTCPEventConnect(ModbusEventConnect):
             return True
         else:
             _LOGGER.error(f"No model available for {device_info}")
-            self._connection_error = ModbusTCPErrorType.UNSUPPORTED_MODEL
+            self._connection_error = (ModbusTCPErrorType.UNSUPPORTED_MODEL, ModbusTCPErrorCode.UNSUPPORTED_MODEL) 
             return False
     
     def stop(self) -> None:
@@ -135,9 +188,9 @@ class ModbusTCPEventConnect(ModbusEventConnect):
                 last_error: int|None = self._client.last_error # type: ignore
                 if last_error == ModbusTCPErrorCode.EXCEPT_ERROR: 
                     last_except: int|None = self._client.last_except # type: ignore
-                    if last_except == ModbusExceptCode.EXP_ILLEGAL_FUNCTION:
+                    if last_except == ModbusExceptCode.ILLEGAL_FUNCTION:
                         _LOGGER.error(f"Device does not support reading datapoints registers, inform developer that the device '{self.device_info}' has this error")
-                    if last_except == ModbusExceptCode.EXP_DATA_ADDRESS:
+                    if last_except == ModbusExceptCode.DATA_ADDRESS:
                         if len(points) == 1:
                             point = points[0]
                             kv.append((points[0], None))
@@ -148,7 +201,7 @@ class ModbusTCPEventConnect(ModbusEventConnect):
                                 data = self._client.read_input_registers(point.read_address, 1)  # type: ignore
                                 if data is not None:
                                     self._append_data(kv, [point], data)
-                                elif self._client.last_error == ModbusTCPErrorCode.EXCEPT_ERROR and self._client.last_except == ModbusExceptCode.EXP_DATA_ADDRESS: # type: ignore
+                                elif self._client.last_error == ModbusTCPErrorCode.EXCEPT_ERROR and self._client.last_except == ModbusExceptCode.DATA_ADDRESS: # type: ignore
                                     kv.append((point, None))
                                     self._handle_invalid_address(point)
                     else: 
@@ -172,9 +225,9 @@ class ModbusTCPEventConnect(ModbusEventConnect):
                 last_error: int|None = self._client.last_error # type: ignore
                 if last_error == ModbusTCPErrorCode.EXCEPT_ERROR: 
                     last_except: int|None = self._client.last_except # type: ignore
-                    if last_except == ModbusExceptCode.EXP_ILLEGAL_FUNCTION:
+                    if last_except == ModbusExceptCode.ILLEGAL_FUNCTION:
                         _LOGGER.error(f"Device does not support reading setpoints registers, inform developer that the device '{self.device_info}' has this error")
-                    if last_except == ModbusExceptCode.EXP_DATA_ADDRESS:
+                    if last_except == ModbusExceptCode.DATA_ADDRESS:
                         if len(points) == 1:
                             point = points[0]
                             kv.append((points[0], None))
@@ -185,7 +238,7 @@ class ModbusTCPEventConnect(ModbusEventConnect):
                                 data = self._client.read_input_registers(point.read_address, 1)  # type: ignore
                                 if data is not None:
                                     self._append_data(kv, [point], data)
-                                elif self._client.last_error == ModbusTCPErrorCode.EXCEPT_ERROR and self._client.last_except == ModbusExceptCode.EXP_DATA_ADDRESS: # type: ignore
+                                elif self._client.last_error == ModbusTCPErrorCode.EXCEPT_ERROR and self._client.last_except == ModbusExceptCode.DATA_ADDRESS: # type: ignore
                                     kv.append((point, None))
                                     self._handle_invalid_address(point)
                     else: 
@@ -233,7 +286,7 @@ class ModbusTCPEventConnect(ModbusEventConnect):
             elif len(batch) == 0:
                 batch.append(point)
             elif (batch[-1].read_address is not None and batch[0].read_address is not None and # they are never none.
-                  batch[-1].read_address + 1 == point.read_address and ( point.read_address + point.read_length - batch[0].read_address) <= REQUEST_LENGTH_MAX):
+                  batch[-1].read_address + 1 == point.read_address and ( point.read_address + point.read_length - batch[0].read_address) <= self.DEFAULT_REQUEST_LENGTH_MAX):
                 batch.append(point)
             else:
                 yield batch
