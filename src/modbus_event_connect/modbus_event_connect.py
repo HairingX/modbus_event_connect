@@ -36,9 +36,6 @@ class ModbusEventConnect(ABC):
     @property
     def model_name(self) -> str: return self._attr_adapter.model_name
     
-    def provides(self, key: ModbusPointKey) -> bool:
-        """Check if the device provides a datapoint or setpoint."""
-        return self._attr_adapter.provides(key)
     
     async def request_initial_data(self) -> None:
         """Request the current value of all points used in initialization, ex. version."""
@@ -80,8 +77,30 @@ class ModbusEventConnect(ABC):
         if len(point_values) == 0: return False
         return self._request_setpoint_writes(point_values)
         
+    def has_value(self, key: ModbusPointKey) -> bool:
+        """Check if the device has a value for a datapoint or setpoint."""
+        return self._attr_adapter.has_value(key)
     def get_value(self, key: ModbusPointKey) -> MODBUS_VALUE_TYPES|None:
+        """Get the value of a datapoint or setpoint."""
         return self._attr_adapter.get_value(key)
+    def get_min_value(self, key: ModbusSetpointKey) -> float|int|None:
+        """Get the minimum value of a setpoint."""
+        return self._attr_adapter.get_min_value(key)
+    def get_max_value(self, key: ModbusSetpointKey) -> float|int|None:
+        """Get the maximum value of a setpoint."""
+        return self._attr_adapter.get_max_value(key)
+    def get_unit_of_measure(self, key: ModbusPointKey) -> str|None:
+        """Get the unit of measure of a datapoint or setpoint."""
+        return self._attr_adapter.get_unit_of_measure(key)
+    def get_setpoint_step(self, key: ModbusSetpointKey) -> float|int:
+        """Get the step size of a setpoint."""
+        return self._attr_adapter.get_setpoint_step(key)
+    def provides(self, key: ModbusPointKey) -> bool:
+        """Check if the device provides a datapoint or setpoint."""
+        return self._attr_adapter.provides(key)
+    def get_values(self) -> Dict[ModbusPointKey, MODBUS_VALUE_TYPES|None]:
+        """Get the values of all datapoints and setpoints."""
+        return self._attr_adapter.get_values()
     
     def subscribe(self, key: ModbusPointKey, update_method: Callable[[ModbusPointKey, MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None], None]):
         """
