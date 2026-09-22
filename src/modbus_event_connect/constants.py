@@ -66,6 +66,16 @@ class ByteOrder(StrEnum):
     LITTLE = auto()
     """the two bytes are swapped within each 16-bit register"""
 
+class RegisterTable(StrEnum):
+    INPUT = auto()
+    """FC 0x04, read-only 16-bit registers"""
+    HOLDING = auto()
+    """FC 0x03 read, 0x06/0x10 write, read-write 16-bit registers"""
+    DISCRETE = auto()
+    """FC 0x02, read-only single bits"""
+    COIL = auto()
+    """FC 0x01 read, 0x05 write, read-write single bits"""
+
 class Read(Flag):
     REQUESTED = 0b0001
     """Read when requested (default)"""

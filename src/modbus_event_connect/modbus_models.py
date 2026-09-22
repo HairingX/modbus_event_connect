@@ -81,6 +81,8 @@ class ModbusDatapoint:
     read_address: int
     read_length: int = 1
     """Number of registers the point is using. Defaults to 1"""
+    register_table: RegisterTable = RegisterTable.INPUT
+    """Which Modbus address space read_address lives in. Defaults to INPUT (FC 0x04), i.e. today's behaviour"""
     signed: bool = False
     """indication of the data being signed or unsigned (positive only). Defaults to False"""
     word_order: WordOrder = WordOrder.HIGH_FIRST
@@ -123,6 +125,8 @@ class ModbusSetpoint:
     read_address: Optional[int] = None
     read_length: int = 1
     """Number of registers the point is using. Defaults to 1"""
+    register_table: RegisterTable = RegisterTable.HOLDING
+    """Which Modbus address space read_address lives in. Defaults to HOLDING (FC 0x03), i.e. today's behaviour"""
     signed: bool = False
     """indication of the data being signed or unsigned (positive only). Defaults to False"""
     word_order: WordOrder = WordOrder.HIGH_FIRST
@@ -419,6 +423,8 @@ class ModbusDeviceBase(ModbusDevice):
             if point.write_modifier is not None and point.write_address is None:
                 raise ValueError(f"Setpoint {point.key} has a write_modifier but no write_address")
             if point.write_length < 1: raise ValueError(f"Setpoint {point.key} has a write_length less than 1")
+            if point.write_address is not None and point.register_table in (RegisterTable.INPUT, RegisterTable.DISCRETE):
+                raise ValueError(f"Setpoint {point.key} has a write_address but its register_table ({point.register_table}) is read-only")
          
         self._device_info.manufacturer = self._attr_manufacturer
         self._device_info.model_name = self._attr_model_name

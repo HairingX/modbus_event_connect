@@ -1,7 +1,7 @@
 import asyncio
 from enum import IntEnum
 import logging
-from typing import Any, Awaitable, Callable, Generator, Sequence
+from typing import Any, Awaitable, Callable, Dict, Generator, Sequence
 from ..modbus_event_connect import *
 from ..modbus_models import *
 from .transport import (
@@ -248,7 +248,9 @@ class ModbusTCPEventConnect(ModbusEventConnect):
 
         Uses a register the device model guarantees exists - the first point read at startup,
         normally an address-space version - so the probe cannot itself fail with
-        ILLEGAL_DATA_ADDRESS and be mistaken for the device being unwell.
+        ILLEGAL_DATA_ADDRESS and be mistaken for the device being unwell. It is read from the
+        table that point declares: a model that keeps everything in holding registers would
+        otherwise be probed in the input space, at an address that means something else.
 
         Measured at ~1 ms against a Sentio CCU-208, so polling this while waiting out a busy
         period is far cheaper than re-reading real data to find out.
@@ -257,7 +259,7 @@ class ModbusTCPEventConnect(ModbusEventConnect):
         if transport is None: return
         point = self._probe_point()
         if point is None: return
-        await transport.read_input_registers(point.read_address, 1)
+        await self._reader_for(point.register_table)(point.read_address, 1)
         self._set_status(ModbusStatusKey.LAST_EXCEPTION_CODE, transport.last_exception_code)
         self._set_status(ModbusStatusKey.DEVICE_BUSY,
                          1 if transport.last_exception_code == EXCEPTION_SLAVE_DEVICE_BUSY else 0)
@@ -274,38 +276,55 @@ class ModbusTCPEventConnect(ModbusEventConnect):
         points = self._attr_adapter.get_datapoints_for_read()
         return points[0] if points else None
 
+    def _reader_for(self, table: RegisterTable) -> Callable[[int, int], Awaitable[List[int]|List[bool]|None]]:
+        """Pick the transport method that reads the given address space."""
+        transport = self._transport
+        assert transport is not None
+        if table == RegisterTable.INPUT: return transport.read_input_registers
+        if table == RegisterTable.HOLDING: return transport.read_holding_registers
+        if table == RegisterTable.DISCRETE: return transport.read_discrete_inputs
+        return transport.read_coils
+
     async def _request_datapoint_read(self, points: List[ModbusDatapoint]) -> List[Tuple[ModbusDatapoint, MODBUS_VALUE_TYPES|None]]:
         transport = self._transport
         if transport is None:
             _LOGGER.warning("Cannot read datapoints, not connected")
             return []
-        return await self._request_points_read(points, transport.read_input_registers, "datapoints")
+        return await self._request_points_read(points, "datapoints")
 
     async def _request_setpoint_read(self, points: List[ModbusSetpoint]) -> List[Tuple[ModbusSetpoint, MODBUS_VALUE_TYPES|None]]:
         transport = self._transport
         if transport is None:
             _LOGGER.warning("Cannot read setpoints, not connected")
             return []
-        # Setpoints are holding registers - here AND in the per-point fallback below.
-        return await self._request_points_read(points, transport.read_holding_registers, "setpoints")
+        return await self._request_points_read(points, "setpoints")
 
-    async def _request_points_read(self, points: Sequence[MODBUS_POINT_TYPE],
-                                   reader: Callable[[int, int], Awaitable[List[int]|None]], what: str) -> List[Tuple[MODBUS_POINT_TYPE, MODBUS_VALUE_TYPES|None]]:
+    async def _request_points_read(self, points: Sequence[MODBUS_POINT_TYPE], what: str) -> List[Tuple[MODBUS_POINT_TYPE, MODBUS_VALUE_TYPES|None]]:
         kv: List[Tuple[MODBUS_POINT_TYPE, MODBUS_VALUE_TYPES|None]] = []
         for batch in self.batch_reads(points):
             first, last = batch[0], batch[-1]
             if first.read_address is None or last.read_address is None: continue
+            reader = self._reader_for(first.register_table)
             read_length = last.read_address + last.read_length - first.read_address
-            data: List[int]|None = await self._call_device(reader, first.read_address, read_length)
+            data = await self._call_device(reader, first.read_address, read_length)
+            data = self._normalize_read_result(data)
             if data is not None:
                 self._append_data(kv, batch, data)
             else:
                 await self._handle_batch_failure(kv, batch, reader, what)
         return kv
 
+    def _normalize_read_result(self, data: "List[int]|List[bool]|None") -> List[int]|None:
+        """
+        read_discrete_inputs/read_coils return List[bool]; the rest of the decoding path
+        (ModbusParser etc.) expects raw register ints, so bits become 0/1 here.
+        """
+        if data is None: return None
+        return [int(v) for v in data]
+
     async def _handle_batch_failure(self, kv: List[Tuple[MODBUS_POINT_TYPE, MODBUS_VALUE_TYPES|None]],
                                     batch: List[MODBUS_POINT_TYPE],
-                                    reader: Callable[[int, int], Awaitable[List[int]|None]],
+                                    reader: Callable[[int, int], Awaitable[List[int]|List[bool]|None]],
                                     what: str) -> None:
         """
         Deal with a batch the device refused.
@@ -346,7 +365,8 @@ class ModbusTCPEventConnect(ModbusEventConnect):
         for point in batch:
             if point.read_address is None: continue
             # Read the point's own width; a multi-register point read as 1 register decodes wrongly.
-            data: List[int]|None = await self._call_device(reader, point.read_address, point.read_length)
+            data = await self._call_device(reader, point.read_address, point.read_length)
+            data = self._normalize_read_result(data)
             if data is not None:
                 self._append_data(kv, [point], data)
             elif transport.last_exception_code == EXCEPTION_ILLEGAL_DATA_ADDRESS:
@@ -413,9 +433,13 @@ class ModbusTCPEventConnect(ModbusEventConnect):
         """
         Group points into runs of genuinely adjacent registers, each fetchable in one request.
 
-        A point may only join a batch if it starts exactly where the previous one ends
-        (`read_address + read_length`). Stepping by 1 instead lets a multi-register point
-        overlap its neighbour, and `_append_data` then slices the response wrongly - the
+        Points are first grouped by `register_table`: INPUT, HOLDING, DISCRETE and COIL are
+        four separate address spaces, so address 1 in INPUT and address 1 in HOLDING are
+        unrelated registers and must never be merged into the same request.
+
+        Within a table, a point may only join a batch if it starts exactly where the previous
+        one ends (`read_address + read_length`). Stepping by 1 instead lets a multi-register
+        point overlap its neighbour, and `_append_data` then slices the response wrongly - the
         neighbour silently decodes to 0. It also splits runs that are in fact contiguous.
 
         Batches are capped at the device's documented maximum request length. Devices commonly
@@ -423,19 +447,24 @@ class ModbusTCPEventConnect(ModbusEventConnect):
         """
         max_length = self._max_request_length()
         readable: List[MODBUS_POINT_TYPE] = [p for p in points if p.read_address is not None]
-        ordered: List[MODBUS_POINT_TYPE] = sorted(readable, key=lambda x: x.read_address or 0)
-        batch: List[MODBUS_POINT_TYPE] = []
-        for point in ordered:
-            if not batch:
-                batch = [point]
-                continue
-            previous, first = batch[-1], batch[0]
-            contiguous = previous.read_address + previous.read_length == point.read_address  # type: ignore
-            span = point.read_address + point.read_length - first.read_address              # type: ignore
-            if contiguous and span <= max_length:
-                batch.append(point)
-            else:
+        by_table: Dict[RegisterTable, List[MODBUS_POINT_TYPE]] = {}
+        for point in readable:
+            by_table.setdefault(point.register_table, []).append(point)
+
+        for table_points in by_table.values():
+            ordered: List[MODBUS_POINT_TYPE] = sorted(table_points, key=lambda x: x.read_address or 0)
+            batch: List[MODBUS_POINT_TYPE] = []
+            for point in ordered:
+                if not batch:
+                    batch = [point]
+                    continue
+                previous, first = batch[-1], batch[0]
+                contiguous = previous.read_address + previous.read_length == point.read_address  # type: ignore
+                span = point.read_address + point.read_length - first.read_address              # type: ignore
+                if contiguous and span <= max_length:
+                    batch.append(point)
+                else:
+                    yield batch
+                    batch = [point]
+            if batch:
                 yield batch
-                batch = [point]
-        if batch:
-            yield batch
