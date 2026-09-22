@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Any
 import logging
 import pytest
+import pytest_asyncio
 from datetime import UTC, datetime
 
 from credentials import Credentials
@@ -13,13 +14,18 @@ import asyncio
 
 _LOGGER = logging.getLogger(__name__)
 
+# The client holds one socket bound to the loop it was opened on, so the fixture and every
+# test that uses it must share a single event loop. Without this each test gets a fresh loop
+# and its requests are never completed by the loop the socket belongs to.
+pytestmark = pytest.mark.asyncio(loop_scope="session")
+
 @dataclass
 class TestData:
     client: ModbusTestTCP
     data = dict[str, Any]()
     credentials: Credentials
     
-@pytest.fixture(scope="session")
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
 async def testdata():
     #setup
     credentials = Credentials(["hostname"])
@@ -28,7 +34,7 @@ async def testdata():
     # 
     yield TestData(client=client, credentials=credentials)
     #teardown
-    client.stop()
+    await client.stop()
 
 async def test_connect(testdata: TestData):
     client = testdata.client

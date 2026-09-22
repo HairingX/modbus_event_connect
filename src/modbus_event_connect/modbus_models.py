@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
-from enum import StrEnum
+from enum import StrEnum, auto
 from functools import reduce
 from typing import Dict, List, NotRequired, Optional, Set, Tuple, TypeVar, TypedDict
 
@@ -22,6 +22,40 @@ class ModbusDatapointKey(ModbusPointKey):
     @staticmethod
     def _generate_next_value_(name:str, start:int, count:int, last_values:List[str]) -> str:
         return f"datapoint_{name.lower()}"
+
+class ModbusStatusKey(ModbusPointKey):
+    """
+    Connection state, subscribable exactly like a register but not read from one.
+
+    These let a consumer answer "can I write right now?" without guessing. They are pushed by
+    the transport as it works, so a subscriber is told the moment the device stops being busy.
+    """
+    @staticmethod
+    def _generate_next_value_(name:str, start:int, count:int, last_values:List[str]) -> str:
+        return f"status_{name.lower()}"
+
+    CONNECTED = auto()
+    """True while the transport is open and a device model is loaded."""
+    DEVICE_BUSY = auto()
+    """
+    True while the device is answering SLAVE_DEVICE_BUSY (0x06).
+
+    Devices raise it while persisting a configuration change - after any write, and after any
+    change made at the device's own user interface. Writes issued while this is True will be
+    retried internally, but a consumer that queues its own writes should wait for this to go
+    False rather than pile requests up.
+    """
+    WRITE_PENDING = auto()
+    """
+    True from the moment this client starts a write until the device has settled.
+
+    Unlike DEVICE_BUSY this does not depend on the device reporting anything: it is true for
+    every write, so a UI can disable its inputs and show that work is in progress even when
+    the controller answers instantly. Covers the write itself and the wait that follows it.
+    """
+    LAST_EXCEPTION_CODE = auto()
+    """Modbus exception code from the most recent request; 0 when the request succeeded."""
+
 
 class ModbusSetpointKey(ModbusPointKey):
     """
@@ -53,13 +87,20 @@ class ModbusDatapoint:
     """Applied to the register value in the order: 1: divider, 2: offset, 3: modifier"""
     max: int = 0
     """
-    max value in the register. If the value is greater than this, it will be seen as invalid. 
-    Defaults to read_length * 16bit (signed max value).
-    
-    If set to -1, the value will be set to (read_length * 2^16) - 1. the max value for the value will be seen as invalid.
+    Highest valid raw register value. A value above this is treated as invalid (None).
+
+    Leave at 0 to derive it from `read_length` and `signed`:
+    unsigned -> (2^bits)-1, signed -> (2^(bits-1))-1.
+    Set to -1 to derive it the same way but one lower, so the type's maximum doubles as the
+    device's invalid-value sentinel.
     """
-    min: int = 0
-    """min value in the register. If the value is less than this, it will be seen as invalid."""
+    min: Optional[int] = None
+    """
+    Lowest valid raw register value. A value below this is treated as invalid (None).
+
+    Leave as None to derive it from `signed`: unsigned -> 0, signed -> -(2^(bits-1)).
+    Setting this to 0 on a signed point makes every negative reading invalid.
+    """
     offset: int = 0
     """Applied to the register value in the order: 1: divider, 2: offset, 3: modifier"""
     read_modifier: Optional[Callable[[float|int], float|int]] = None
@@ -84,13 +125,20 @@ class ModbusSetpoint:
     """Applied to the register value in the order: 1: divider, 2: offset, 3: modifier"""
     max: int = 0
     """
-    max value in the register. If the value is greater than this, it will be seen as invalid. 
-    Defaults to read_length * 16bit (signed max value).
-    
-    If set to -1, the value will be set to (read_length * 2^16) - 1. the max value for the value will be seen as invalid.
+    Highest valid raw register value. A value above this is treated as invalid (None).
+
+    Leave at 0 to derive it from `read_length` and `signed`:
+    unsigned -> (2^bits)-1, signed -> (2^(bits-1))-1.
+    Set to -1 to derive it the same way but one lower, so the type's maximum doubles as the
+    device's invalid-value sentinel.
     """
-    min: int = 0
-    """min value in the register. If the value is less than this, it will be seen as invalid"""
+    min: Optional[int] = None
+    """
+    Lowest valid raw register value. A value below this is treated as invalid (None).
+
+    Leave as None to derive it from `signed`: unsigned -> 0, signed -> -(2^(bits-1)).
+    Setting this to 0 on a signed point makes every negative reading invalid.
+    """
     offset: int = 0
     """Applied to the register value in the order: 1: divider, 2: offset, 3: modifier"""
     read_modifier: Optional[Callable[[float|int], float|int]] = None
@@ -231,6 +279,10 @@ class ModbusDevice(ABC):
     @abstractmethod
     def model_name(self) -> str:
         raise NotImplementedError("Method not implemented")
+    @property
+    def max_request_length(self) -> int:
+        """Maximum registers this device accepts in one read request."""
+        return MODBUS_MAX_REQUEST_LENGTH
     
     @abstractmethod
     def get_datapoint(self, key: ModbusDatapointKey) -> ModbusDatapoint|None:
@@ -292,11 +344,18 @@ class ModbusDeviceBase(ModbusDevice):
     """Manufacturer of the device. Must be assigned in the __init__ method"""
     _attr_model_name:str
     """Model name of the device. Must be assigned in the __init__ method"""
-    _attr_version_keys: VersionInfoKeys 
+    _attr_version_keys: VersionInfoKeys
     """Keys used to get the version info"""
     _attr_setpoints: List[ModbusSetpoint]
     """Setpoints for the device. Must be assigned in the __init__ method"""
-    
+    _attr_max_request_length: int = MODBUS_MAX_REQUEST_LENGTH
+    """
+    Maximum number of registers this device accepts in a single read request.
+
+    The Modbus protocol allows 125, but many devices document a lower limit and answer an
+    exception above it. Override in the device model when the manual states one.
+    """
+
     _version_point_keys = set[ModbusPointKey]()
     _datapoints = dict[ModbusDatapointKey, ModbusDatapointData]()
     _setpoints = dict[ModbusSetpointKey, ModbusSetpointData]()
@@ -310,7 +369,10 @@ class ModbusDeviceBase(ModbusDevice):
     @property
     def model_name(self) -> str:
         return self._attr_model_name
-    
+    @property
+    def max_request_length(self) -> int:
+        return max(1, min(self._attr_max_request_length, MODBUS_MAX_REQUEST_LENGTH))
+
     def instantiate(self) -> None:
         if not self._attr_manufacturer:
             raise ValueError("Manufacturer not set")
@@ -326,9 +388,15 @@ class ModbusDeviceBase(ModbusDevice):
         #check for shared errors in the datapoints and setpoints
         for point in self._attr_datapoints + self._attr_setpoints:
             if point.read_length < 1: raise ValueError(f"Setpoint {point.key} has a read_length less than 1")
-            if point.max == 0: point.max = (1 << (point.read_length * 2 * 8)) - 1 #set max to the max value for the register length
-            if point.max == -1: point.max = (1 << (point.read_length * 2 * 8)) - 2 #set max to the max value for the register length -1 
+            # Resolve max/min from the register width AND the sign, so that a signed point does
+            # not silently inherit unsigned limits. Range checking happens after sign extension,
+            # so a signed point left with min=0 would reject every negative reading.
+            bits = point.read_length * 16
+            type_max = (1 << (bits - 1)) - 1 if point.signed else (1 << bits) - 1
+            if point.max == 0: point.max = type_max          #highest value the register can hold
+            elif point.max == -1: point.max = type_max - 1   #highest value doubles as the invalid sentinel
             if point.max < 0: raise ValueError(f"Setpoint {point.key} has an invalid negative max value")
+            if point.min is None: point.min = -(1 << (bits - 1)) if point.signed else 0
             if point.min > point.max: raise ValueError(f"Setpoint {point.key} has min value greater than max value")
             if point.value_type not in [ModbusValueType.AUTO, ModbusValueType.FLOAT, ModbusValueType.INT]:
                 # value_type is a string encoding
@@ -378,13 +446,15 @@ class ModbusDeviceBase(ModbusDevice):
     def get_max_value(self, key: ModbusSetpointKey) -> float | int | None:
         if self.provides(key):
             point = self._setpoints[key].point
-            return ModbusParser.apply_offset_divider_modifier(point=point, value=point.max)
+            return ModbusParser.apply_offset_divider_modifier(
+                point=point, value=ModbusParser.get_point_max(point))
         return None
 
     def get_min_value(self, key: ModbusSetpointKey) -> float | int | None:
         if self.provides(key):
             point = self._setpoints[key].point
-            return ModbusParser.apply_offset_divider_modifier(point=point, value=point.min)
+            return ModbusParser.apply_offset_divider_modifier(
+                point=point, value=ModbusParser.get_point_min(point))
         return None
 
     def get_setpoint(self, key: ModbusSetpointKey) -> ModbusSetpoint | None:
@@ -482,6 +552,7 @@ class ModbusDeviceBase(ModbusDevice):
         elif isinstance(key, ModbusSetpointKey):
             data = self._setpoints.get(key)
             if data is not None:
+                old_value = data.value
                 assigned_value = data.value = value
         return (old_value, assigned_value)
     
@@ -704,11 +775,21 @@ class ModbusParser:
     def get_point_step(point:ModbusSetpoint) -> int: 
         return point.divider if point.step is None else point.step
     @staticmethod
-    def get_point_max(point:ModbusDatapoint|ModbusSetpoint) -> int: 
+    def get_point_type_max(point:ModbusDatapoint|ModbusSetpoint) -> int:
+        """Highest raw value the register can hold, given its width and sign."""
+        bits = point.read_length * 16
+        return (1 << (bits - 1)) - 1 if point.signed else (1 << bits) - 1
+    @staticmethod
+    def get_point_max(point:ModbusDatapoint|ModbusSetpoint) -> int:
+        # Mirrors ModbusDeviceBase.instantiate() so the parser is correct for points that were
+        # built directly, without going through a device model.
+        if point.max == 0: return ModbusParser.get_point_type_max(point)
+        if point.max == -1: return ModbusParser.get_point_type_max(point) - 1
         return point.max
     @staticmethod
-    def get_point_min(point:ModbusDatapoint|ModbusSetpoint) -> int: 
-        return point.min
+    def get_point_min(point:ModbusDatapoint|ModbusSetpoint) -> int:
+        if point.min is not None: return point.min
+        return -(1 << (point.read_length * 16 - 1)) if point.signed else 0
     @staticmethod
     def get_point_read_modifier(point:ModbusDatapoint|ModbusSetpoint) -> Callable[[float|int], float|int]|None: 
         return None if point.read_modifier is None else point.read_modifier

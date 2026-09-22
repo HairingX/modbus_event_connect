@@ -5,6 +5,10 @@ NONE_BYTE = '\x00'
 MODBUS_VALUE_TYPES = float|int|str
 """The types of values that can be read from a Modbus device."""
 
+MODBUS_MAX_REQUEST_LENGTH = 125
+"""Maximum registers per read request allowed by the Modbus protocol itself.
+Individual devices may document a lower limit; see ModbusDeviceBase._attr_max_request_length."""
+
 class UOM:
     SECONDS = "seconds"
     """Time in seconds"""

@@ -6,13 +6,19 @@ from .modbus_models import ( MODBUS_VALUE_TYPES, ModbusDeviceInfo, ModbusPointKe
 
 _LOGGER = logging.getLogger(__name__)
 
+
+class ModbusNoModelLoadedError(RuntimeError):
+    """Raised when the client is used before connect() has loaded a device model."""
+
+
 class ModbusDeviceAdapter(ModbusDevice):
     _device_info: ModbusDeviceInfo
-    _loaded_model: ModbusDevice|None
-    
+
     def __init__(self):
-        pass
-    
+        # Must be initialised here. Without it every accessor raised AttributeError instead of
+        # reporting "no model loaded", which broke subscribing before connecting.
+        self._loaded_model: ModbusDevice|None = None
+
     def load_device_model(self, device_info: ModbusDeviceInfo) -> None:
         self._device_info = device_info
         model_to_load = self._translate_to_model(device_info)
@@ -31,10 +37,18 @@ class ModbusDeviceAdapter(ModbusDevice):
     
     #region ModbusDevice
     
+    @property
+    def has_model(self) -> bool:
+        """True once a device model has been loaded. Never raises."""
+        return getattr(self, "_loaded_model", None) is not None
+
     def _get_loaded_model(self) -> ModbusDevice:
-        if self._loaded_model is None:
-            raise Exception("No model loaded")
-        return self._loaded_model
+        # getattr guards against a subclass __init__ that forgets super().__init__().
+        loaded_model = getattr(self, "_loaded_model", None)
+        if loaded_model is None:
+            raise ModbusNoModelLoadedError(
+                "No device model loaded. Call connect() before using the client.")
+        return loaded_model
 
     def get_datapoint(self, key: ModbusDatapointKey) -> ModbusDatapoint|None:
         return self._get_loaded_model().get_datapoint(key)
@@ -48,13 +62,17 @@ class ModbusDeviceAdapter(ModbusDevice):
         return self._get_loaded_model().get_initial_setpoints_for_read()
 
     @property
-    def ready(self): return self._loaded_model is not None and self._loaded_model.ready
+    def ready(self):
+        loaded_model = getattr(self, "_loaded_model", None)
+        return loaded_model is not None and loaded_model.ready
     @property
     def device_info(self): return self._get_loaded_model().device_info
     @property
     def manufacturer(self): return self._get_loaded_model().manufacturer
     @property
     def model_name(self): return self._get_loaded_model().model_name
+    @property
+    def max_request_length(self): return self._get_loaded_model().max_request_length
     
     def get_max_value(self, key: ModbusSetpointKey) -> float|int|None:
         return self._get_loaded_model().get_max_value(key)

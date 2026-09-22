@@ -6,4 +6,5 @@
 setuptools
 pytest
 pytest-asyncio
-pyModbusTCP ==0.3.0
+# The only Modbus dependency. Natively async, per Home Assistant's async-dependency rule.
+pymodbus >=3.6,<4

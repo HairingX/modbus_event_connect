@@ -1,5 +1,5 @@
 from .modbus_event_connect import ( ModbusEventConnect )
-from .modbus_deviceadapter import ( ModbusDeviceAdapter )
+from .modbus_deviceadapter import ( ModbusDeviceAdapter, ModbusNoModelLoadedError )
 from .modbus_models import ( 
         ModbusDatapoint, 
         ModbusDatapointData,
@@ -13,13 +13,15 @@ from .modbus_models import (
         ModbusSetpoint, 
         ModbusSetpointData,
         ModbusSetpointKey, 
+        ModbusStatusKey,
         ModbusValueType,
         Modifier,
         VersionInfo,
         VersionInfoKeys,
         )
 from .micro_nabto import ( MicroNabtoModbusDeviceInfo, MicroNabtoEventConnect )
-from .modbus_tcp import ( ModbusTCPEventConnect, ModbusTCPErrorCode, ModbusExceptCode )
+from .modbus_tcp import ( ModbusTCPEventConnect, ModbusTCPErrorCode, ModbusExceptCode,
+                          ModbusTransport, PymodbusTransport )
 from .constants import ( 
         MODBUS_VALUE_TYPES, 
         ModbusValueType,
@@ -38,6 +40,7 @@ __all__ = [
     "ModbusDatapointKey",
     "ModbusDevice",
     "ModbusDeviceAdapter",
+    "ModbusNoModelLoadedError",
     "ModbusDeviceBase",
     "ModbusDeviceIdenfication",
     "ModbusDeviceInfo",
@@ -47,9 +50,12 @@ __all__ = [
     "ModbusSetpoint",
     "ModbusSetpointData",
     "ModbusSetpointKey",
+    "ModbusStatusKey",
     "ModbusTCPEventConnect",
     "ModbusTCPErrorCode",
     "ModbusExceptCode",
+    "ModbusTransport",
+    "PymodbusTransport",
     "ModbusValueType",
     "Modifier",
     "Read",
