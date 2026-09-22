@@ -61,6 +61,10 @@ class ModbusTransport(Protocol):
 
     async def read_discrete_inputs(self, address: int, count: int) -> List[bool] | None: ...
 
+    async def read_coils(self, address: int, count: int) -> List[bool] | None: ...
+
+    async def write_coil(self, address: int, value: bool) -> bool: ...
+
     async def write_register(self, address: int, value: int) -> bool: ...
 
     async def write_registers(self, address: int, values: Sequence[int]) -> bool: ...
@@ -183,6 +187,15 @@ class PymodbusTransport:
         if response is None: return None
         bits: List[bool] = [bool(b) for b in response.bits[:count]]
         return bits
+
+    async def read_coils(self, address: int, count: int) -> List[bool] | None:
+        response = await self._call("read_coils", address, count=count)
+        if response is None: return None
+        bits: List[bool] = [bool(b) for b in response.bits[:count]]
+        return bits
+
+    async def write_coil(self, address: int, value: bool) -> bool:
+        return (await self._call("write_coil", address, value)) is not None
 
     async def write_register(self, address: int, value: int) -> bool:
         return (await self._call("write_register", address, value)) is not None

@@ -22,16 +22,19 @@ from .modbus_models import (
 from .micro_nabto import ( MicroNabtoModbusDeviceInfo, MicroNabtoEventConnect )
 from .modbus_tcp import ( ModbusTCPEventConnect, ModbusTCPErrorCode, ModbusExceptCode,
                           ModbusTransport, PymodbusTransport )
-from .constants import ( 
-        MODBUS_VALUE_TYPES, 
+from .constants import (
+        ByteOrder,
+        MODBUS_VALUE_TYPES,
         ModbusValueType,
         Read,
-        UOM, 
-        ValueLimit, 
+        UOM,
+        ValueLimit,
+        WordOrder,
         )
 
 __version__ = "0.1.9"
 __all__ = [
+    "ByteOrder",
     "MicroNabtoEventConnect",
     "MicroNabtoModbusDeviceInfo",
     "MODBUS_VALUE_TYPES",
@@ -63,4 +66,5 @@ __all__ = [
     "ValueLimit",
     "VersionInfo",
     "VersionInfoKeys",
+    "WordOrder",
 ]

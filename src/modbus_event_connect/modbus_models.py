@@ -83,6 +83,10 @@ class ModbusDatapoint:
     """Number of registers the point is using. Defaults to 1"""
     signed: bool = False
     """indication of the data being signed or unsigned (positive only). Defaults to False"""
+    word_order: WordOrder = WordOrder.HIGH_FIRST
+    """Order of the 16-bit registers making up a multi-register value. Defaults to HIGH_FIRST (register[0] is the most significant word), i.e. today's behaviour"""
+    byte_order: ByteOrder = ByteOrder.BIG
+    """Order of the two bytes within each 16-bit register. Defaults to BIG (standard Modbus byte order), i.e. today's behaviour"""
     divider: int = 1
     """Applied to the register value in the order: 1: divider, 2: offset, 3: modifier"""
     max: int = 0
@@ -121,6 +125,10 @@ class ModbusSetpoint:
     """Number of registers the point is using. Defaults to 1"""
     signed: bool = False
     """indication of the data being signed or unsigned (positive only). Defaults to False"""
+    word_order: WordOrder = WordOrder.HIGH_FIRST
+    """Order of the 16-bit registers making up a multi-register value. Defaults to HIGH_FIRST (register[0] is the most significant word), i.e. today's behaviour"""
+    byte_order: ByteOrder = ByteOrder.BIG
+    """Order of the two bytes within each 16-bit register. Defaults to BIG (standard Modbus byte order), i.e. today's behaviour"""
     divider: int = 1
     """Applied to the register value in the order: 1: divider, 2: offset, 3: modifier"""
     max: int = 0
@@ -626,9 +634,25 @@ class Modifier:
     
 class ModbusParser:
     @staticmethod
-    def combine_values(values: List[int]) -> int:
+    def combine_values(values: List[int], *, word_order: WordOrder = WordOrder.HIGH_FIRST, byte_order: ByteOrder = ByteOrder.BIG) -> int:
         # Combine the list of 16-bit integers into a single integer
-        return reduce(lambda acc, val: (acc << 16) | val, values, 0)
+        ordered = ModbusParser._reorder_registers(values, word_order, byte_order)
+        return reduce(lambda acc, val: (acc << 16) | val, ordered, 0)
+
+    @staticmethod
+    def _reorder_registers(values: List[int], word_order: WordOrder, byte_order: ByteOrder) -> List[int]:
+        """
+        Transforms a register list between "on the wire" order and the canonical order used by
+        combine_values/bytes_to_values (register[0] most significant, big-endian bytes).
+
+        Both the word reorder (list reversal) and the byte swap (per-register) are involutions
+        that commute with each other, so this same function is used to encode (canonical ->
+        wire) and decode (wire -> canonical): applying it twice is the identity.
+        """
+        ordered = list(reversed(values)) if word_order == WordOrder.LOW_FIRST else list(values)
+        if byte_order == ByteOrder.LITTLE:
+            ordered = [((val & 0xFF) << 8) | (val >> 8) for val in ordered]
+        return ordered
 
     @staticmethod
     def apply_offset_divider_modifier(point:ModbusDatapoint|ModbusSetpoint, value: int) -> float|int:
@@ -683,7 +707,10 @@ class ModbusParser:
                 raise ValueError("Value out of range")
         bytes_length = ModbusParser.get_point_write_length_bytes(point)
         byte_array = result.to_bytes(bytes_length, byteorder='big', signed=point.signed)
-        return ModbusParser.bytes_to_values(byte_array, bytes_length)
+        registers = ModbusParser.bytes_to_values(byte_array, bytes_length)
+        # Apply the same transform used to decode, so that writing this value and reading it
+        # back through values_to_value() round-trips for every word_order/byte_order pair.
+        return ModbusParser._reorder_registers(registers, point.word_order, point.byte_order)
 
     @staticmethod
     def str_to_values(value: str, point: ModbusSetpoint) -> List[int]:
@@ -706,7 +733,7 @@ class ModbusParser:
     @staticmethod
     def values_to_float(value: list[int], point: ModbusDatapoint|ModbusSetpoint) -> float|None:
         # Combine the list of 16-bit integers into a single integer
-        result = ModbusParser.combine_values(value)
+        result = ModbusParser.combine_values(value, word_order=point.word_order, byte_order=point.byte_order)
         if point.signed:
             # Calculate the total number of bits
             total_bits = ModbusParser.get_point_read_length_bits(point)
@@ -727,7 +754,7 @@ class ModbusParser:
     
     @staticmethod
     def values_to_str(value: list[int], point: ModbusDatapoint|ModbusSetpoint) -> str|None:
-        result = ModbusParser.combine_values(value)
+        result = ModbusParser.combine_values(value, word_order=point.word_order, byte_order=point.byte_order)
         total_bytes = ModbusParser.get_point_read_length_bytes(point)
         # Convert list of 16-bit integers to a byte array using join with a generator expression
         byte_array = result.to_bytes(total_bytes, byteorder='big')

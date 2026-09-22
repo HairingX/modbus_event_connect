@@ -260,6 +260,10 @@ class _RecordingTransport:
         return await self._read("holding", address, count)
     async def read_discrete_inputs(self, address, count):
         return await self._read("discrete", address, count)
+    async def read_coils(self, address, count):
+        return await self._read("coils", address, count)
+    async def write_coil(self, address, value):
+        self.calls.append(("write_coil", address, value)); return not self.fail
     async def write_register(self, address, value):
         self.calls.append(("write_register", address, value)); return not self.fail
     async def write_registers(self, address, values):

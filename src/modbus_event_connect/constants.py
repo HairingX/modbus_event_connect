@@ -1,4 +1,4 @@
-from enum import Flag
+from enum import Flag, StrEnum, auto
 
 NONE_BYTE = '\x00'
 """The byte value for None"""
@@ -53,6 +53,18 @@ class ModbusValueType:
     """Floating point number"""
     UTF8 = "utf-8"
     """Text encoded in UTF-8"""
+
+class WordOrder(StrEnum):
+    HIGH_FIRST = auto()
+    """register[0] holds the most significant word (Default, current behaviour)"""
+    LOW_FIRST = auto()
+    """register[0] holds the least significant word"""
+
+class ByteOrder(StrEnum):
+    BIG = auto()
+    """register[0] holds the most significant byte and so on, i.e. the standard Modbus byte order within a register (Default, current behaviour)"""
+    LITTLE = auto()
+    """the two bytes are swapped within each 16-bit register"""
 
 class Read(Flag):
     REQUESTED = 0b0001
