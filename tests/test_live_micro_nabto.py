@@ -7,8 +7,8 @@ answers is not the library's business - point it at whatever you have.
         set MICRO_NABTO_HOST=<device-ip>        (environment variables)
         set MICRO_NABTO_EMAIL=you@example.com
 
-        MICRO_NABTO_HOST = "<device-ip>"        (or in mysecrets_micro_nabto.py, gitignored,
-        MICRO_NABTO_EMAIL = "you@example.com"      falling back to mysecrets.py)
+        MICRO_NABTO_HOST = "<device-ip>"        (or in mysecrets.py, which is gitignored)
+        MICRO_NABTO_EMAIL = "you@example.com"
 
     Optional:
         MICRO_NABTO_PORT        default 5570
@@ -24,14 +24,17 @@ These do not assert particular values - they report what the device says about i
 the point: a Nabto device hands over its identity during the handshake, and that identity is
 what a device model branches on, so it has to be seen before it can be designed against.
 """
+import asyncio
 import logging
-import os
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
+from typing import NoReturn
 
 import pytest
 import pytest_asyncio
 
 from conftest import live_or_skip, live_setting
+from src.modbus_event_connect import MODBUS_VALUE_TYPES, ModbusPointKey
 from src.modbus_event_connect.micro_nabto.micro_nabto_connection import (
     MicroNabtoConnectionErrorType,
 )
@@ -40,12 +43,10 @@ from models.micro_nabto_test_models import ModbusTestDatapointKey, ModbusTestMic
 _LOGGER = logging.getLogger(__name__)
 
 
-MY = "mysecrets_micro_nabto"
-
-HOST = live_setting("MICRO_NABTO_HOST", MY)
-EMAIL = live_setting("MICRO_NABTO_EMAIL", MY)
-DEVICE_ID = live_setting("MICRO_NABTO_DEVICE_ID", MY) or "device"
-PORT = int(live_setting("MICRO_NABTO_PORT", MY) or "5570")
+HOST = live_setting("MICRO_NABTO_HOST")
+EMAIL = live_setting("MICRO_NABTO_EMAIL")
+DEVICE_ID = live_setting("MICRO_NABTO_DEVICE_ID") or "device"
+PORT = int(live_setting("MICRO_NABTO_PORT") or "5570")
 
 pytestmark = [
     pytest.mark.asyncio(loop_scope="module"),
@@ -60,7 +61,7 @@ class Live:
 
 def _forbid_writes(client: ModbusTestMicroNabto) -> None:
     """Make any write attempt fail loudly instead of reaching the device."""
-    def refuse(*args, **kwargs):
+    def refuse(*_args: object, **_kwargs: object) -> NoReturn:
         raise AssertionError("A write was attempted. These tests are read-only.")
 
     connection = client._client
@@ -70,8 +71,8 @@ def _forbid_writes(client: ModbusTestMicroNabto) -> None:
     client._request_setpoint_writes = refuse     # type: ignore[assignment]
 
 
-@pytest_asyncio.fixture(scope="module", loop_scope="module")
-async def live():
+@pytest_asyncio.fixture(scope="module", loop_scope="module")  # pyright: ignore[reportUntypedFunctionDecorator, reportUnknownMemberType]
+async def live() -> AsyncGenerator[Live, None]:
     client = ModbusTestMicroNabto()
     assert EMAIL is not None and HOST is not None   # guarded by the skipif above
     connected = await client.connect(EMAIL, DEVICE_ID, HOST, PORT)
@@ -138,6 +139,31 @@ async def test_an_absent_register_does_not_break_the_others(live: Live):
 
     assert invalid is None, "address 9191 should not have produced a value"
     assert temperature is not None, "a real register was lost alongside the absent one"
+
+
+async def test_a_subscriber_is_notified(live: Live):
+    """
+    Events are what this library is for, so delivery has to be checked against real hardware.
+
+    Either path counts as delivery: subscribe() hands over a value that is already held, and a
+    read hands over one that changed. Which one fires depends on what earlier tests already
+    read, so asserting on a particular one would only make this flaky.
+    """
+    client = live.client
+    delivered = asyncio.Event()
+    seen: list[tuple[str, MODBUS_VALUE_TYPES | None, MODBUS_VALUE_TYPES | None]] = []
+
+    def on_change(key: ModbusPointKey,
+                  old_value: MODBUS_VALUE_TYPES | None,
+                  new_value: MODBUS_VALUE_TYPES | None) -> None:
+        seen.append((str(key), old_value, new_value))
+        delivered.set()
+
+    client.subscribe(ModbusTestDatapointKey.TEMPERATURE, on_change)
+    await client.request_datapoint_read()
+    await asyncio.wait_for(delivered.wait(), 15)
+    print(f"\n  delivered          {seen[-1]}")
+    client.unsubscribe(ModbusTestDatapointKey.TEMPERATURE, on_change)
 
 
 async def test_the_write_guard_is_active(live: Live):

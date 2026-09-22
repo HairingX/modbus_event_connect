@@ -3,9 +3,23 @@ import logging
 
 from ..modbus_event_connect import *
 from ..modbus_models import *
-from .micro_nabto_connection import CONNECT_TIMEOUT, DEVICE_PORT,  MicroNabtoConnection, MicroNabtoConnectionErrorType
+from .micro_nabto_connection import CONNECT_TIMEOUT, DEVICE_PORT,  MicroNabtoConnection, MicroNabtoConnectionErrorType, MicroNabtoModbusDeviceInfo
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _identify(device_info: ModbusDeviceInfo) -> str:
+    """
+    Describe a device by what it is, never by where it lives.
+
+    These strings reach a consumer's log, and logs get pasted into public bug reports. The
+    host and device id used to be in them, which tells a reader the shape of someone's home
+    network. Model and hardware numbers are what a developer needs anyway.
+    """
+    if isinstance(device_info, MicroNabtoModbusDeviceInfo):
+        return (f"device model {device_info.device_model}, "
+                f"slave model {device_info.slave_device_model}")
+    return f"{device_info.manufacturer} {device_info.model_name}".strip() or "unknown device"
 
 class MicroNabtoErrorType(StrEnum):
     #connection errors
@@ -37,12 +51,12 @@ class MicroNabtoEventConnect(ModbusEventConnect):
         if self._attr_adapter.provides_model(device_info):
             _LOGGER.debug(f"Going to load model")
             self._attr_adapter.load_device_model(device_info)
-            _LOGGER.debug(f"Loaded model for {self._attr_adapter.model_name} - {device_info}")
+            _LOGGER.debug(f"Loaded model for {self._attr_adapter.model_name} - {_identify(device_info)}")
             await self.request_initial_data()
             _LOGGER.debug(f"Fetched initial data")
             return True
         else:
-            _LOGGER.error(f"No model available for {device_info}")
+            _LOGGER.error(f"No model available for {_identify(device_info)}")
             self._connection_error = MicroNabtoErrorType.UNSUPPORTED_MODEL
             return False
     
@@ -102,8 +116,13 @@ class MicroNabtoEventConnect(ModbusEventConnect):
         return kv
     
     def _handle_invalid_address(self, point: ModbusDatapoint|ModbusSetpoint) -> None:
-        _LOGGER.error(f"Failed to read data for '{point.key}', the address '{point.read_obj}:{point.read_address}' is not available. Inform developer that the device '{self.device_info}' has this error.")
-        self._attr_adapter.set_read(point.key, False, force=True)
+        # Identify the device by what it is, never by where it lives: this line reaches a
+        # consumer's log, and logs get pasted into public bug reports. The host was in here.
+        _LOGGER.info(f"'{point.key}' is not available on this device "
+                     f"(address {point.read_obj}:{point.read_address}); it will not be read "
+                     f"again. {_identify(self.device_info)}")
+        self.set_available(point.key, False,
+                           reason=f"address {point.read_obj}:{point.read_address} not available")
     
     def _request_setpoint_writes(self, point_values: Sequence[Tuple[ModbusSetpoint, MODBUS_VALUE_TYPES]]) -> bool:
         pv = list[Tuple[ModbusSetpoint, List[int]]]()

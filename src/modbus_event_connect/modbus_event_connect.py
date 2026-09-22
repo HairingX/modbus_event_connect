@@ -4,9 +4,9 @@ import logging
 import time
 
 from abc import ABC, abstractmethod
-from typing import Awaitable, Callable, Dict, List, Sequence, Set, Tuple
+from typing import Awaitable, Dict, Iterable, List, Sequence, Set, Tuple
 
-from .modbus_models import MODBUS_POINT_TYPE, MODBUS_VALUE_TYPES, ModbusDatapoint, ModbusParser, ModbusPointKey, ModbusSetpoint, ModbusSetpointKey, ModbusStatusKey
+from .modbus_models import MODBUS_POINT_TYPE, MODBUS_VALUE_CALLBACK, MODBUS_VALUE_TYPES, ModbusDatapoint, ModbusParser, ModbusPointKey, ModbusSetpoint, ModbusSetpointKey, ModbusStatusKey
 from .modbus_deviceadapter import ModbusDeviceAdapter
 
 _LOGGER = logging.getLogger(__name__)
@@ -25,7 +25,7 @@ class ModbusEventConnect(ABC):
     _attr_adapter: ModbusDeviceAdapter
 
     @property
-    def _subscribers(self) -> Dict[ModbusPointKey, List[Callable[[ModbusPointKey, MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None], None]]]:
+    def _subscribers(self) -> Dict[ModbusPointKey, List[MODBUS_VALUE_CALLBACK]]:
         """
         Per-instance subscriber registry: Callable[key, old_value, new_value].
 
@@ -33,7 +33,7 @@ class ModbusEventConnect(ABC):
         not call super().__init__() still gets its own registry. It used to be a class
         attribute, which silently shared every subscription between all clients in the process.
         """
-        subscribers: Dict[ModbusPointKey, List[Callable[[ModbusPointKey, MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None], None]]]|None = getattr(self, "_subscribers_store", None)
+        subscribers: Dict[ModbusPointKey, List[MODBUS_VALUE_CALLBACK]]|None = getattr(self, "_subscribers_store", None)
         if subscribers is None:
             subscribers = {}
             setattr(self, "_subscribers_store", subscribers)
@@ -89,9 +89,9 @@ class ModbusEventConnect(ABC):
     async def request_initial_data(self) -> None:
         """Request the current value of all points used in initialization, ex. version."""
         # Every transport calls this right after loading the device model, so it is the one
-        # place that can apply subscriptions registered before connect() without each
-        # transport having to remember to.
-        self._apply_subscriptions()
+        # place that can settle the read flags against the freshly built point tables without
+        # each transport having to remember to.
+        self._sync_read_flags()
         values:List[Tuple[ModbusDatapoint|ModbusSetpoint, MODBUS_VALUE_TYPES|None]] = []
         datapoints = self._attr_adapter.get_initial_datapoints_for_read()
         if len(datapoints) > 0: 
@@ -276,14 +276,80 @@ class ModbusEventConnect(ABC):
         else:
             self._explicit_reads.discard(key)
         if not self._attr_adapter.has_model:
-            # Remembered anyway; _apply_subscriptions() applies it once a model is loaded.
+            # Remembered anyway; _sync_read_flags() applies it once a model is loaded.
             return False
         return self._sync_read_flag(key)
 
+    @property
+    def _unavailable(self) -> Dict[ModbusPointKey, str]:
+        """
+        What this unit does not have, mapped to why we believe that.
+
+        Kept on the client rather than on the point objects, because `instantiate()` rebuilds
+        those from scratch: anything recorded on a point is wiped the moment a model is
+        reloaded, which is exactly when the record matters most. The reason is for diagnostics
+        only - nothing branches on it.
+        """
+        record: Dict[ModbusPointKey, str]|None = getattr(self, "_unavailable_store", None)
+        if record is None:
+            record = {}
+            setattr(self, "_unavailable_store", record)
+        return record
+
+    def set_available(self, keys: ModbusPointKey|Iterable[ModbusPointKey], available: bool,
+                      *, reason: str = "") -> None:
+        """
+        Record whether this unit has these points, and stop or resume reading them.
+
+        A plugin calls this when it learns something structural - room 14 is not configured,
+        slot 12 holds a display rather than a thermostat - which is why it takes many keys at
+        once: one probe usually settles a whole group.
+
+        Marking a point unavailable does not forget that someone subscribed to it or asked for
+        it. Those reasons are kept, so `set_available(key, True)` alone brings the point back.
+        """
+        one_or_many = [keys] if isinstance(keys, ModbusPointKey) else list(keys)
+        for key in one_or_many:
+            if available:
+                self._unavailable.pop(key, None)
+            else:
+                self._unavailable[key] = reason
+        if self._attr_adapter.has_model:
+            for key in one_or_many:
+                self._sync_read_flag(key)
+
+    def is_available(self, key: ModbusPointKey) -> bool:
+        """Whether this unit has the point. True until something says otherwise."""
+        return key not in self._unavailable
+
+    def clear_availability(self) -> None:
+        """Forget every availability decision, so the next read re-tests them all."""
+        keys = list(self._unavailable)
+        self._unavailable.clear()
+        if self._attr_adapter.has_model:
+            for key in keys:
+                self._sync_read_flag(key)
+
+    @property
+    def available_keys(self) -> Set[ModbusPointKey]:
+        """Every point this device model declares that this unit actually has."""
+        if not self._attr_adapter.has_model:
+            return set()
+        return {key for key in self._attr_adapter.get_keys() if self.is_available(key)}
+
     def _sync_read_flag(self, key: ModbusPointKey) -> bool:
-        """Read a point if either a subscriber or an explicit set_read() wants it."""
-        wanted = key in self._explicit_reads or bool(self._subscribers.get(key))
-        return self._attr_adapter.set_read(key, wanted)
+        """
+        Derive whether to read a point, and hand the answer to the model.
+
+        Three parties may want a point read and none of them may overwrite another, so each
+        keeps its own reason and the result is computed here. Availability is a veto, not a
+        fourth reason: a register this unit does not have is not read however loudly the model
+        asks for it.
+        """
+        wanted = (key in self._explicit_reads
+                  or bool(self._subscribers.get(key))
+                  or self._attr_adapter.reads_always(key))
+        return self._attr_adapter.set_read(key, wanted and self.is_available(key))
 
     def get_read_keys(self) -> List[ModbusPointKey]:
         """Every point that the next read will fetch."""
@@ -294,11 +360,19 @@ class ModbusEventConnect(ABC):
         return keys
 
     def provides(self, key: ModbusPointKey) -> bool:
-        """Check if this client provides a datapoint, setpoint or status key."""
+        """
+        Whether this unit has the point at all.
+
+        Two questions in one, and the difference matters: the model declares what a device of
+        this kind *can* have, and the availability record holds what this particular unit
+        turned out to have. A consumer asks this before building an entity, so it must answer
+        the second. It stays a local lookup - never a read - because it is called once per
+        value on a device with hundreds of them.
+        """
         if isinstance(key, ModbusStatusKey):
             # Status is produced by the client itself, so it is always available.
             return key in self._status
-        return self._attr_adapter.provides(key)
+        return self._attr_adapter.provides(key) and self.is_available(key)
     def get_values(self) -> Dict[ModbusPointKey, MODBUS_VALUE_TYPES|None]:
         """Get the values of all read datapoints and setpoints, plus the status keys."""
         values: Dict[ModbusPointKey, MODBUS_VALUE_TYPES|None] = dict(self._attr_adapter.get_values())
@@ -391,7 +465,7 @@ class ModbusEventConnect(ABC):
         self._status[key] = value
         self._notify_subscribers({key: (old_value, value)})
 
-    def subscribe(self, key: ModbusPointKey, update_method: Callable[[ModbusPointKey, MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None], None]):
+    def subscribe(self, key: ModbusPointKey, update_method: MODBUS_VALUE_CALLBACK):
         """
             Subscribe to a datapoint or setpoint value change.
             
@@ -407,14 +481,14 @@ class ModbusEventConnect(ABC):
             return
         if not self._attr_adapter.has_model:
             # Subscribing before connect() is allowed; the read flags are applied to the
-            # device model as soon as it is loaded. See _apply_subscriptions().
+            # device model as soon as it is loaded. See _sync_read_flags().
             return
         self._sync_read_flag(key)
         value = self._attr_adapter.get_value(key)
         if value is not None:
             update_method(key, None, value)
 
-    def unsubscribe(self, key: ModbusPointKey, update_method: Callable[[ModbusPointKey, MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None], None]):
+    def unsubscribe(self, key: ModbusPointKey, update_method: MODBUS_VALUE_CALLBACK):
         """Remove a subscription to a datapoint or setpoint value change."""
         subscribers = self._subscribers.get(key)
         if subscribers is None: return
@@ -427,17 +501,24 @@ class ModbusEventConnect(ABC):
             else:
                 subscribers.remove(update_method)
 
-    def _apply_subscriptions(self) -> None:
+    def _sync_read_flags(self) -> None:
         """
-        Apply every existing subscription's read flag to the loaded device model.
+        Recompute the read flag for every point the loaded model declares.
 
-        Called from `request_initial_data()`, so callbacks registered before connect() still
-        cause their points to be read. Safe to call more than once.
+        Every point, not only the ones someone asked about, because three of the four inputs
+        arrive independently of any call: a subscription registered before connect(), a model
+        that declares Read.ALWAYS, and an availability decision recorded before the model
+        existed. Called from `request_initial_data()`, and safe to call again - it derives, it
+        does not toggle.
         """
         if not self._attr_adapter.has_model: return
+        for key in self._attr_adapter.get_keys():
+            self._sync_read_flag(key)
         for key in set(self._subscribers) | self._explicit_reads:
+            # Unavailable is normal and already logged where it was discovered; undeclared is
+            # a mistake in the consumer's key list and worth saying out loud.
             if isinstance(key, ModbusStatusKey): continue
-            if not self._sync_read_flag(key):
+            if not self._attr_adapter.provides(key):
                 _LOGGER.warning(f"Key '{key}' is not provided by this device model")
     
     def _parse_point_read_value(self, point: ModbusDatapoint|ModbusSetpoint, values: List[int]) -> MODBUS_VALUE_TYPES|None:
@@ -498,4 +579,4 @@ class ModbusEventConnect(ABC):
             address += f"-{point.read_address + point.read_length - 1}"
         _LOGGER.info(f"'{point.key}' is not available on this device (address {address}); "
                      f"it will not be read again.")
-        self._attr_adapter.set_read(point.key, False, force=True)
+        self.set_available(point.key, False, reason=f"address {address} rejected as illegal")

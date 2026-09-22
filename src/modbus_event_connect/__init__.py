@@ -1,6 +1,7 @@
 from .modbus_event_connect import ( ModbusEventConnect )
 from .modbus_deviceadapter import ( ModbusDeviceAdapter, ModbusNoModelLoadedError )
 from .modbus_models import ( 
+        MODBUS_VALUE_CALLBACK,
         ModbusDatapoint, 
         ModbusDatapointData,
         ModbusDatapointKey, 
@@ -36,6 +37,7 @@ from .constants import (
 __version__ = "0.1.9"
 __all__ = [
     "ByteOrder",
+    "MODBUS_VALUE_CALLBACK",
     "MicroNabtoEventConnect",
     "MicroNabtoModbusDeviceInfo",
     "MODBUS_VALUE_TYPES",

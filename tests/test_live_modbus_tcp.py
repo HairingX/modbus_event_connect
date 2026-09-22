@@ -1,3 +1,4 @@
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import Any
 import logging
@@ -5,7 +6,7 @@ import pytest
 import pytest_asyncio
 from datetime import UTC, datetime
 
-from credentials import Credentials
+from conftest import live_or_skip, live_setting
 
 from src.modbus_event_connect.constants import ValueLimit
 from src.modbus_event_connect import MODBUS_VALUE_TYPES, ModbusPointKey
@@ -17,22 +18,27 @@ _LOGGER = logging.getLogger(__name__)
 # The client holds one socket bound to the loop it was opened on, so the fixture and every
 # test that uses it must share a single event loop. Without this each test gets a fresh loop
 # and its requests are never completed by the loop the socket belongs to.
-pytestmark = pytest.mark.asyncio(loop_scope="session")
+HOST = live_setting("MODBUS_TCP_HOST")
+PORT = int(live_setting("MODBUS_TCP_PORT") or "502")
+
+pytestmark = [
+    pytest.mark.asyncio(loop_scope="session"),
+    *live_or_skip("Modbus TCP", MODBUS_TCP_HOST=HOST),
+]
 
 @dataclass
 class TestData:
     client: ModbusTestTCP
     data = dict[str, Any]()
-    credentials: Credentials
-    
-@pytest_asyncio.fixture(scope="session", loop_scope="session")
-async def testdata():
+
+@pytest_asyncio.fixture(scope="session", loop_scope="session")  # pyright: ignore[reportUntypedFunctionDecorator, reportUnknownMemberType]
+async def testdata() -> AsyncGenerator[TestData, None]:
     #setup
-    credentials = Credentials(["hostname"])
+    assert HOST is not None   # guarded by the skipif above
     client = ModbusTestTCP()
-    await client.connect("DEVICE_ID", credentials.hostname)
-    # 
-    yield TestData(client=client, credentials=credentials)
+    await client.connect("DEVICE_ID", HOST, port=PORT)
+    #
+    yield TestData(client=client)
     #teardown
     await client.stop()
 

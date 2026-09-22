@@ -67,6 +67,9 @@ class ModbusSetpointKey(ModbusPointKey):
     def _generate_next_value_(name:str, start:int, count:int, last_values:List[str]) -> str:
         return f"setpoint_{name.lower()}"
 
+MODBUS_VALUE_CALLBACK = Callable[[ModbusPointKey, MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None], None]
+"""A value-change subscriber: called with the key, the value it held and the value it now holds."""
+
 class ModbusPointExtras(TypedDict):
     unit_of_measurement: NotRequired[str|None]
     """Unit of measurement for the value, UOM class contains the standard units, defaults to None"""
@@ -325,6 +328,9 @@ class ModbusDevice(ABC):
     def get_setpoints_for_read(self) -> List[ModbusSetpoint]:
         raise NotImplementedError("Method not implemented")
     @abstractmethod
+    def get_keys(self) -> Set[ModbusPointKey]:
+        raise NotImplementedError("Method not implemented")
+    @abstractmethod
     def get_unit_of_measure(self, key: ModbusPointKey) -> str|None:
         raise NotImplementedError("Method not implemented")
     @abstractmethod
@@ -340,7 +346,10 @@ class ModbusDevice(ABC):
     def provides(self, key: ModbusPointKey) -> bool:
         raise NotImplementedError("Method not implemented")
     @abstractmethod
-    def set_read(self, key: ModbusPointKey, read: bool, *, force: bool=False) -> bool:
+    def reads_always(self, key: ModbusPointKey) -> bool:
+        raise NotImplementedError("Method not implemented")
+    @abstractmethod
+    def set_read(self, key: ModbusPointKey, read: bool) -> bool:
         raise NotImplementedError("Method not implemented")
     @abstractmethod
     def set_values(self, kv: List[Tuple[ModbusPointKey, MODBUS_VALUE_TYPES|None]]) -> Dict[ModbusPointKey, Tuple[MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None]]:
@@ -487,6 +496,12 @@ class ModbusDeviceBase(ModbusDevice):
     def get_setpoints_for_read(self) -> List[ModbusSetpoint]:
         return [value.point for value in self._setpoints.values() if value.read]
     
+    def get_keys(self) -> Set[ModbusPointKey]:
+        """Every datapoint and setpoint key this model declares, read or not."""
+        keys: Set[ModbusPointKey] = set(self._datapoints)
+        keys.update(self._setpoints)
+        return keys
+
     def get_unit_of_measure(self, key: ModbusPointKey) -> str | None:
         if isinstance(key, ModbusDatapointKey):
             data = self._datapoints.get(key)
@@ -528,32 +543,42 @@ class ModbusDeviceBase(ModbusDevice):
             return key in self._setpoints
         return False
     
-    def set_read(self, key: ModbusPointKey, read: bool, *, force: bool=False) -> bool:
+    def reads_always(self, key: ModbusPointKey) -> bool:
+        """Whether the model declares this point as Read.ALWAYS.
+
+        That flag is one of the reasons a point gets read. The reasons are weighed by the
+        client, which is the only place that can also see subscribers and availability, so the
+        model reports the flag rather than acting on it.
         """
-        Sets the read state for the point. Returns the new read state.
-        
-        Args:
-            key: The key of the datapoint or setpoint to set the read state for.
-            read: The new read state.
-            force: If the read state should be forced to the new state, even if the point is set to always read.
+        pointdata = self._get_pointdata(key)
+        return pointdata is not None and bool(pointdata.read_flags & Read.ALWAYS)
+
+    def set_read(self, key: ModbusPointKey, read: bool) -> bool:
         """
+        Sets the read state for the point. Returns whether the point exists on this device.
+
+        This is an assignment, not a decision: `read` is the already-derived answer. Nothing
+        here consults Read.ALWAYS, because a point the unit does not have must not be read
+        however loudly the model asks for it.
+        """
+        pointdata = self._get_pointdata(key)
+        if pointdata is None:
+            return False
+        pointdata.read = read
+        #if point is only having value when requested, and read is set to False, then clear the value
+        if not read and bool(pointdata.read_flags == Read.REQUESTED): pointdata.value = None
+        return True
+
+    def _get_pointdata(self, key: ModbusPointKey) -> ModbusDatapointData|ModbusSetpointData|None:
+        """The stored data for a readable point, or None if this device has no such point."""
         if isinstance(key, ModbusDatapointKey):
-            pointdata = self._datapoints.get(key)
-            if pointdata is not None:
-                if force: pointdata.read = read
-                else: pointdata.read = read or bool(pointdata.read_flags & (Read.ALWAYS))
-                #if point is only having value when requested, and read is set to False, then clear the value
-                if not pointdata.read and bool(pointdata.read_flags == Read.REQUESTED): pointdata.value = None
-            return True
-        elif isinstance(key, ModbusSetpointKey):
-            pointdata = self._setpoints.get(key)
-            if pointdata is not None and pointdata.point.read_address is not None:
-                if force: pointdata.read = read
-                else: pointdata.read = read or bool(pointdata.read_flags & (Read.ALWAYS))
-                #if point is only having value when requested, and read is set to False, then clear the value
-                if not pointdata.read and bool(pointdata.read_flags == Read.REQUESTED): pointdata.value = None
-                return True
-        return False
+            return self._datapoints.get(key)
+        if isinstance(key, ModbusSetpointKey):
+            setpointdata = self._setpoints.get(key)
+            # A setpoint with no read_address is write-only; there is nothing to read.
+            if setpointdata is not None and setpointdata.point.read_address is not None:
+                return setpointdata
+        return None
     
     def _set_value(self, key: ModbusPointKey, value: MODBUS_VALUE_TYPES|None) -> Tuple[MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None]:
         old_value:MODBUS_VALUE_TYPES|None = None

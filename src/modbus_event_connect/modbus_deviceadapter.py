@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, List, Tuple
+from typing import Dict, List, Set, Tuple
 from collections.abc import Callable
 
 from .modbus_models import ( MODBUS_VALUE_TYPES, ModbusDeviceInfo, ModbusPointKey, ModbusDevice, ModbusDatapoint, ModbusDatapointKey, ModbusSetpoint, ModbusSetpointKey )
@@ -98,14 +98,20 @@ class ModbusDeviceAdapter(ModbusDevice):
     def get_values(self) -> Dict[ModbusPointKey, MODBUS_VALUE_TYPES|None]:
         return self._get_loaded_model().get_values()
     
+    def get_keys(self) -> Set[ModbusPointKey]:
+        return self._get_loaded_model().get_keys()
+
     def has_value(self, key: ModbusPointKey) -> bool:
         return self._get_loaded_model().has_value(key)
 
     def provides(self, key: ModbusPointKey) -> bool:
         return self._get_loaded_model().provides(key)
 
-    def set_read(self, key: ModbusPointKey, read: bool, *, force: bool=False) -> bool:
-        return self._get_loaded_model().set_read(key, read, force=force)
+    def reads_always(self, key: ModbusPointKey) -> bool:
+        return self._get_loaded_model().reads_always(key)
+
+    def set_read(self, key: ModbusPointKey, read: bool) -> bool:
+        return self._get_loaded_model().set_read(key, read)
 
     def set_values(self, kv: List[Tuple[ModbusPointKey, MODBUS_VALUE_TYPES|None]]) -> Dict[ModbusPointKey, Tuple[MODBUS_VALUE_TYPES|None, MODBUS_VALUE_TYPES|None]]:
         return self._get_loaded_model().set_values(kv)

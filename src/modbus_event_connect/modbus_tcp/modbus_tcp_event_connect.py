@@ -400,11 +400,27 @@ class ModbusTCPEventConnect(ModbusEventConnect):
             _LOGGER.error(f"Cannot write '{point.key}', the value could not be encoded")
             return False
 
-        if point.write_length == 1:
-            written = await self._call_device(transport.write_register, point.write_address, values[0])
-        elif point.write_length > 1:
-            written = await self._call_device(transport.write_registers, point.write_address, values)
+        # The function code follows the table, exactly as it does for reads. Coil 320 and
+        # holding register 320 are unrelated registers, so a coil written with FC 0x06 does not
+        # fail - it succeeds, against the wrong one.
+        table = point.register_table
+        if table == RegisterTable.COIL:
+            if point.write_length != 1:
+                # A coil is one bit, and writing several (FC 0x0F) is not in the transport.
+                _LOGGER.error(f"Cannot write '{point.key}', a coil is written one bit at a time")
+                return False
+            written = await self._call_device(transport.write_coil, point.write_address, values[0] != 0)
+        elif table == RegisterTable.HOLDING:
+            if point.write_length == 1:
+                written = await self._call_device(transport.write_register, point.write_address, values[0])
+            elif point.write_length > 1:
+                written = await self._call_device(transport.write_registers, point.write_address, values)
+            else:
+                return False
         else:
+            # instantiate() already rejects this; the check here keeps a hand-built point from
+            # reaching the wire with a function code its table does not have.
+            _LOGGER.error(f"Cannot write '{point.key}', {table} registers are read-only")
             return False
 
         if written is not True:

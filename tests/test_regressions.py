@@ -6,13 +6,14 @@ silently - every one of them produced wrong values rather than an error.
 import asyncio
 import logging
 from enum import auto
+from typing import Callable, Dict, List, Sequence, Tuple
 
-import pytest
-
+from doubles import RecordingTransport, device_info
 from src.modbus_event_connect import (
     MODBUS_VALUE_TYPES,
     ModbusDatapoint,
     ModbusDatapointKey,
+    ModbusDevice,
     ModbusDeviceAdapter,
     ModbusDeviceBase,
     ModbusDeviceInfo,
@@ -21,21 +22,22 @@ from src.modbus_event_connect import (
     ModbusParser,
     ModbusSetpoint,
     ModbusSetpointKey,
+    ModbusStatusKey,
     ModbusTCPEventConnect,
     ValueLimit,
-    VersionInfo,
     VersionInfoKeys,
 )
-from src.modbus_event_connect import ModbusStatusKey
 from src.modbus_event_connect.modbus_tcp.transport import (
-    EXCEPTION_ILLEGAL_DATA_ADDRESS,
-    EXCEPTION_SLAVE_DEVICE_FAILURE,
     EXCEPTION_NONE,
     EXCEPTION_SLAVE_DEVICE_BUSY,
+    EXCEPTION_SLAVE_DEVICE_FAILURE,
     ModbusTransport,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+Value = MODBUS_VALUE_TYPES | None
+"""What a subscriber is handed: a value, or None while there is none."""
 
 
 class DK(ModbusDatapointKey):
@@ -51,8 +53,8 @@ class SK(ModbusSetpointKey):
 
 
 class _Device(ModbusDeviceBase):
-    def __init__(self, device_info: ModbusDeviceInfo):
-        super().__init__(device_info)
+    def __init__(self, info: ModbusDeviceInfo) -> None:
+        super().__init__(info)
         self._attr_manufacturer = "TEST"
         self._attr_model_name = "TEST"
         self._attr_max_request_length = 32
@@ -71,19 +73,14 @@ class _Device(ModbusDeviceBase):
 
 
 class _Adapter(ModbusDeviceAdapter):
-    def _translate_to_model(self, device_info: ModbusDeviceInfo):
+    def _translate_to_model(self, device_info: ModbusDeviceInfo) -> Callable[[ModbusDeviceInfo], ModbusDevice] | None:
         return _Device
 
 
 class _Client(ModbusTCPEventConnect):
-    def __init__(self, transport=None):
+    def __init__(self, transport: ModbusTransport | None = None) -> None:
         super().__init__(transport=transport)
         self._attr_adapter = _Adapter()
-
-
-def _info(device_id: str = "test") -> ModbusDeviceInfo:
-    return ModbusDeviceInfo(device_id=device_id, device_host="h", device_port=502,
-                            version=VersionInfo(), identification=None)
 
 
 def _datapoint(client: _Client, key: ModbusDatapointKey) -> ModbusDatapoint:
@@ -102,7 +99,7 @@ def _setpoint(client: _Client, key: ModbusSetpointKey) -> ModbusSetpoint:
 
 def _connected_client() -> _Client:
     client = _Client()
-    client._attr_adapter.load_device_model(_info())
+    client._attr_adapter.load_device_model(device_info())
     return client
 
 
@@ -179,7 +176,7 @@ def test_notify_does_not_stop_at_an_unsubscribed_key():
 
 def test_notify_only_fires_when_the_value_changed():
     client = _connected_client()
-    events: list[tuple] = []
+    events: List[Tuple[Value, Value]] = []
     client.subscribe(DK.COUNTER, lambda k, o, n: events.append((o, n)))
     point = _datapoint(client, DK.COUNTER)
     for _ in range(3):
@@ -198,8 +195,9 @@ def test_setpoint_reports_its_previous_value():
 
 def test_a_raising_subscriber_does_not_block_the_others():
     client = _connected_client()
-    seen = []
-    def boom(key, old, new): raise RuntimeError("consumer bug")
+    seen: List[Value] = []
+    def boom(key: ModbusPointKey, old: Value, new: Value) -> None:
+        raise RuntimeError("consumer bug")
     client.subscribe(DK.COUNTER, boom)
     client.subscribe(DK.COUNTER, lambda k, o, n: seen.append(n))
     client._notify_subscribers({DK.COUNTER: (None, 3)})
@@ -212,8 +210,8 @@ def test_subscribe_before_connect_is_allowed():
     client = _Client()
     client.subscribe(DK.COUNTER, lambda k, o, n: None)
     assert client.is_connected is False
-    client._attr_adapter.load_device_model(_info())
-    client._apply_subscriptions()
+    client._attr_adapter.load_device_model(device_info())
+    client._sync_read_flags()
     assert DK.COUNTER in client.get_read_keys()
 
 
@@ -221,69 +219,28 @@ def test_two_clients_do_not_share_state():
     a, b = _Client(), _Client()
     assert a._subscribers is not b._subscribers
     assert a._attr_adapter is not b._attr_adapter
-    a._attr_adapter.load_device_model(_info("a"))
-    b._attr_adapter.load_device_model(_info("b"))
+    a._attr_adapter.load_device_model(device_info("a"))
+    b._attr_adapter.load_device_model(device_info("b"))
     assert a.device_info.device_id == "a"
     assert b.device_info.device_id == "b"
 
 
 # -------------------------------------------------------------------- transport
 
-class _RecordingTransport:
-    """Minimal ModbusTransport stand-in that records calls and can fail on demand."""
-
-    def __init__(self, *, fail=True, exception=EXCEPTION_ILLEGAL_DATA_ADDRESS, delay=0.0):
-        self.calls = []
-        self.fail = fail
-        self.delay = delay
-        self._exception = exception if fail else EXCEPTION_NONE
-
-    @property
-    def is_open(self): return True
-    @property
-    def last_exception_code(self): return self._exception
-    @property
-    def last_error_text(self): return None if not self.fail else "recorded failure"
-
-    async def open(self): return True
-    async def close(self): return None
-
-    async def _read(self, kind, address, count):
-        if self.delay:
-            await asyncio.sleep(self.delay)
-        self.calls.append((kind, address, count))
-        return None if self.fail else [0] * count
-
-    async def read_input_registers(self, address, count):
-        return await self._read("input", address, count)
-    async def read_holding_registers(self, address, count):
-        return await self._read("holding", address, count)
-    async def read_discrete_inputs(self, address, count):
-        return await self._read("discrete", address, count)
-    async def read_coils(self, address, count):
-        return await self._read("coils", address, count)
-    async def write_coil(self, address, value):
-        self.calls.append(("write_coil", address, value)); return not self.fail
-    async def write_register(self, address, value):
-        self.calls.append(("write_register", address, value)); return not self.fail
-    async def write_registers(self, address, values):
-        self.calls.append(("write_registers", address, len(values))); return not self.fail
-
-
 def test_recording_transport_satisfies_the_protocol():
-    assert isinstance(_RecordingTransport(), ModbusTransport)
+    assert isinstance(RecordingTransport(), ModbusTransport)
 
 
 def test_a_transport_can_be_injected():
     """inject-websession: the host must be able to supply its own connection."""
-    transport = _RecordingTransport(fail=False)
+    transport = RecordingTransport(fail=False)
     client = _Client(transport=transport)
     assert client.transport is transport
 
 
 def test_setpoints_are_read_from_holding_registers_even_in_the_fallback():
     client = _connected_client()
-    client._transport = _RecordingTransport()
+    client._transport = RecordingTransport()
     points = [_setpoint(client, SK.FLAG),
               _setpoint(client, SK.TARGET)]
     asyncio.run(client._request_setpoint_read(points))
@@ -292,7 +249,7 @@ def test_setpoints_are_read_from_holding_registers_even_in_the_fallback():
 
 def test_a_failing_batch_only_retries_its_own_points():
     client = _connected_client()
-    client._transport = _RecordingTransport()
+    client._transport = RecordingTransport()
     # FLAG is at 26 and TARGET at 119: two separate, both-failing batches.
     points = [_setpoint(client, SK.FLAG),
               _setpoint(client, SK.TARGET)]
@@ -303,7 +260,7 @@ def test_a_failing_batch_only_retries_its_own_points():
 
 def test_busy_responses_are_retried():
     client = _connected_client()
-    client._transport = _RecordingTransport(exception=EXCEPTION_SLAVE_DEVICE_BUSY)
+    client._transport = RecordingTransport(exception=EXCEPTION_SLAVE_DEVICE_BUSY)
     client.BUSY_RETRY_INITIAL_DELAY = 0.001
     point = _datapoint(client, DK.COUNTER)
     asyncio.run(client._request_datapoint_read([point]))
@@ -313,7 +270,7 @@ def test_busy_responses_are_retried():
 
 def test_write_to_address_zero_is_allowed():
     client = _connected_client()
-    client._transport = _RecordingTransport(fail=False)
+    client._transport = RecordingTransport(fail=False)
     point = ModbusSetpoint(key=SK.FLAG, write_address=0, max=100)
     assert asyncio.run(client._request_setpoint_write(point, 1)) is True
 
@@ -336,14 +293,17 @@ class _LegacyTransport(ModbusEventConnect):
     """
     def __init__(self) -> None:
         self._attr_adapter = _Adapter()
-        self.written = []
+        self.written: List[Tuple[ModbusSetpoint, MODBUS_VALUE_TYPES]] = []
 
     @property
     def is_connected(self) -> bool: return True
     def stop(self) -> None: pass
-    async def _request_datapoint_read(self, points): return []
-    async def _request_setpoint_read(self, points): return []
-    def _request_setpoint_writes(self, point_values) -> bool:  # deliberately not async
+    async def _request_datapoint_read(self, points: List[ModbusDatapoint]) -> List[Tuple[ModbusDatapoint, Value]]:
+        return []
+    async def _request_setpoint_read(self, points: List[ModbusSetpoint]) -> List[Tuple[ModbusSetpoint, Value]]:
+        return []
+    def _request_setpoint_writes(self, point_values: Sequence[Tuple[ModbusSetpoint, MODBUS_VALUE_TYPES]]) -> bool:
+        # deliberately not async
         self.written.extend(point_values)
         return True
 
@@ -357,7 +317,7 @@ def test_legacy_transport_without_super_init_gets_its_own_subscribers():
 
 def test_legacy_transport_synchronous_write_is_accepted():
     client = _LegacyTransport()
-    client._attr_adapter.load_device_model(_info())
+    client._attr_adapter.load_device_model(device_info())
     assert asyncio.run(client.request_setpoint_write(SK.FLAG, 1)) is True
     assert len(client.written) == 1
 
@@ -366,7 +326,7 @@ def test_subscriptions_are_applied_without_the_transport_calling_anything():
     """request_initial_data() is the single place that applies pending subscriptions."""
     client = _LegacyTransport()
     client.subscribe(DK.COUNTER, lambda k, o, n: None)
-    client._attr_adapter.load_device_model(_info())
+    client._attr_adapter.load_device_model(device_info())
     asyncio.run(client.request_initial_data())
     assert DK.COUNTER in client.get_read_keys()
 
@@ -399,7 +359,7 @@ def test_reads_do_not_block_the_event_loop():
     """A slow transport must not stall the loop; the client must stay cooperative."""
     async def scenario():
         client = _connected_client()
-        client._transport = _RecordingTransport(fail=False, delay=0.3)
+        client._transport = RecordingTransport(fail=False, delay=0.3)
         stop = asyncio.Event()
 
         async def heartbeat():
@@ -419,32 +379,37 @@ def test_reads_do_not_block_the_event_loop():
 
 # ------------------------------------------------- observable busy state
 
-class _BusyThenOk:
-    """Reports SLAVE_DEVICE_BUSY for the first `busy_for` calls, then succeeds."""
-    def __init__(self, busy_for=2):
+class _BusyThenOk(RecordingTransport):
+    """
+    Reports SLAVE_DEVICE_BUSY for the first `busy_for` calls, then succeeds.
+
+    Unlike _BusyForAWhile below, the exception code is set by the call itself rather than
+    derived from the counter, and a write counts towards the busy budget too. That is what
+    makes it a fair model of a device that clears its busy state only once it has answered.
+    """
+    def __init__(self, busy_for: int = 2) -> None:
+        super().__init__(fail=False)
         self.busy_for = busy_for
-        self.calls = 0
+        self.attempts = 0
         self._exc = EXCEPTION_SLAVE_DEVICE_BUSY
+
     @property
-    def is_open(self): return True
+    def last_exception_code(self) -> int: return self._exc
     @property
-    def last_exception_code(self): return self._exc
-    @property
-    def last_error_text(self): return None
-    async def open(self): return True
-    async def close(self): return None
-    async def _read(self, address, count):
-        self.calls += 1
-        if self.calls <= self.busy_for:
-            self._exc = EXCEPTION_SLAVE_DEVICE_BUSY
-            return None
-        self._exc = EXCEPTION_NONE
-        return [0] * count
-    async def read_input_registers(self, address, count): return await self._read(address, count)
-    async def read_holding_registers(self, address, count): return await self._read(address, count)
-    async def read_discrete_inputs(self, address, count): return await self._read(address, count)
-    async def write_register(self, address, value): return await self._read(address, 1) is not None
-    async def write_registers(self, address, values): return await self._read(address, 1) is not None
+    def last_error_text(self) -> str | None: return None
+
+    async def _record(self, kind: str, address: int, count: int) -> bool:
+        self.attempts += 1
+        self.calls.append((kind, address, count))
+        busy = self.attempts <= self.busy_for
+        self._exc = EXCEPTION_SLAVE_DEVICE_BUSY if busy else EXCEPTION_NONE
+        return not busy
+
+    async def write_register(self, address: int, value: int) -> bool:
+        return await self._record("write_register", address, value)
+
+    async def write_registers(self, address: int, values: Sequence[int]) -> bool:
+        return await self._record("write_registers", address, len(values))
 
 
 def test_busy_state_is_observable_from_outside():
@@ -453,7 +418,7 @@ def test_busy_state_is_observable_from_outside():
     client._transport = _BusyThenOk(busy_for=2)
     client.BUSY_RETRY_INITIAL_DELAY = 0.001
 
-    events = []
+    events: List[Value] = []
     client.subscribe(ModbusStatusKey.DEVICE_BUSY, lambda k, o, n: events.append(n))
     assert client.device_busy is False, "should start idle"
 
@@ -480,7 +445,7 @@ def test_busy_state_clears_when_the_device_recovers():
 def test_status_keys_do_not_need_a_device_model():
     """Status must be subscribable before connect(), like any other key."""
     client = _Client()
-    seen = []
+    seen: List[Value] = []
     client.subscribe(ModbusStatusKey.CONNECTED, lambda k, o, n: seen.append(n))
     assert seen == [0], "subscriber should immediately receive the current status"
     assert client.get_value(ModbusStatusKey.CONNECTED) == 0
@@ -488,20 +453,20 @@ def test_status_keys_do_not_need_a_device_model():
 
 # ------------------------------------------------- waiting out a busy device
 
-class _BusyForAWhile(_RecordingTransport):
+class _BusyForAWhile(RecordingTransport):
     """Busy for the first `busy_calls` requests, then healthy."""
-    def __init__(self, busy_calls=3):
+    def __init__(self, busy_calls: int = 3) -> None:
         super().__init__(fail=False)
         self.busy_calls = busy_calls
         self.n = 0
     @property
-    def last_exception_code(self):
+    def last_exception_code(self) -> int:
         return EXCEPTION_SLAVE_DEVICE_BUSY if self.n <= self.busy_calls else EXCEPTION_NONE
-    async def _read(self, kind, address, count):
+    async def _record(self, kind: str, address: int, count: int) -> bool:
         self.n += 1
         self.calls.append((kind, address, count))
-        return None if self.n <= self.busy_calls else [0] * count
-    async def write_register(self, address, value):
+        return self.n > self.busy_calls
+    async def write_register(self, address: int, value: int) -> bool:
         self.n += 1
         self.calls.append(("write_register", address, value))
         return True
@@ -514,7 +479,7 @@ def test_write_waits_until_the_device_is_ready_again():
     client.BUSY_POLL_INTERVAL = 0.001
     client.BUSY_RETRY_INITIAL_DELAY = 0.001
 
-    seen = []
+    seen: List[Value] = []
     client.subscribe(ModbusStatusKey.DEVICE_BUSY, lambda k, o, n: seen.append(n))
 
     async def scenario():
@@ -564,12 +529,12 @@ def test_write_pending_brackets_the_whole_write():
     client.BUSY_POLL_INTERVAL = 0.001
     client.BUSY_RETRY_INITIAL_DELAY = 0.001
 
-    seen = []
+    seen: List[Value] = []
     client.subscribe(ModbusStatusKey.WRITE_PENDING, lambda k, o, n: seen.append(n))
-    during = {}
+    during: Dict[str, bool] = {}
 
     original = client._request_setpoint_writes
-    async def spy(point_values):
+    async def spy(point_values: Sequence[Tuple[ModbusSetpoint, MODBUS_VALUE_TYPES]]) -> bool:
         during["pending"] = client.write_pending
         during["accepts"] = client.accepts_writes
         return await original(point_values)
@@ -586,8 +551,8 @@ def test_write_pending_brackets_the_whole_write():
 def test_write_pending_is_set_even_when_the_device_never_reports_busy():
     """DEVICE_BUSY alone is not enough: a fast device would show a UI nothing at all."""
     client = _connected_client()
-    client._transport = _RecordingTransport(fail=False)
-    seen = []
+    client._transport = RecordingTransport(fail=False)
+    seen: List[Value] = []
     client.subscribe(ModbusStatusKey.WRITE_PENDING, lambda k, o, n: seen.append(n))
     asyncio.run(client.request_setpoint_write(SK.FLAG, 1))
     assert 1 in seen, "a UI would never have learned that a write happened"
@@ -596,8 +561,9 @@ def test_write_pending_is_set_even_when_the_device_never_reports_busy():
 
 def test_write_pending_clears_even_if_the_write_raises():
     client = _connected_client()
-    client._transport = _RecordingTransport(fail=False)
-    async def boom(point_values): raise RuntimeError("transport exploded")
+    client._transport = RecordingTransport(fail=False)
+    async def boom(point_values: Sequence[Tuple[ModbusSetpoint, MODBUS_VALUE_TYPES]]) -> bool:
+        raise RuntimeError("transport exploded")
     client._request_setpoint_writes = boom
     try:
         asyncio.run(client.request_setpoint_write(SK.FLAG, 1))
@@ -608,16 +574,17 @@ def test_write_pending_clears_even_if_the_write_raises():
 
 def test_overlapping_writes_keep_write_pending_until_the_last_one_finishes():
     """Rapid +/- taps produce overlapping writes; the first to finish must not clear the flag."""
-    class _Staggered(_RecordingTransport):
-        def __init__(self):
+    class _Staggered(RecordingTransport):
+        """The first write finishes quickly, every later one takes far longer."""
+        def __init__(self) -> None:
             super().__init__(fail=False)
             self.writes = 0
-        async def write_register(self, address, value):
+        async def write_register(self, address: int, value: int) -> bool:
             self.writes += 1
             await asyncio.sleep(0.01 if self.writes == 1 else 0.20)
             return True
 
-    async def scenario():
+    async def scenario() -> Tuple[bool, bool, bool]:
         client = _connected_client()
         client._transport = _Staggered()
 
@@ -659,24 +626,26 @@ def test_status_keys_behave_like_any_other_key():
 
 def test_repeated_writes_to_one_key_collapse_to_the_newest():
     """Tapping + five times must put the final value on the device, not walk it through five."""
-    class _Device(_RecordingTransport):
-        def __init__(self):
+    class _Recorder(RecordingTransport):
+        """Keeps every value that reached the wire, and the last one of them."""
+        def __init__(self) -> None:
             super().__init__(fail=False)
-            self.sent = []
-            self.value = None
-        async def write_register(self, address, value):
+            self.sent: List[int] = []
+            self.value: int | None = None
+        async def write_register(self, address: int, value: int) -> bool:
             await asyncio.sleep(0.001)
             self.sent.append(value)
             self.value = value
             return True
 
-    async def scenario():
+    async def scenario() -> _Recorder:
         client = _connected_client()
-        client._transport = _Device()
+        device = _Recorder()
+        client._transport = device
         await asyncio.gather(*(
             client.request_setpoint_write(SK.TARGET, raw / 100)
             for raw in (2000, 2050, 2100, 2150, 2200)))
-        return client._transport
+        return device
 
     device = asyncio.run(scenario())
     assert device.value == 2200, "the last value asked for did not end up on the device"
@@ -685,27 +654,29 @@ def test_repeated_writes_to_one_key_collapse_to_the_newest():
 
 def test_different_keys_are_never_coalesced_together():
     """A temperature and a humidity setpoint are unrelated; neither may swallow the other."""
-    class _Device(_RecordingTransport):
-        def __init__(self):
+    class _PerAddress(RecordingTransport):
+        """Remembers the last value written to each address."""
+        def __init__(self) -> None:
             super().__init__(fail=False)
-            self.written = {}
-        async def write_register(self, address, value):
+            self.written: Dict[int, int] = {}
+        async def write_register(self, address: int, value: int) -> bool:
             await asyncio.sleep(0.001)
             self.written[address] = value
             return True
 
-    async def scenario():
+    async def scenario() -> Dict[int, int]:
         client = _connected_client()
-        client._transport = _Device()
+        device = _PerAddress()
+        client._transport = device
         await asyncio.gather(
             client.request_setpoint_write(SK.TARGET, 21.0),
             client.request_setpoint_write(SK.FLAG, 1),
         )
-        return client._transport.written
+        return device.written
 
     written = asyncio.run(scenario())
-    target = client_target = 119   # SK.TARGET write address in the test model
-    flag = 26                      # SK.FLAG write address
+    target = 119   # SK.TARGET write address in the test model
+    flag = 26      # SK.FLAG write address
     assert target in written, "the temperature write was lost"
     assert flag in written, "the flag write was lost"
 
@@ -717,19 +688,20 @@ def test_concurrent_writes_land_in_order_even_when_retried():
     Without serialisation a write rejected with SLAVE_DEVICE_BUSY backs off and lands after
     later writes, so the user ends up with an earlier value than the one they asked for.
     """
-    class _Device(_RecordingTransport):
-        def __init__(self, busy_attempts):
+    class _BusyOnAttempts(RecordingTransport):
+        """Rejects the numbered write attempts as busy; every other write lands."""
+        def __init__(self, busy_attempts: Sequence[int]) -> None:
             super().__init__(fail=False)
-            self.value = None
+            self.value: int | None = None
             self.attempt = 0
             self.busy_attempts = set(busy_attempts)
             self._exc = EXCEPTION_NONE
         @property
-        def last_exception_code(self): return self._exc
-        async def read_input_registers(self, address, count):
+        def last_exception_code(self) -> int: return self._exc
+        async def read_input_registers(self, address: int, count: int) -> List[int] | None:
             self._exc = EXCEPTION_NONE
             return [0] * count
-        async def write_register(self, address, value):
+        async def write_register(self, address: int, value: int) -> bool:
             self.attempt += 1
             await asyncio.sleep(0.001)
             if self.attempt in self.busy_attempts:
@@ -739,14 +711,15 @@ def test_concurrent_writes_land_in_order_even_when_retried():
             self.value = value
             return True
 
-    async def scenario(busy_attempts):
+    async def scenario(busy_attempts: Sequence[int]) -> int | None:
         client = _connected_client()
-        client._transport = _Device(busy_attempts)
+        device = _BusyOnAttempts(busy_attempts)
+        client._transport = device
         client.BUSY_RETRY_INITIAL_DELAY = 0.001
         wanted = [2000, 2050, 2100, 2150, 2200]
         await asyncio.gather(*(
             client.request_setpoint_write(SK.TARGET, raw / 100) for raw in wanted))
-        return client._transport.value
+        return device.value
 
     assert asyncio.run(scenario(())) == 2200
     assert asyncio.run(scenario((1, 2, 3))) == 2200, (
@@ -760,7 +733,7 @@ def test_a_disconnected_peripheral_is_reported_unavailable_not_disabled():
     point must stay enabled so it recovers when the peripheral comes back.
     """
     client = _connected_client()
-    client._transport = _RecordingTransport(exception=EXCEPTION_SLAVE_DEVICE_FAILURE)
+    client._transport = RecordingTransport(exception=EXCEPTION_SLAVE_DEVICE_FAILURE)
     point = _datapoint(client, DK.COUNTER)
     client.set_read(DK.COUNTER, True)
 
@@ -780,7 +753,8 @@ def test_a_disconnected_peripheral_is_reported_unavailable_not_disabled():
 def test_unsubscribing_does_not_cancel_an_explicit_set_read():
     """Two owners of the read flag; neither may switch the other off."""
     client = _connected_client()
-    callback = lambda k, o, n: None
+    def callback(key: ModbusPointKey, old: Value, new: Value) -> None:
+        """Only its identity matters here: it is subscribed and then unsubscribed."""
 
     client.set_read(DK.COUNTER)
     assert DK.COUNTER in client.get_read_keys()
@@ -802,7 +776,8 @@ def test_set_read_false_does_not_silence_a_subscriber():
 
 def test_a_point_stops_being_read_once_neither_owner_wants_it():
     client = _connected_client()
-    callback = lambda k, o, n: None
+    def callback(key: ModbusPointKey, old: Value, new: Value) -> None:
+        """Only its identity matters here: it is subscribed and then unsubscribed."""
     client.set_read(DK.COUNTER)
     client.subscribe(DK.COUNTER, callback)
     client.unsubscribe(DK.COUNTER, callback)
@@ -813,6 +788,6 @@ def test_a_point_stops_being_read_once_neither_owner_wants_it():
 def test_set_read_before_connect_is_applied_on_connect():
     client = _Client()
     client.set_read(DK.COUNTER)
-    client._attr_adapter.load_device_model(_info())
+    client._attr_adapter.load_device_model(device_info())
     asyncio.run(client.request_initial_data())
     assert DK.COUNTER in client.get_read_keys()

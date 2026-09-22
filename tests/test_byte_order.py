@@ -52,13 +52,13 @@ _EXPECTED_COMBINED = {
 
 
 @pytest.mark.parametrize("word_order,byte_order", list(itertools.product(WordOrder, ByteOrder)))
-def test_combine_values_honours_word_and_byte_order(word_order, byte_order):
+def test_combine_values_honours_word_and_byte_order(word_order: WordOrder, byte_order: ByteOrder) -> None:
     expected = _EXPECTED_COMBINED[(word_order, byte_order)]
     assert ModbusParser.combine_values(_REGISTERS, word_order=word_order, byte_order=byte_order) == expected
 
 
 @pytest.mark.parametrize("word_order,byte_order", list(itertools.product(WordOrder, ByteOrder)))
-def test_values_to_value_honours_the_points_word_and_byte_order(word_order, byte_order):
+def test_values_to_value_honours_the_points_word_and_byte_order(word_order: WordOrder, byte_order: ByteOrder) -> None:
     point = _point(word_order=word_order, byte_order=byte_order)
     expected = _EXPECTED_COMBINED[(word_order, byte_order)]
     assert ModbusParser.values_to_value(_REGISTERS, point) == expected
@@ -67,7 +67,7 @@ def test_values_to_value_honours_the_points_word_and_byte_order(word_order, byte
 # -------------------------------------------------------------------------------- encoding
 
 @pytest.mark.parametrize("word_order,byte_order", list(itertools.product(WordOrder, ByteOrder)))
-def test_encode_decode_round_trips_for_every_combination(word_order, byte_order):
+def test_encode_decode_round_trips_for_every_combination(word_order: WordOrder, byte_order: ByteOrder) -> None:
     point = _point(word_order=word_order, byte_order=byte_order)
     for value in (0, 1, 0x1234, 0x89AB, 0xFFFFFFFF):
         registers = ModbusParser.value_to_values(value, point)
@@ -86,7 +86,7 @@ _EXPECTED_REGISTERS = {
 
 
 @pytest.mark.parametrize("word_order,byte_order", list(itertools.product(WordOrder, ByteOrder)))
-def test_number_to_values_produces_the_register_layout_combine_values_expects(word_order, byte_order):
+def test_number_to_values_produces_the_register_layout_combine_values_expects(word_order: WordOrder, byte_order: ByteOrder) -> None:
     """
     Round-tripping alone would also pass with a no-op encoder, since a transform that is never
     applied on either side cancels out too. Pin the actual wire registers independently, so an
