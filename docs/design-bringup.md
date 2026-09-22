@@ -121,6 +121,27 @@ everything through holding registers — which is common — be modelled honestl
 Writability stops being implied by the class. A point is writable if it has a write address.
 A `ModbusSetpoint` in `INPUT` is a contradiction and is rejected at `instantiate()`.
 
+### What `ModbusDatapoint` and `ModbusSetpoint` mean now
+
+With the address space moved out into `register_table`, the two classes differ in exactly one
+thing: **a datapoint is read-only, a setpoint is writable.** Nothing else. A read-only serial
+number living in a holding register is a datapoint; the name says nothing about where it lives.
+
+`ModbusDatapoint` has no `write_address` field at all, so this is enforced by construction
+rather than by convention. `ModbusSetpoint` may in turn omit `read_address`, which is how a
+write-only register is expressed — Sentio's Modbus password (`HR 00006`, access `W`) is one.
+
+They are deliberately **not** merged into one class, for two reasons. `micro_nabto` uses both
+throughout its read, write and command-building paths, and it must stay byte-identical. And the
+split is the contract consumers see: in Home Assistant a datapoint becomes a sensor and a
+setpoint becomes a `number`, `select` or `climate` entity.
+
+A device model should set the table per point, or per device where most points share one —
+putting everything in holding registers is common, and annotating hundreds of points by hand is
+a mistake waiting to happen. A device-level default (`_attr_default_register_table`, in the
+style of the existing `_attr_default_extras`) covers that case; a point that declares its own
+table wins over it.
+
 ### 3.2 Word order for multi-register values
 
 `ModbusParser.combine_values` currently folds registers high-word-first, unconditionally.
