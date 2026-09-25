@@ -23,7 +23,7 @@ Each one has a real case behind it.
 | R3 | A model can repeat a section of points without writing it out N times | Sentio: 24 rooms, peripherals |
 | R4 | An installation can lack parts of its model, found by the scan | Sentio: unconfigured rooms |
 | R5 | Points are read at different rates | temperatures every 10 s, fan data every minute, serial numbers once |
-| R6 | The consumer can override the rates | a Home Assistant options screen |
+| R6 | The consumer can override the rates | an options screen in the application |
 | R7 | A write can disturb other points, which must then be re-read soon | Nilan: ventilation step changes fan %, rpm and more |
 | R8 | A cheap point can signal that expensive ones changed | an alarm summary bit in front of 77 alarm inputs |
 | R9 | Every value says how trustworthy it is | "offline" and "0" are not the same thing |
@@ -106,13 +106,13 @@ Rules, checked when the point is constructed:
 - a point in a bit space (coil, discrete) is one bit wide;
 - `limits` only on a writable point, `no_data` only on a readable one.
 
-The consumer asks `can_read(key)` and `can_write(key)`. That decides the Home Assistant entity:
+The consumer asks `can_read(key)` and `can_write(key)`, and builds from that what it shows:
 
-| can_read | can_write | entity |
+| can_read | can_write | a consumer shows |
 |---|---|---|
-| yes | no | sensor / binary_sensor |
-| no | yes | button (a command) |
-| yes | yes | number / switch / select |
+| yes | no | a reading |
+| no | yes | an action (a command) |
+| yes | yes | a setting |
 
 Read and write sides with different spaces is a real pattern — status in input register 100,
 command in holding register 200 — so each side names its own space.
@@ -158,7 +158,7 @@ ranges can map different numbers onto neighbouring addresses.
 
 ### 3.4 DataType
 
-The names Modbus tools use (pymodbus, Home Assistant), not a pair of `value_type` + `divider`
+The names Modbus tools use (pymodbus among them), not a pair of `value_type` + `divider`
 heuristics:
 
 ```
@@ -220,16 +220,14 @@ Everything with a fixed vocabulary is an enum: `Unit`, `PollRate`, `WriteKind`, 
   `"m3/h"`), for exchange with systems that speak UCUM.
 - The **member name** (`CELSIUS`) is the identifier, safe wherever a name must be plain.
 
-A consumer with its own vocabulary maps to it; Home Assistant, for instance, writes a month as
-`"m"` and a kilowatt hour as `"kWh"`.
+A consumer with its own vocabulary for units maps to it.
 
 Labels are free: `{"room": 3}`, `{"feature": "cooling"}`. Their meaning belongs to the model.
 
 ### 3.8 Keys
 
-A key is a stable string. It ends up in the consumer's storage — Home Assistant builds unique
-ids from it — so once a device is in use, changing a key string loses a user's entity and its
-history.
+A key is a stable string. It ends up in the consumer's storage, typically in ids it builds from
+it, so once a device is in use, changing a key string loses what the consumer built on it.
 
 - Static points may keep a typed `StrEnum` for use in plugin code.
 - Repeated points get their key from the template, e.g. `f"room_{n}_temp_air"`.
@@ -295,7 +293,7 @@ NILAN = Model(
 for each number and labels every point with its instance, which is what lets the library:
 
 - remove a whole instance in one call (4.3),
-- hand the consumer one device per instance — a Home Assistant device per room,
+- hand the consumer one device per instance — a device per room,
 - validate every instance (4.4).
 
 Models are Python. A loader for a register map in a file (the "Modbus editor" case) can be
@@ -541,19 +539,19 @@ class DataValue:
     timestamp: datetime            # when the device answered; timezone-aware UTC
 ```
 
-`timestamp` is a `datetime` in UTC, which is what Python and Home Assistant both use for a
-moment in time. Scheduling does not use it: see 5.7.
+`timestamp` is a `datetime` in UTC, Python's own type for a moment in time. Scheduling does not
+use it: see 5.7.
 
 This is OPC UA's DataValue. It is what the earlier `PointRead` was reaching for, and it applies
 to every read, not only to a scan step's question.
 
-| Quality | Cause | Home Assistant |
+| Quality | Cause | A consumer shows |
 |---|---|---|
 | `GOOD` | the device answered with a valid value | the value |
 | `NO_DATA` | the device answered with a `no_data` sentinel | unknown |
 | `OFFLINE` | 0x04: the device answered, but what is behind the register does not respond | unavailable |
-| `STALE` | the last attempt failed (timeout, other error); the previous value is kept | unavailable after a tolerance, see 6.3 |
-| `MISSING` | 0x02: this unit does not have the register | the entity is not created |
+| `STALE` | the last attempt failed (timeout, other error); the previous value is kept | unavailable after its own tolerance, see 6.3 |
+| `MISSING` | 0x02: this unit does not have the register | nothing: it builds nothing for it |
 
 ### 6.2 Change events
 
@@ -565,22 +563,20 @@ event even if its last value was the same.
 
 The callback receives the old and the new `DataValue`.
 
-### 6.3 Home Assistant usage
+### 6.3 In a consumer
 
-- One tick per device calls `poll()` — a fixed short interval, or `seconds_until_next_poll()` for
-  precise sleeping.
-- Entities subscribe in `async_added_to_hass` and write their state from the callback, so an
-  entity updates only when its own value changes.
-- Entity type from `can_read` / `can_write`; unit, limits, step and device from the point.
-- A tolerance before `STALE` becomes unavailable — Home Assistant's own Modbus integration
-  calls it `lazy_error_count` — so one lost packet does not flap an entity. The library exposes
-  the consecutive failure count; the tolerance is the integration's policy.
+- One task per device calls `poll()` — at a fixed short interval, or sleeping for
+  `seconds_until_next_poll()`.
+- What the consumer shows subscribes, and updates from the callback, so it changes only when
+  its own value does.
+- What to build from `can_read` / `can_write`; unit, limits, step and device from the point.
+- A tolerance before `STALE` is shown as unavailable, so one lost packet does not flap a
+  value. The library exposes the consecutive failure count; the tolerance is the consumer's
+  policy.
 - **Whether the device is reachable** is `Status.CONNECTED`, and it is decided by answers, never
   by the socket: a TCP socket stays open for minutes after a cable is pulled. A pass or a write
   that nothing answered makes it False; the first answer makes it True again and makes every
-  value due. Each change is logged once, as Home Assistant's `log-when-unavailable` rule asks.
-  An integration raises `UpdateFailed` from its coordinator while it is False, so every entity
-  becomes unavailable together, and maps `CannotConnectError` at setup to `ConfigEntryNotReady`.
+  value due. Each change is logged once, not on every failed read.
 
 ---
 
@@ -637,7 +633,7 @@ blinds  = BlindClient(gateway, unit_id=3)
 ```
 
 - The **connection** sends one request at a time, keeps an optional pause between frames (RS-485
-  gateways need it; Home Assistant calls it `message_wait_milliseconds`), and reconnects.
+  gateways need it), and reconnects.
 - Every request returns its **status with its response**, never through a "last call"
   property: on a shared connection that would describe whichever request finished last.
 - Reachability, `OFFLINE` and failure counts belong to each device. A device behind a gateway
@@ -681,8 +677,8 @@ CTS 402 — which other devices may not share.
 ## 9. Diagnostics
 
 Per device: requests, failures by kind, average latency, backoff state, the consecutive failure
-count. Per point: last quality and when it was last good. This is what Home Assistant's
-diagnostics download shows, and what a bug report needs — without a host address in it.
+count. Per point: last quality and when it was last good. This is what a bug report needs —
+without a host address in it.
 
 ---
 

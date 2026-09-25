@@ -16,7 +16,7 @@ A device is described once, as a *model*. The library then takes care of the res
 
 | You are... | Read |
 |---|---|
-| Building an app or a Home Assistant integration for a device that already has a model | [Part 1: Using a device](#part-1-using-a-device) |
+| Building an application for a device that already has a model | [Part 1: Using a device](#part-1-using-a-device) |
 | Describing a new device: its registers, units and settings | [Part 2: Describing a device](#part-2-describing-a-device) |
 | Working on the library itself | [docs/design.md](docs/design.md) |
 
@@ -201,107 +201,16 @@ rooms. After `connect()`:
 | `client.unavailable_reasons` | keys the unit does not have, with the reason |
 | `await client.rescan()` | find out again, for example after a room was added |
 
-## In Home Assistant
+## In a larger application
 
-The pattern below is written against Home Assistant 2025.4. It has three parts:
-
-1. `connect()` in `async_setup_entry`, turning its errors into Home Assistant's.
-2. A background task that calls `poll()`. Home Assistant cancels it when the entry unloads.
-3. Entities that subscribe, and write their state when told of a change.
-
-A `DataUpdateCoordinator` is not needed: the client already decides what to read and when, and
-the coordinator only schedules its next update while it has listeners of its own.
-
-```python
-# __init__.py
-import asyncio
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
-from modbus_event_connect import (AuthenticationError, CannotConnectError, Client,
-                                  UnsupportedDeviceError)
-from modbus_event_connect.modbus import ModbusDevice
-
-PLATFORMS = [Platform.SENSOR]
-
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    client = Client(ModbusDevice.tcp(entry.data["host"]), THERMOSTAT)
-    try:
-        await client.connect()
-    except CannotConnectError as err:
-        raise ConfigEntryNotReady(str(err)) from err      # Home Assistant retries later
-    except AuthenticationError as err:
-        raise ConfigEntryAuthFailed(str(err)) from err    # starts re-authentication
-    except UnsupportedDeviceError:
-        return False
-    entry.runtime_data = client
-
-    async def poll_forever() -> None:
-        while True:
-            await client.poll()
-            await asyncio.sleep(1)
-
-    entry.async_create_background_task(hass, poll_forever(), "poll")
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    return True
-
-async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-    if unloaded:
-        await entry.runtime_data.disconnect()
-    return unloaded
-```
-
-```python
-# sensor.py
-from homeassistant.components.sensor import SensorEntity
-from modbus_event_connect import Client, Quality, Status
-
-class PointSensor(SensorEntity):
-    _attr_should_poll = False                     # the client pushes changes
-
-    def __init__(self, client: Client, key: str) -> None:
-        self._client = client
-        self._key = key
-        self._attr_unique_id = key
-        unit = client.points[key].unit
-        self._attr_native_unit_of_measurement = HA_UNITS.get(unit, unit)
-
-    async def async_added_to_hass(self) -> None:
-        # Each subscribe returns its unsubscriber; Home Assistant calls it on removal.
-        self.async_on_remove(self._client.subscribe(self._key, self._changed))
-        self.async_on_remove(self._client.subscribe(Status.CONNECTED, self._changed))
-
-    def _changed(self, key, old, new) -> None:
-        self.async_write_ha_state()
-
-    @property
-    def available(self) -> bool:
-        value = self._client.value(self._key)
-        return (self._client.connected and value is not None
-                and value.quality in (Quality.GOOD, Quality.NO_DATA, Quality.STALE))
-
-    @property
-    def native_value(self):
-        value = self._client.value(self._key)
-        return None if value is None or value.quality is Quality.NO_DATA else value.value
-```
-
-The callbacks run in Home Assistant's event loop, because `poll()` does, so
-`async_write_ha_state()` is safe to call from them.
-
-Units use the international symbols (see [Units](#units)). Home Assistant spells six of them
-its own way:
-
-```python
-from modbus_event_connect import Unit
-
-HA_UNITS = {Unit.WEEKS: "w", Unit.MONTHS: "m", Unit.YEARS: "y", Unit.RPM: "rpm",
-            Unit.WATT_HOUR: "Wh", Unit.KILOWATT_HOUR: "kWh"}
-```
-
-Every other unit's symbol is the one Home Assistant uses (checked against its `const.py`).
+- Run the poll loop as a task on the application's event loop. When the device is removed,
+  cancel the task, then `await client.disconnect()`.
+- Subscription callbacks run on that event loop, from within the client's own calls, never on
+  another thread, so they may update the application's state directly.
+- Turn the errors `connect()` raises into the application's own: try again later after
+  `CannotConnectError`, ask the user for new credentials after `AuthenticationError`.
+- How a value's quality is shown is the application's choice. `client.consecutive_failures(key)`
+  lets it wait a few failed reads before calling a `STALE` value unavailable.
 
 ## Errors
 
@@ -353,7 +262,7 @@ when the point is created, naming every problem at once. A mistake between point
 overlapping, raises `ModelError` from `connect()`; test for it first, see
 [Testing a model](#testing-a-model).
 
-**Keys are forever.** Apps store them, for example as Home Assistant entity ids. Choose them
+**Keys are forever.** Applications store them, for example in the ids of what they build. Choose them
 carefully, and never rename one.
 
 ## Where a value lives

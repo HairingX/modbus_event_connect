@@ -611,6 +611,7 @@ UNITS: dict[Unit, tuple[str, str]] = {
     Unit.BAR: ("bar", "bar"),
     Unit.CUBIC_METERS_PER_HOUR: ("m³/h", "m3/h"),
     Unit.LITERS_PER_MINUTE: ("L/min", "L/min"),
+    Unit.LITERS_PER_HOUR: ("L/h", "L/h"),
 }
 """Symbols follow the SI's writing rules, and UCUM's where the SI has none; codes are UCUM's."""
 

@@ -36,6 +36,7 @@ class Unit(StrEnum):
     BAR = "bar"
     CUBIC_METERS_PER_HOUR = "m³/h"
     LITERS_PER_MINUTE = "L/min"
+    LITERS_PER_HOUR = "L/h"
 
     @property
     def code(self) -> str:
@@ -69,5 +70,6 @@ _UCUM_CODES: Mapping[Unit, str] = MappingProxyType({
     Unit.BAR: "bar",
     Unit.CUBIC_METERS_PER_HOUR: "m3/h",
     Unit.LITERS_PER_MINUTE: "L/min",
+    Unit.LITERS_PER_HOUR: "L/h",
 })
 """Every unit's UCUM code, written out even where it equals the symbol."""
