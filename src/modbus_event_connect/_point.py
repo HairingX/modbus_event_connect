@@ -8,7 +8,7 @@ from enum import Enum, auto
 from types import MappingProxyType
 from typing import Any, ClassVar, Hashable
 
-from ._data_type import ByteOrder, DataType, DataTypeKind, WordOrder
+from ._data_type import ByteOrder, DataType, DataTypeKind, WordOrder, raw_bounds
 from ._key import Key, is_key, is_state_type
 from ._unit import Unit
 
@@ -217,12 +217,14 @@ class Point[T]:
     By default, enough for `scale` and `offset`; none for a float or a transform.
     """
     transform: Transform | None = None
-    no_data: Collection[int] = ()
-    """Raw values meaning "no reading" - a missing sensor answering 0x7FFF, for instance.
+    valid_raw: Collection[int] | None = None
+    """The raw numbers - what the device sends, before scale and offset - that are values; any
+    other reads as NO_DATA, and cannot be written. None: every number is a value.
 
-    For an integer, or a BOOL register: a switch that answers 255 for no value, say."""
-    raw_range: tuple[int, int] | None = None
-    """Raw values outside this range read as no data; for an integer or a BOOL register."""
+    A `range` costs nothing however wide: `range(0, 0xFFFF)` is 0 to 0xFFFE, leaving out the
+    0xFFFF a device sends when it has no reading; `range(0, 2)` is a switch's 0 and 1.
+    For an integer or a BOOL register.
+    """
     limits: Limits | None = None
     unit: Unit | None = None
     poll_rate: PollRate = PollRate.MEDIUM
@@ -239,7 +241,8 @@ class Point[T]:
     labels: Mapping[str, str | int] = field(default_factory=lambda: MappingProxyType({}))
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "no_data", frozenset(self.no_data))
+        if self.valid_raw is not None and not isinstance(self.valid_raw, range):
+            object.__setattr__(self, "valid_raw", frozenset(self.valid_raw))
         object.__setattr__(self, "labels", MappingProxyType(dict(self.labels)))
         if self.on_change is not None and self.on_change.after is None:
             object.__setattr__(self, "on_change", replace(self.on_change, after=0.0))
@@ -288,8 +291,8 @@ def _decimals(number: float) -> int:
 
 def _problems(point: Point[Any]) -> list[str]:
     """Everything wrong with a point, so one error names every mistake at once."""
-    return [*_shape_problems(point), *_type_problems(point), *_value_problems(point), *_read_problems(point),
-            *_write_problems(point)]
+    return [*_shape_problems(point), *_type_problems(point), *_value_problems(point), *_valid_raw_problems(point),
+            *_read_problems(point), *_write_problems(point)]
 
 
 def _shape_problems(point: Point[Any]) -> list[str]:
@@ -359,18 +362,27 @@ def _value_problems(point: Point[Any]) -> list[str]:
     return found
 
 
+def _valid_raw_problems(point: Point[Any]) -> list[str]:
+    valid = point.valid_raw
+    if valid is None:
+        return []
+    data_type = point.data_type
+    bounds = raw_bounds(data_type.kind)
+    if bounds is None:
+        return [f"valid_raw names raw integers, which {data_type!r} does not hold"
+                + (" (a float reads NaN and infinity as no data by itself)" if data_type.is_float else "")]
+    if len(valid) == 0:
+        return ["valid_raw is empty, so nothing could ever be a value"]
+    if any(access is not None and access.bits for access in (point.read, point.write)):
+        bounds = (0, 1)
+    low, high = (min(valid[0], valid[-1]), max(valid[0], valid[-1])) if isinstance(valid, range) else (min(valid), max(valid))
+    if low < bounds[0] or high > bounds[1]:
+        return [f"valid_raw reaches {low}..{high}, but {data_type!r} holds {bounds[0]}..{bounds[1]} here"]
+    return []
+
+
 def _read_problems(point: Point[Any]) -> list[str]:
     found: list[str] = []
-    data_type = point.data_type
-    if point.no_data or point.raw_range is not None:
-        if not point.readable:
-            found.append("no_data and raw_range describe reads, but it has no read side")
-        if not data_type.is_integer and data_type.kind is not DataTypeKind.BOOL:
-            found.append(f"no_data and raw_range compare raw integers, not {data_type!r}"
-                         + (" (a float reads NaN and infinity as no data by itself)"
-                            if data_type.is_float else ""))
-    if point.raw_range is not None and point.raw_range[0] > point.raw_range[1]:
-        found.append(f"raw_range {point.raw_range} is empty")
     if point.deadband is not None:
         if point.deadband < 0:
             found.append(f"deadband cannot be negative, got {point.deadband}")

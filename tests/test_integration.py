@@ -35,7 +35,7 @@ T = TypeVar("T")
 
 def _room(n: int) -> list[Point[Any]]:
     return [Point(Key(f"room_{n}_temp", float), read=InputRegister(100 + n), data_type=DataType.INT16, scale=0.1,
-                  no_data=(0x7FFF,), unit=Unit.CELSIUS)]
+                  valid_raw=range(-0x8000, 0x7FFF), unit=Unit.CELSIUS)]
 
 
 POWER = Key("power", float)
@@ -69,7 +69,7 @@ MODEL = Model(
         Section([
             Point(POWER, read=InputRegister(1), data_type=DataType.FLOAT32, unit=Unit.WATT),
             Point(ENERGY, read=InputRegister(3), data_type=DataType.UINT32, scale=0.1, unit=Unit.KILOWATT_HOUR),
-            Point(TEMP, read=InputRegister(5), data_type=DataType.INT16, scale=0.1, no_data=(0x7FFF,)),
+            Point(TEMP, read=InputRegister(5), data_type=DataType.INT16, scale=0.1, valid_raw=range(-0x8000, 0x7FFF)),
             Point(FAN_RPM, read=InputRegister(6), unit=Unit.RPM),
             Point(STATUS_WORD, read=HoldingRegister(10)),
             Point(LAMP_ON, read=HoldingRegister(10), write=HoldingRegister(10), data_type=DataType.bit(0)),

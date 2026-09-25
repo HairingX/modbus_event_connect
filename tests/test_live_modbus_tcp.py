@@ -50,7 +50,7 @@ pytestmark = [
 
 LIVE_MODEL = Model(name="live", manufacturer="any", sections=[Section([
     Point(Key("u16", int), read=InputRegister(1), data_type=DataType.UINT16),
-    Point(Key("s16_scaled", float), read=InputRegister(104), data_type=DataType.INT16, scale=0.01, no_data=(0x7FFF,)),
+    Point(Key("s16_scaled", float), read=InputRegister(104), data_type=DataType.INT16, scale=0.01, valid_raw=range(-0x8000, 0x7FFF)),
     Point(Key("text", str), read=HoldingRegister(10), data_type=DataType.string(16)),
     Point(Key("u32", int), read=HoldingRegister(28), data_type=DataType.UINT32),
 ])], options=ModbusOptions(numbering=plain(first_address=1)), read_back_after=1.0)

@@ -3,10 +3,10 @@ from __future__ import annotations
 
 import math
 import struct
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from typing import Any
 
-from ._data_type import ByteOrder, DataTypeKind, WordOrder
+from ._data_type import ByteOrder, DataTypeKind, WordOrder, raw_bounds
 from ._device import EncodedWrite
 from ._errors import InvalidValueError
 from ._key import is_state_type
@@ -14,17 +14,6 @@ from ._point import Point
 from ._value import Quality, Value
 
 _SIGNED_KINDS = frozenset({DataTypeKind.INT16, DataTypeKind.INT32, DataTypeKind.INT64})
-
-_INT_RANGE: Mapping[DataTypeKind, tuple[int, int]] = {
-    DataTypeKind.UINT16: (0, 0xFFFF),
-    DataTypeKind.INT16: (-0x8000, 0x7FFF),
-    DataTypeKind.UINT32: (0, 0xFFFFFFFF),
-    DataTypeKind.INT32: (-0x80000000, 0x7FFFFFFF),
-    DataTypeKind.UINT64: (0, 0xFFFFFFFFFFFFFFFF),
-    DataTypeKind.INT64: (-0x8000000000000000, 0x7FFFFFFFFFFFFFFF),
-    DataTypeKind.BCD16: (0, 9999),
-    DataTypeKind.BCD32: (0, 99999999),
-}
 
 _RELATIVE_TOLERANCE = 1e-9
 
@@ -70,8 +59,8 @@ def encode(point: Point[Any], value: object) -> EncodedWrite:
     if kind is DataTypeKind.BOOL:
         raw = 1 if _as_bit_value(point, value) else 0
         if not _is_reading(point, raw):
-            raise InvalidValueError(f"point {point.key!r}: {value!r} encodes to {raw}, which this point reads "
-                                    f"as no data")
+            raise InvalidValueError(f"point {point.key!r}: {value!r} encodes to {raw}, which is not one of "
+                                    f"its valid_raw values")
         return EncodedWrite(registers=(raw,))
     if kind is DataTypeKind.BIT:
         assert data_type.bit_index is not None
@@ -203,9 +192,7 @@ def _decode_int(point: Point[Any], registers: Sequence[int]) -> tuple[Value, Qua
     else:
         raw = _to_signed(combined, len(registers) * 16) if kind in _SIGNED_KINDS else combined
 
-    if raw in point.no_data:
-        return (None, Quality.NO_DATA)
-    if point.raw_range is not None and not (point.raw_range[0] <= raw <= point.raw_range[1]):
+    if not _is_reading(point, raw):
         return (None, Quality.NO_DATA)
     return (_numeric_pipeline(point, raw, integer_raw=True), Quality.GOOD)
 
@@ -228,10 +215,8 @@ def _decode_string(point: Point[Any], registers: Sequence[int]) -> tuple[Value, 
 
 
 def _is_reading(point: Point[Any], raw: int) -> bool:
-    """Whether `raw` is a reading, not one of the point's "no reading" values."""
-    if raw in point.no_data:
-        return False
-    return point.raw_range is None or point.raw_range[0] <= raw <= point.raw_range[1]
+    """Whether `raw` is one of the point's values rather than "no reading"."""
+    return point.valid_raw is None or raw in point.valid_raw
 
 
 def _bcd_unpack(combined: int, nibble_count: int) -> int | None:
@@ -341,16 +326,15 @@ def _encode_numeric(point: Point[Any], value: Value) -> EncodedWrite:
 
     if data_type.is_integer:
         raw = raw_for_kind if isinstance(raw_for_kind, int) else _round_half_away_from_zero(raw_for_kind)
-        lo, hi = _INT_RANGE[kind]
+        bounds = raw_bounds(kind)
+        assert bounds is not None
+        lo, hi = bounds
         if not lo <= raw <= hi:
             raise InvalidValueError(f"point {point.key!r}: {value!r} encodes to {raw}, outside "
                               f"{kind.name}'s range {lo}..{hi}")
-        if raw in point.no_data:
-            raise InvalidValueError(f"point {point.key!r}: {value!r} encodes to {raw}, one of this "
-                              f"point's no_data sentinels")
-        if point.raw_range is not None and not point.raw_range[0] <= raw <= point.raw_range[1]:
-            raise InvalidValueError(f"point {point.key!r}: {value!r} encodes to {raw}, outside "
-                              f"raw_range {point.raw_range}")
+        if not _is_reading(point, raw):
+            raise InvalidValueError(f"point {point.key!r}: {value!r} encodes to {raw}, which is not one of "
+                                    f"its valid_raw values")
         if kind in (DataTypeKind.BCD16, DataTypeKind.BCD32):
             combined = _bcd_pack(raw, data_type.registers * 4)
         else:

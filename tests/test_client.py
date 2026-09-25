@@ -133,7 +133,7 @@ HARDWARE = Key("hardware", int)
 
 
 BASE = [
-    Point(TEMP, read=InputRegister(1), data_type=DataType.INT16, scale=0.1, no_data=(0x7FFF,), deadband=0.5),
+    Point(TEMP, read=InputRegister(1), data_type=DataType.INT16, scale=0.1, valid_raw=range(-0x8000, 0x7FFF), deadband=0.5),
     Point(MODE, read=HoldingRegister(2), write=HoldingRegister(2), limits=Limits(0, 4, step=1),
           on_write=Refresh(["fan_in", "fan_out"], after=2.0, until_stable=10.0)),
     Point(FAN_IN, read=InputRegister(3)),

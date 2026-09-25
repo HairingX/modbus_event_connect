@@ -453,13 +453,13 @@ def test_a_state_can_be_a_signed_integer() -> None:
     assert encode(point, Signed.ERROR).registers == (0xFFFF,)
 
 
-# ==================================================================================== no_data / raw_range
+# ======================================================================================== valid_raw
 
 
 def _switch() -> Point[bool]:
     """A 0/1 switch in a whole register, answering 255 when it has no value."""
     return Point(Key("switch", bool), read=HoldingRegister(0), write=HoldingRegister(0), data_type=DataType.BOOL,
-                 raw_range=(0, 1))
+                 valid_raw=range(0, 2))
 
 
 @pytest.mark.parametrize("raw,value", [(0, False), (1, True)])
@@ -467,8 +467,8 @@ def test_a_bool_register_reads_its_values(raw: int, value: bool) -> None:
     assert decode(_switch(), [raw]) == (value, Quality.GOOD)
 
 
-@pytest.mark.parametrize("raw", [255, 2])
-def test_a_bool_register_outside_its_raw_range_is_no_data(raw: int) -> None:
+@pytest.mark.parametrize("raw", [255, 253, 2])
+def test_a_bool_register_outside_its_valid_raw_is_no_data(raw: int) -> None:
     assert decode(_switch(), [raw]) == (None, Quality.NO_DATA)
 
 
@@ -476,34 +476,47 @@ def test_a_bool_register_writes_zero_or_one() -> None:
     assert (encode(_switch(), True).registers, encode(_switch(), False).registers) == ((1,), (0,))
 
 
-def test_a_bool_whose_value_is_its_no_data_sentinel_is_refused() -> None:
+def test_a_bool_whose_value_is_not_valid_raw_is_refused() -> None:
     point = Point(Key("p", bool), read=HoldingRegister(0), write=HoldingRegister(0), data_type=DataType.BOOL,
-                  no_data=(0,))
-    with pytest.raises(InvalidValueError, match="no data"):
+                  valid_raw={1})
+    with pytest.raises(InvalidValueError, match="valid_raw"):
         encode(point, False)
 
 
-def test_no_data_sentinel_reads_as_no_data() -> None:
-    point = Point(Key("p", int), read=InputRegister(0), write=HoldingRegister(0), data_type=DataType.INT16, no_data=(0x7FFF,))
+def _int16(valid_raw: Any) -> Point[int]:
+    return Point(Key("p", int), read=InputRegister(0), write=HoldingRegister(0), data_type=DataType.INT16,
+                 valid_raw=valid_raw)
+
+
+def test_a_sentinel_left_out_of_valid_raw_reads_as_no_data() -> None:
+    point = _int16(range(-0x8000, 0x7FFF))
     assert decode(point, [0x7FFF]) == (None, Quality.NO_DATA)
+    assert decode(point, [0x7FFE]) == (0x7FFE, Quality.GOOD)
+    assert decode(point, [0x8000]) == (-0x8000, Quality.GOOD), "the sign is taken before valid_raw is asked"
 
 
-def test_raw_range_excludes_values_outside_it_on_read() -> None:
-    point = Point(Key("p", int), read=InputRegister(0), write=HoldingRegister(0), data_type=DataType.INT16, raw_range=(0, 1000))
+def test_a_range_of_valid_raw_ends_before_its_stop() -> None:
+    point = _int16(range(0, 1001))
     assert decode(point, [1001]) == (None, Quality.NO_DATA)
-    assert decode(point, [1000]) == (1000, Quality.GOOD)  # inclusive bound
+    assert decode(point, [1000]) == (1000, Quality.GOOD)
 
 
-def test_write_refuses_a_value_that_encodes_to_the_no_data_sentinel() -> None:
-    point = Point(Key("p", int), read=InputRegister(0), write=HoldingRegister(0), data_type=DataType.INT16, no_data=(0x7FFF,))
+def test_valid_raw_can_leave_out_a_band_and_keep_what_is_above_it() -> None:
+    point = _int16({*range(0, 230), 255})
+    assert [decode(point, [raw])[1] for raw in (229, 230, 254, 255)] == \
+           [Quality.GOOD, Quality.NO_DATA, Quality.NO_DATA, Quality.GOOD]
+
+
+def test_valid_raw_as_wide_as_a_uint32_costs_nothing() -> None:
+    point = Point(Key("p", int), read=InputRegister(0), data_type=DataType.UINT32, valid_raw=range(0, 0xFFFFFFFF))
+    assert decode(point, [0xFFFF, 0xFFFF]) == (None, Quality.NO_DATA)
+    assert decode(point, [0xFFFF, 0xFFFE]) == (0xFFFFFFFE, Quality.GOOD)
+
+
+@pytest.mark.parametrize("value", [0x7FFF, -0x8000 - 1])
+def test_write_refuses_a_value_outside_valid_raw_or_the_type(value: int) -> None:
     with pytest.raises(InvalidValueError):
-        encode(point, 0x7FFF)
-
-
-def test_write_refuses_a_value_outside_raw_range() -> None:
-    point = Point(Key("p", int), read=InputRegister(0), write=HoldingRegister(0), data_type=DataType.INT16, raw_range=(0, 1000))
-    with pytest.raises(InvalidValueError):
-        encode(point, 1001)
+        encode(_int16(range(-0x8000, 0x7FFF)), value)
 
 
 # ==================================================================== scale, offset, precision

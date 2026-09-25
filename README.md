@@ -275,7 +275,7 @@ THERMOSTAT = Model(name="Thermostat", manufacturer="Example",
           data_type=DataType.INT16,       # a signed 16-bit number
           scale=0.1,                      # the device sends 215 for 21.5
           unit=Unit.CELSIUS,
-          no_data=(0x7FFF,)),             # what the device sends when it has no reading
+          valid_raw=range(-0x8000, 0x7FFF)),   # all but 0x7FFF, what it sends with no reading
     Point(TARGET,
           read=HoldingRegister(20), write=HoldingRegister(20),
           data_type=DataType.INT16, scale=0.1, unit=Unit.CELSIUS,
@@ -366,7 +366,19 @@ device's documentation gives them.
 | `scale`, `offset` | value = raw × scale + offset |
 | `precision` | decimals to round to; by default, enough for `scale` and `offset` |
 | `transform` | a conversion after scaling, such as `Transforms.SECONDS_AS_MINUTES` |
-| `no_data`, `raw_range` | raw values that mean "no reading", of an integer or a `BOOL` register; they read as `NO_DATA` |
+| `valid_raw` | the raw numbers that are values, of an integer or a `BOOL` register; any other reads as `NO_DATA` and cannot be written |
+
+`valid_raw` takes a `range` or a set, and a `range` costs nothing however wide:
+
+```python
+valid_raw=range(0, 0xFFFFFFFF)     # a UINT32's 0 to max-1; 0xFFFFFFFF means no reading
+valid_raw=range(0, 2)              # a switch's 0 and 1; 255, or 11, is no value
+valid_raw={*range(0, 230), 255}    # everything but 230 to 254
+```
+
+It names the device's own numbers, before `scale` and `offset`, and a number the data type
+cannot hold is refused when the point is created: `range(0, 0xFFFF)` on an `INT16` would never
+match, as the device's 0xFFFF is -1 to it.
 
 A `FLOAT32` or `FLOAT64` that reads NaN or infinity is `NO_DATA` by itself. A point whose key
 is an `IntEnum` reads its number as that state; a number no state names is `NO_DATA`, and

@@ -121,8 +121,11 @@ def test_a_data_type_classifies_itself(data_type: DataType, numeric: bool, integ
     {"read": HoldingRegister(1), "data_type": DataType.bit(3)},
     {"read": HoldingRegister(1), "write": HoldingRegister(1), "data_type": DataType.bit(15)},
     {"read": InputRegister(1), "data_type": DataType.string(8)},
-    {"read": InputRegister(1), "data_type": DataType.INT16, "scale": 0.01, "no_data": (0x7FFF,), "deadband": 0.05},
-    {"read": InputRegister(1), "data_type": DataType.UINT16, "raw_range": (0, 1000)},
+    {"read": InputRegister(1), "data_type": DataType.INT16, "scale": 0.01, "valid_raw": range(-0x8000, 0x7FFF),
+     "deadband": 0.05},
+    {"read": InputRegister(1), "data_type": DataType.UINT16, "valid_raw": range(0, 1001)},
+    {"write": HoldingRegister(1), "data_type": DataType.UINT16, "valid_raw": range(1, 0xFFFF)},
+    {"read": Coil(1), "data_type": DataType.BOOL, "valid_raw": range(0, 2)},
     {"write": HoldingRegister(1), "write_kind": WriteKind.COMMAND, "pulse": Pulse(idle=0, after=1.0)},
     {"read": HoldingRegister(1), "write": HoldingRegister(1), "limits": Limits(5, 35, 0.5),
      "on_write": Refresh(["a", "b"], after=2, until_stable=30)},
@@ -173,7 +176,7 @@ class Mode(IntEnum):
     (float, {"data_type": DataType.INT16}),
     (float, {"data_type": DataType.FLOAT32}),
     (Mode, {"data_type": DataType.UINT16}),
-    (Mode, {"data_type": DataType.INT16, "no_data": (0x7FFF,)}),
+    (Mode, {"data_type": DataType.INT16, "valid_raw": range(-0x8000, 0x7FFF)}),
 ], ids=["bool-bit", "str-string", "int-whole-scale", "int-precision-0", "float-int16", "float-float32",
         "states-u16", "states-with-no-data"])
 def test_a_key_type_the_registers_can_hold_is_accepted(value_type: type[Any], fields: dict[str, Any]) -> None:
@@ -241,22 +244,32 @@ def test_number_only_features_are_refused_on_other_data_types(data_type: DataTyp
     _refused(match, read=HoldingRegister(1), write=HoldingRegister(1), data_type=data_type, **fields)
 
 
-def test_no_data_needs_a_read_side() -> None:
-    _refused("has no read side", write=HoldingRegister(1), no_data=(0xFFFF,))
-
-
 @pytest.mark.parametrize("data_type", [DataType.FLOAT32, DataType.string(2), DataType.bit(0)])
-def test_no_data_and_raw_range_compare_raw_integers_only(data_type: DataType) -> None:
-    _refused("compare raw integers", read=HoldingRegister(1), data_type=data_type, no_data=(0,))
-    _refused("compare raw integers", read=HoldingRegister(1), data_type=data_type, raw_range=(0, 1))
+def test_valid_raw_names_raw_integers_only(data_type: DataType) -> None:
+    _refused("names raw integers", read=HoldingRegister(1), data_type=data_type, valid_raw=range(0, 2))
 
 
 def test_a_float_data_type_is_told_it_handles_nan_itself() -> None:
-    _refused("NaN and infinity", read=HoldingRegister(1), data_type=DataType.FLOAT32, no_data=(0,))
+    _refused("NaN and infinity", read=HoldingRegister(1), data_type=DataType.FLOAT32, valid_raw=range(0, 2))
 
 
-def test_an_empty_raw_range_is_refused() -> None:
-    _refused("is empty", read=InputRegister(1), raw_range=(10, 5))
+@pytest.mark.parametrize("valid_raw", [range(10, 5), range(0), set[int]()], ids=["backwards", "empty-range", "empty-set"])
+def test_an_empty_valid_raw_is_refused(valid_raw: Any) -> None:
+    _refused("is empty", read=InputRegister(1), valid_raw=valid_raw)
+
+
+@pytest.mark.parametrize("fields", [
+    {"data_type": DataType.INT16, "valid_raw": range(0, 0xFFFF)},         # 0xFFFF is -1 to an INT16
+    {"data_type": DataType.UINT16, "valid_raw": range(-1, 10)},
+    {"data_type": DataType.UINT16, "valid_raw": {0, 0x10000}},
+    {"data_type": DataType.BCD16, "valid_raw": range(0, 10001)},
+], ids=["unsigned-for-int16", "negative-for-uint16", "beyond-uint16", "beyond-bcd16"])
+def test_valid_raw_the_data_type_cannot_hold_is_refused(fields: dict[str, Any]) -> None:
+    _refused("valid_raw reaches", read=InputRegister(1), **fields)
+
+
+def test_a_bool_on_a_bit_holds_only_zero_and_one() -> None:
+    _refused("valid_raw reaches", read=Coil(1), data_type=DataType.BOOL, valid_raw=range(0, 256))
 
 
 def test_limits_need_a_write_side() -> None:
@@ -305,14 +318,14 @@ def test_every_problem_is_named_in_one_error() -> None:
 
 # ============================================================================ point values
 
-def test_no_data_and_labels_are_frozen_copies() -> None:
+def test_valid_raw_and_labels_are_frozen_copies() -> None:
     labels = {"room": 3}
-    sentinels = [0x7FFF]
-    point = Point(Key("p", int), read=InputRegister(1), labels=labels, no_data=sentinels)
+    valid = [1, 2]
+    point = Point(Key("p", int), read=InputRegister(1), labels=labels, valid_raw=valid)
     labels["room"] = 4
-    sentinels.append(0)
+    valid.append(3)
     assert point.labels == {"room": 3}
-    assert point.no_data == frozenset({0x7FFF})
+    assert point.valid_raw == frozenset({1, 2})
     with pytest.raises(TypeError):
         point.labels["room"] = 5  # type: ignore[index]
 

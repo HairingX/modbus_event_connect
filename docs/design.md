@@ -89,7 +89,7 @@ Point(
     word_order=WordOrder.HIGH_FIRST, byte_order=ByteOrder.BIG,
     scale=0.01, offset=0,
     transform=None,                               # a pair, see 3.5
-    no_data=(0x7FFF,),                            # sentinels, see 3.5
+    valid_raw=range(-0x8000, 0x7FFF),             # all but the 0x7FFF sentinel, see 3.5
     limits=Limits(min=5, max=35, step=0.5),       # engineering units
     unit=Unit.CELSIUS,
     poll_rate=PollRate.MEDIUM,
@@ -104,7 +104,8 @@ Rules, checked when the point is constructed:
 - at least one of `read` / `write`;
 - `write` only into a writable space (holding, coil);
 - a point in a bit space (coil, discrete) is one bit wide;
-- `limits` only on a writable point, `no_data` only on a readable one.
+- `limits` only on a writable point; `valid_raw` only on an integer or a `BOOL` register, and
+  only with numbers its data type can hold.
 
 The consumer asks `can_read(key)` and `can_write(key)`, and builds from that what it shows:
 
@@ -179,7 +180,7 @@ bit(n)  string(n, encoding)
 Reading and writing are one pipeline run in opposite directions, so each step has an inverse:
 
 ```
-read:   raw registers → decode (data type, orders) → no_data? → scale, offset → transform.read  → value
+read:   raw registers → decode (data type, orders) → valid_raw? → scale, offset → transform.read  → value
 write:  value → limits check → transform.write → inverse scale, offset → encode → raw registers
 ```
 
@@ -278,7 +279,7 @@ def room(n: int) -> list[Point]:         # one room; called for every room
         Point(key(Room.TYPE), read=InputRegister(base + 1), data_type=DataType.UINT16,
               poll_rate=PollRate.STATIC),
         Point(key(Room.TEMP_AIR), read=InputRegister(base + 4), data_type=DataType.INT16,
-              scale=0.01, no_data=(0x7FFF,), unit=Unit.CELSIUS, deadband=0.05),
+              scale=0.01, valid_raw=range(-0x8000, 0x7FFF), unit=Unit.CELSIUS, deadband=0.05),
         Point(key(Room.TEMP_TARGET), read=HoldingRegister(base + 19),
               write=HoldingRegister(base + 19), data_type=DataType.INT16, scale=0.01,
               limits=Limits(5, 35, step=0.5), unit=Unit.CELSIUS),

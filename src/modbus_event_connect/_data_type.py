@@ -50,6 +50,24 @@ _REGISTERS: Mapping[DataTypeKind, int] = MappingProxyType({
     DataTypeKind.UINT64: 4, DataTypeKind.INT64: 4, DataTypeKind.FLOAT64: 4,
 })
 
+_RAW_BOUNDS: Mapping[DataTypeKind, tuple[int, int]] = MappingProxyType({
+    DataTypeKind.UINT16: (0, 0xFFFF),
+    DataTypeKind.INT16: (-0x8000, 0x7FFF),
+    DataTypeKind.UINT32: (0, 0xFFFFFFFF),
+    DataTypeKind.INT32: (-0x80000000, 0x7FFFFFFF),
+    DataTypeKind.UINT64: (0, 0xFFFFFFFFFFFFFFFF),
+    DataTypeKind.INT64: (-0x8000000000000000, 0x7FFFFFFFFFFFFFFF),
+    DataTypeKind.BCD16: (0, 9999),
+    DataTypeKind.BCD32: (0, 99999999),
+    DataTypeKind.BOOL: (0, 0xFFFF),
+})
+
+
+def raw_bounds(kind: DataTypeKind) -> tuple[int, int] | None:
+    """The raw integers `kind` can hold, lowest and highest; None for a kind that holds none."""
+    return _RAW_BOUNDS.get(kind)
+
+
 _INTEGER_KINDS = frozenset({DataTypeKind.UINT16, DataTypeKind.INT16, DataTypeKind.UINT32, DataTypeKind.INT32,
                             DataTypeKind.UINT64, DataTypeKind.INT64, DataTypeKind.BCD16, DataTypeKind.BCD32})
 _FLOAT_KINDS = frozenset({DataTypeKind.FLOAT32, DataTypeKind.FLOAT64})
