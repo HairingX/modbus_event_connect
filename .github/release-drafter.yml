@@ -2,42 +2,47 @@ name-template: 'v$RESOLVED_VERSION'
 tag-template: 'v$RESOLVED_VERSION'
 change-template: '- #$NUMBER $TITLE @$AUTHOR'
 sort-direction: ascending
-exclude-labels:
-  - 'skip-changelog'
 categories:
+  - type: 'pre-exclude'
+    when:
+      label: 'skip-changelog'
+
   - title: '🛠 Breaking Changes'
-    labels:
-      - breaking-change
+    when:
+      label: 'breaking-change'
 
   - title: '🚀 Features'
-    labels:
-      - 'feature request'
-      - 'enhancement'
+    when:
+      labels:
+        - 'feature request'
+        - 'enhancement'
 
   - title: '🐛 Bug Fixes'
-    labels:
-      - 'fix'
-      - 'bugfix'
-      - 'bug'
+    when:
+      labels:
+        - 'fix'
+        - 'bugfix'
+        - 'bug'
 
   - title: '🧰 Maintenance'
-    label: 'chore'
+    when:
+      label: 'chore'
 
-  - title: ":package: Dependencies"
-    labels:
-      - 'dependencies'
+  - title: ':package: Dependencies'
+    when:
+      label: 'dependencies'
 
-version-resolver:
-  major:
-    labels:
-      - 'major'
-  minor:
-    labels:
-      - 'minor'
-  patch:
-    labels:
-      - 'patch'
-  default: patch
+  # The next version: a major or minor bump by label, a patch otherwise.
+  - type: 'version-resolver'
+    semver-increment: 'major'
+    when:
+      label: 'major'
+  - type: 'version-resolver'
+    semver-increment: 'minor'
+    when:
+      label: 'minor'
+  - type: 'version-resolver'
+    semver-increment: 'patch'
 template: |
   ## Changes
   $CHANGES
