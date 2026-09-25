@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from ._clock import Clock
 from ._point import DEFAULT_INTERVALS, Point, PollRate
@@ -60,7 +61,7 @@ class Scheduler:
         self._key_overrides: dict[str, float] = {}
         self._warned: set[PollRate | str] = set()
 
-        self._points: dict[str, Point] = {}
+        self._points: dict[str, Point[Any]] = {}
         self._polled: dict[str, bool] = {}
         self._last_attempt: dict[str, float] = {}
         self._pending: dict[str, _Pending] = {}
@@ -68,11 +69,11 @@ class Scheduler:
 
     # ------------------------------------------------------------------------------- points
 
-    def set_points(self, points: Iterable[Point]) -> None:
+    def set_points(self, points: Iterable[Point[Any]]) -> None:
         """Adopts the readable points of a (re)resolved model.
 
         State for a key that persists is kept; a new key starts unpolled."""
-        new_points = {point.key: point for point in points if point.readable}
+        new_points: dict[str, Point[Any]] = {point.key: point for point in points if point.readable}
         for key in list(self._points):
             if key not in new_points:
                 self._polled.pop(key, None)
@@ -178,7 +179,7 @@ class Scheduler:
 
     # ---------------------------------------------------------------------------------- read
 
-    def record(self, key: str, value: DataValue | None, *, success: bool) -> None:
+    def record(self, key: str, value: DataValue[Any] | None, *, success: bool) -> None:
         """Reports the outcome of a read attempt for `key`; may consume a pending refresh and
         advance following."""
         self._require(key)
@@ -194,7 +195,7 @@ class Scheduler:
         if key in self._following:
             self._advance_following(key, value, success, now)
 
-    def _advance_following(self, key: str, value: DataValue | None, success: bool, now: float) -> None:
+    def _advance_following(self, key: str, value: DataValue[Any] | None, success: bool, now: float) -> None:
         following = self._following[key]
         sample = (value.value, value.quality) if success and value is not None else None
         if sample is not None:

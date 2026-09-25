@@ -1,4 +1,4 @@
-"""A value together with how far it can be trusted and when the device said it."""
+"""A value together with how far it can be trusted, when the device said it, and what it said."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -26,11 +26,16 @@ class Quality(Enum):
 
 
 @dataclass(frozen=True)
-class DataValue:
-    value: Value
+class DataValue[T]:
+    """A point's value, how far it can be trusted, and when the device said it."""
+    value: T | None
+    """None unless the quality is GOOD, or STALE after a good value."""
     quality: Quality
     timestamp: datetime
     """When the device answered - timezone-aware UTC. For STALE, when it last answered."""
+    raw: tuple[int, ...] = ()
+    """What the device answered, in wire order: registers, or 0 and 1 for bits. Empty when it
+    did not answer. Kept for NO_DATA too, so a state no enum names can still be told."""
 
     @property
     def is_good(self) -> bool:

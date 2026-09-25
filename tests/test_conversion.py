@@ -5,42 +5,62 @@ from __future__ import annotations
 import itertools
 import math
 import struct
-from collections.abc import Mapping
+from enum import IntEnum
 from typing import Any
 
 import pytest
 
 from src.modbus_event_connect._conversion import decode, encode
-from src.modbus_event_connect._errors import InvalidValueError
 from src.modbus_event_connect._data_type import ByteOrder, DataType, DataTypeKind, WordOrder
 from src.modbus_event_connect._device import EncodedWrite
+from src.modbus_event_connect._errors import InvalidValueError
+from src.modbus_event_connect._key import Key
+from src.modbus_event_connect._point import Limits, Point, Transforms
+from src.modbus_event_connect._value import Quality, Value
 from src.modbus_event_connect.modbus._access import (
     Coil,
     DiscreteInput,
     HoldingRegister,
     InputRegister,
 )
-from src.modbus_event_connect._point import Limits, Point, Transforms
-from src.modbus_event_connect._value import Quality, Value
 
 # ================================================================================== point builders
 
 
-def _rw_point(data_type: DataType, **kwargs: Any) -> Point:
+def _key(data_type: DataType, value_type: type[Any] | None) -> Key[Any]:
+    """`value_type`, or the one type every point of `data_type` can hold."""
+    if value_type is None:
+        value_type = bool if data_type.is_boolean else str if data_type.kind is DataTypeKind.STRING else float
+    return Key("p", value_type)
+
+
+def _rw_point(data_type: DataType, value_type: type[Any] | None = None, **kwargs: Any) -> Point[Any]:
     """A point with both a read and a write side, on ordinary (non-bit) Modbus tables."""
-    return Point("p", read=InputRegister(0), write=HoldingRegister(0), data_type=data_type, **kwargs)
+    return Point(_key(data_type, value_type), read=InputRegister(0), write=HoldingRegister(0), data_type=data_type,
+                 **kwargs)
 
 
-def _ro_point(data_type: DataType, **kwargs: Any) -> Point:
-    return Point("p", read=InputRegister(0), data_type=data_type, **kwargs)
+def _ro_point(data_type: DataType, value_type: type[Any] | None = None, **kwargs: Any) -> Point[Any]:
+    return Point(_key(data_type, value_type), read=InputRegister(0), data_type=data_type, **kwargs)
 
 
-def _string_point(length: int, *, byte_order: ByteOrder = ByteOrder.BIG, encoding: str = "utf-8") -> Point:
-    return Point("p", read=InputRegister(0), write=HoldingRegister(0), data_type=DataType.string(length, encoding), byte_order=byte_order)
+def _string_point(length: int, *, byte_order: ByteOrder = ByteOrder.BIG, encoding: str = "utf-8") -> Point[Any]:
+    return Point(Key("p", str), read=InputRegister(0), write=HoldingRegister(0), data_type=DataType.string(length, encoding), byte_order=byte_order)
 
 
-def _enum_point(mapping: Mapping[int, str], *, base: DataTypeKind = DataTypeKind.UINT16) -> Point:
-    return Point("p", read=InputRegister(0), write=HoldingRegister(0), data_type=DataType.enum(mapping, base))
+class Mode(IntEnum):
+    OFF = 0
+    ON = 1
+    AUTO = 2
+
+
+class Signed(IntEnum):
+    ERROR = -1
+    OFF = 0
+
+
+def _state_point[T: IntEnum](states: type[T], data_type: DataType = DataType.UINT16) -> Point[T]:
+    return Point(Key("p", states), read=InputRegister(0), write=HoldingRegister(0), data_type=data_type)
 
 
 def _regs_from_bytes(data: bytes, byte_order: ByteOrder) -> tuple[int, ...]:
@@ -115,7 +135,7 @@ def test_decode_assembles_registers_for_every_numeric_kind_and_order(
     word_order: WordOrder, byte_order: ByteOrder,
     data_type: DataType, wire: dict[tuple[WordOrder, ByteOrder], tuple[int, ...]], expected: float | int,
 ) -> None:
-    point = _rw_point(data_type, word_order=word_order, byte_order=byte_order)
+    point = _rw_point(data_type, int if data_type.is_integer else float, word_order=word_order, byte_order=byte_order)
     assert decode(point, wire[(word_order, byte_order)]) == (expected, Quality.GOOD)
 
 
@@ -184,7 +204,7 @@ def _boundary_values(data_type: DataType) -> tuple[int, ...]:
 @pytest.mark.parametrize("data_type", _INTEGER_CODECS, ids=_INTEGER_IDS)
 @pytest.mark.parametrize("word_order,byte_order", _ORDERS, ids=lambda o: o.name if isinstance(o, WordOrder | ByteOrder) else str(o))
 def test_integer_round_trip_at_boundary_values(word_order: WordOrder, byte_order: ByteOrder, data_type: DataType) -> None:
-    point = _rw_point(data_type, word_order=word_order, byte_order=byte_order)
+    point = _rw_point(data_type, int, word_order=word_order, byte_order=byte_order)
     for value in _boundary_values(data_type):
         registers = encode(point, value).registers
         assert decode(point, registers) == (value, Quality.GOOD)
@@ -202,7 +222,7 @@ def test_float_round_trip_at_boundary_and_precise_values(word_order: WordOrder, 
 
 
 def test_u64_extreme_value_round_trips_with_no_float_loss() -> None:
-    point = _rw_point(DataType.UINT64)
+    point = _rw_point(DataType.UINT64, int)
     value = 2**64 - 1
     decoded, quality = decode(point, encode(point, value).registers)
     assert quality is Quality.GOOD
@@ -212,7 +232,7 @@ def test_u64_extreme_value_round_trips_with_no_float_loss() -> None:
 
 @pytest.mark.parametrize("value", [-(2**63), 2**63 - 1], ids=["min", "max"])
 def test_s64_extreme_values_round_trip_with_no_float_loss(value: int) -> None:
-    point = _rw_point(DataType.INT64)
+    point = _rw_point(DataType.INT64, int)
     decoded, quality = decode(point, encode(point, value).registers)
     assert quality is Quality.GOOD
     assert decoded == value
@@ -323,8 +343,8 @@ def test_bool_any_nonzero_register_is_true() -> None:
 
 
 def test_bool_reads_the_single_bit_of_a_coil_or_discrete_input() -> None:
-    coil = Point("p", read=Coil(0), write=Coil(0), data_type=DataType.BOOL)
-    discrete = Point("p", read=DiscreteInput(0), data_type=DataType.BOOL)
+    coil = Point(Key("p", bool), read=Coil(0), write=Coil(0), data_type=DataType.BOOL)
+    discrete = Point(Key("p", bool), read=DiscreteInput(0), data_type=DataType.BOOL)
     assert decode(coil, [1]) == (True, Quality.GOOD)
     assert decode(coil, [0]) == (False, Quality.GOOD)
     assert decode(discrete, [1]) == (True, Quality.GOOD)
@@ -332,7 +352,7 @@ def test_bool_reads_the_single_bit_of_a_coil_or_discrete_input() -> None:
 
 
 def test_bool_encodes_to_a_single_register() -> None:
-    point = Point("p", read=Coil(0), write=Coil(0), data_type=DataType.BOOL)
+    point = Point(Key("p", bool), read=Coil(0), write=Coil(0), data_type=DataType.BOOL)
     assert encode(point, True).registers == (1,)
     assert encode(point, False).registers == (0,)
 
@@ -353,12 +373,12 @@ def test_bit_encodes_the_given_bit(bit: int) -> None:
 
 @pytest.mark.parametrize("value", [True, 1], ids=["True", "1"])
 def test_bool_write_accepts_true_and_one(value: Value) -> None:
-    encode(Point("p", read=Coil(0), write=Coil(0), data_type=DataType.BOOL), value)  # must not raise
+    encode(Point(Key("p", bool), read=Coil(0), write=Coil(0), data_type=DataType.BOOL), value)  # must not raise
 
 
 @pytest.mark.parametrize("value", [2, 1.0, "1"], ids=["2", "1.0", "str-1"])
 def test_bool_write_refuses_anything_but_bool_or_zero_or_one(value: Value) -> None:
-    point = Point("p", read=Coil(0), write=Coil(0), data_type=DataType.BOOL)
+    point = Point(Key("p", bool), read=Coil(0), write=Coil(0), data_type=DataType.BOOL)
     with pytest.raises(InvalidValueError):
         encode(point, value)
 
@@ -405,55 +425,56 @@ def test_string_decode_does_not_raise_on_invalid_utf8() -> None:
     assert value == b"\xff\xfe".decode("utf-8", errors="replace")
 
 
-# ============================================================================================= ENUM
+# =========================================================================================== states
 
 
-def test_enum_decodes_a_known_raw_value() -> None:
-    assert decode(_enum_point({0: "off", 1: "on", 2: "auto"}), [1]) == ("on", Quality.GOOD)
+def test_a_state_decodes_to_its_member() -> None:
+    value, quality = decode(_state_point(Mode), [1])
+    assert (value, quality) == (Mode.ON, Quality.GOOD) and type(value) is Mode
 
 
-def test_enum_decodes_an_unknown_raw_value_as_no_data() -> None:
-    assert decode(_enum_point({0: "off", 1: "on"}), [5]) == (None, Quality.NO_DATA)
+def test_a_number_no_state_names_is_no_data() -> None:
+    assert decode(_state_point(Mode), [5]) == (None, Quality.NO_DATA)
 
 
-def test_enum_encodes_by_name() -> None:
-    point = _enum_point({0: "off", 1: "on", 2: "auto"})
-    assert encode(point, "auto").registers == (2,)
+def test_a_state_encodes_to_its_number() -> None:
+    assert encode(_state_point(Mode), Mode.AUTO).registers == (2,)
 
 
-def test_enum_write_refuses_an_unknown_name() -> None:
+@pytest.mark.parametrize("value", [5, True, "AUTO", 2.5])
+def test_a_state_write_refuses_anything_but_a_state(value: object) -> None:
     with pytest.raises(InvalidValueError):
-        encode(_enum_point({0: "off", 1: "on"}), "bogus")
+        encode(_state_point(Mode), value)
 
 
-def test_enum_uses_a_signed_base() -> None:
-    point = _enum_point({-1: "error", 0: "off", 1: "on"}, base=DataTypeKind.INT16)
-    assert decode(point, [0xFFFF]) == ("error", Quality.GOOD)
-    assert encode(point, "error").registers == (0xFFFF,)
+def test_a_state_can_be_a_signed_integer() -> None:
+    point = _state_point(Signed, DataType.INT16)
+    assert decode(point, [0xFFFF]) == (Signed.ERROR, Quality.GOOD)
+    assert encode(point, Signed.ERROR).registers == (0xFFFF,)
 
 
 # ==================================================================================== no_data / raw_range
 
 
 def test_no_data_sentinel_reads_as_no_data() -> None:
-    point = Point("p", read=InputRegister(0), write=HoldingRegister(0), data_type=DataType.INT16, no_data=(0x7FFF,))
+    point = Point(Key("p", int), read=InputRegister(0), write=HoldingRegister(0), data_type=DataType.INT16, no_data=(0x7FFF,))
     assert decode(point, [0x7FFF]) == (None, Quality.NO_DATA)
 
 
 def test_raw_range_excludes_values_outside_it_on_read() -> None:
-    point = Point("p", read=InputRegister(0), write=HoldingRegister(0), data_type=DataType.INT16, raw_range=(0, 1000))
+    point = Point(Key("p", int), read=InputRegister(0), write=HoldingRegister(0), data_type=DataType.INT16, raw_range=(0, 1000))
     assert decode(point, [1001]) == (None, Quality.NO_DATA)
     assert decode(point, [1000]) == (1000, Quality.GOOD)  # inclusive bound
 
 
 def test_write_refuses_a_value_that_encodes_to_the_no_data_sentinel() -> None:
-    point = Point("p", read=InputRegister(0), write=HoldingRegister(0), data_type=DataType.INT16, no_data=(0x7FFF,))
+    point = Point(Key("p", int), read=InputRegister(0), write=HoldingRegister(0), data_type=DataType.INT16, no_data=(0x7FFF,))
     with pytest.raises(InvalidValueError):
         encode(point, 0x7FFF)
 
 
 def test_write_refuses_a_value_outside_raw_range() -> None:
-    point = Point("p", read=InputRegister(0), write=HoldingRegister(0), data_type=DataType.INT16, raw_range=(0, 1000))
+    point = Point(Key("p", int), read=InputRegister(0), write=HoldingRegister(0), data_type=DataType.INT16, raw_range=(0, 1000))
     with pytest.raises(InvalidValueError):
         encode(point, 1001)
 
@@ -480,7 +501,7 @@ def test_explicit_precision_overrides_the_scale_derived_default() -> None:
 
 
 def test_precision_zero_returns_an_int() -> None:
-    value, quality = decode(_ro_point(DataType.INT16, scale=0.1, precision=0), [27])
+    value, quality = decode(_ro_point(DataType.INT16, int, scale=0.1, precision=0), [27])
     assert quality is Quality.GOOD
     assert value == 3
     assert isinstance(value, int)

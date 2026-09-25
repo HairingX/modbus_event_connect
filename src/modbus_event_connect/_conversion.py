@@ -4,10 +4,12 @@ from __future__ import annotations
 import math
 import struct
 from collections.abc import Mapping, Sequence
+from typing import Any
 
 from ._data_type import ByteOrder, DataTypeKind, WordOrder
 from ._device import EncodedWrite
 from ._errors import InvalidValueError
+from ._key import is_state_type
 from ._point import Point
 from ._value import Quality, Value
 
@@ -30,7 +32,7 @@ _RELATIVE_TOLERANCE = 1e-9
 # ================================================================================= public API
 
 
-def decode(point: Point, registers: Sequence[int]) -> tuple[Value, Quality]:
+def decode(point: Point[Any], registers: Sequence[int]) -> tuple[Value, Quality]:
     """Registers as the device sent them -> `(value, Quality.GOOD)` or `(None, Quality.NO_DATA)`.
 
     Raises:
@@ -51,14 +53,12 @@ def decode(point: Point, registers: Sequence[int]) -> tuple[Value, Quality]:
         return (bool((registers[0] >> data_type.bit_index) & 1), Quality.GOOD)
     if kind is DataTypeKind.STRING:
         return _decode_string(point, registers)
-    if kind is DataTypeKind.ENUM:
-        return _decode_enum(point, registers)
     if data_type.is_float:
-        return _decode_float(point, registers)
-    return _decode_int(point, registers)
+        return _as_key_type(point, *_decode_float(point, registers))
+    return _as_key_type(point, *_decode_int(point, registers))
 
 
-def encode(point: Point, value: Value) -> EncodedWrite:
+def encode(point: Point[Any], value: object) -> EncodedWrite:
     """`value`, in engineering units -> what to write, or `InvalidValueError` naming why it cannot be."""
     if point.write is None:
         raise InvalidValueError(f"point {point.key!r} has no write side")
@@ -72,9 +72,7 @@ def encode(point: Point, value: Value) -> EncodedWrite:
         return EncodedWrite(bit_index=data_type.bit_index, bit_value=_as_bit_value(point, value))
     if kind is DataTypeKind.STRING:
         return _encode_string(point, value)
-    if kind is DataTypeKind.ENUM:
-        return _encode_enum(point, value)
-    return _encode_numeric(point, value)
+    return _encode_numeric(point, _numeric_for_key_type(point, value))
 
 
 # =========================================================================== register assembly
@@ -168,7 +166,7 @@ def _round_half_away_from_zero(x: float) -> int:
     return math.floor(x + 0.5) if x >= 0 else math.ceil(x - 0.5)
 
 
-def _numeric_pipeline(point: Point, raw: int | float, *, integer_raw: bool) -> Value:
+def _numeric_pipeline(point: Point[Any], raw: int | float, *, integer_raw: bool) -> Value:
     """raw -> scale, offset -> transform.read -> round to effective_precision."""
     if integer_raw and point.scale == 1 and point.offset == 0 and point.transform is None:
         # No conversion at all: return the raw int unchanged, so a U64 above 2**53 stays exact.
@@ -188,7 +186,7 @@ def _numeric_pipeline(point: Point, raw: int | float, *, integer_raw: bool) -> V
 # ==================================================================================== decoding
 
 
-def _decode_int(point: Point, registers: Sequence[int]) -> tuple[Value, Quality]:
+def _decode_int(point: Point[Any], registers: Sequence[int]) -> tuple[Value, Quality]:
     data_type = point.data_type
     kind = data_type.kind
     combined = _combine(registers, point.word_order, point.byte_order)
@@ -206,7 +204,7 @@ def _decode_int(point: Point, registers: Sequence[int]) -> tuple[Value, Quality]
     return (_numeric_pipeline(point, raw, integer_raw=True), Quality.GOOD)
 
 
-def _decode_float(point: Point, registers: Sequence[int]) -> tuple[Value, Quality]:
+def _decode_float(point: Point[Any], registers: Sequence[int]) -> tuple[Value, Quality]:
     data_type = point.data_type
     width, fmt = (4, ">f") if data_type.kind is DataTypeKind.FLOAT32 else (8, ">d")
     combined = _combine(registers, point.word_order, point.byte_order)
@@ -216,22 +214,11 @@ def _decode_float(point: Point, registers: Sequence[int]) -> tuple[Value, Qualit
     return (_numeric_pipeline(point, x, integer_raw=False), Quality.GOOD)
 
 
-def _decode_string(point: Point, registers: Sequence[int]) -> tuple[Value, Quality]:
+def _decode_string(point: Point[Any], registers: Sequence[int]) -> tuple[Value, Quality]:
     data_type = point.data_type
     raw_bytes = _string_bytes(registers, point.byte_order)
     cut = raw_bytes.split(b"\x00", 1)[0]
     return (cut.decode(data_type.encoding, errors="replace"), Quality.GOOD)
-
-
-def _decode_enum(point: Point, registers: Sequence[int]) -> tuple[Value, Quality]:
-    data_type = point.data_type
-    assert data_type.mapping is not None
-    combined = _combine(registers, point.word_order, point.byte_order)
-    raw = _to_signed(combined, len(registers) * 16) if data_type.base in _SIGNED_KINDS else combined
-    name = data_type.mapping.get(raw)
-    if name is None:
-        return (None, Quality.NO_DATA)
-    return (name, Quality.GOOD)
 
 
 def _bcd_unpack(combined: int, nibble_count: int) -> int | None:
@@ -254,10 +241,41 @@ def _bcd_pack(value: int, nibble_count: int) -> int:
     return combined
 
 
+def _as_key_type(point: Point[Any], value: Value, quality: Quality) -> tuple[Value, Quality]:
+    """A decoded number as the key's type: a float, or the state an integer names."""
+    value_type: type[object] = point.key.type
+    if value is None or isinstance(value, (bool, str)):
+        return (value, quality)
+    if is_state_type(value_type):
+        try:
+            return (value_type(value), quality)
+        except ValueError:
+            return (None, Quality.NO_DATA)
+    if value_type is float:
+        return (float(value), quality)
+    return (value, quality)
+
+
 # ==================================================================================== encoding
 
 
-def _as_bit_value(point: Point, value: Value) -> bool:
+def _numeric_for_key_type(point: Point[Any], value: object) -> int | float:
+    """`value` checked against the key's type: an int for an int or a state, a number for a float."""
+    value_type: type[object] = point.key.type
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise InvalidValueError(f"point {point.key!r}: expected {value_type.__name__}, got {type(value).__name__}")
+    if is_state_type(value_type):
+        try:
+            return int(value_type(value))
+        except ValueError:
+            raise InvalidValueError(f"point {point.key!r}: {value!r} is not a state of {value_type.__name__}; "
+                                    f"expected one of {[m.name for m in value_type]}") from None
+    if value_type is int and not isinstance(value, int):
+        raise InvalidValueError(f"point {point.key!r}: expected int, got float {value!r}")
+    return value
+
+
+def _as_bit_value(point: Point[Any], value: object) -> bool:
     """BOOL / BIT accept `bool`, or the int 0/1 - nothing else, so `1.0` and `"1"` are refused."""
     if isinstance(value, bool):
         return value
@@ -266,7 +284,7 @@ def _as_bit_value(point: Point, value: Value) -> bool:
     raise InvalidValueError(f"point {point.key!r}: expected bool or 0/1, got {value!r}")
 
 
-def _check_limits(point: Point, x: int | float) -> None:
+def _check_limits(point: Point[Any], x: int | float) -> None:
     limits = point.limits
     if limits is None:
         return
@@ -281,7 +299,7 @@ def _check_limits(point: Point, x: int | float) -> None:
             raise InvalidValueError(f"point {point.key!r}: {x} is not a multiple of step {limits.step} from {base}")
 
 
-def _encode_numeric(point: Point, value: Value) -> EncodedWrite:
+def _encode_numeric(point: Point[Any], value: Value) -> EncodedWrite:
     data_type = point.data_type
     kind = data_type.kind
     if isinstance(value, bool):
@@ -333,7 +351,7 @@ def _encode_numeric(point: Point, value: Value) -> EncodedWrite:
     return EncodedWrite(registers=_split(combined, data_type.registers, point.word_order, point.byte_order))
 
 
-def _encode_string(point: Point, value: Value) -> EncodedWrite:
+def _encode_string(point: Point[Any], value: object) -> EncodedWrite:
     data_type = point.data_type
     if not isinstance(value, str):
         raise InvalidValueError(f"point {point.key!r}: expected str, got {type(value).__name__}")
@@ -345,16 +363,3 @@ def _encode_string(point: Point, value: Value) -> EncodedWrite:
                           f"than the {capacity} this point holds")
     padded = raw_bytes + b"\x00" * (capacity - len(raw_bytes))
     return EncodedWrite(registers=_string_registers(padded, point.byte_order))
-
-
-def _encode_enum(point: Point, value: Value) -> EncodedWrite:
-    data_type = point.data_type
-    assert data_type.mapping is not None
-    if not isinstance(value, str):
-        raise InvalidValueError(f"point {point.key!r}: expected the name of a state, got {type(value).__name__}")
-    raw = next((k for k, name in data_type.mapping.items() if name == value), None)
-    if raw is None:
-        known = sorted(data_type.mapping.values())
-        raise InvalidValueError(f"point {point.key!r}: {value!r} is not a known state; expected one of {known}")
-    combined = _to_unsigned(raw, data_type.registers * 16)
-    return EncodedWrite(registers=_split(combined, data_type.registers, point.word_order, point.byte_order))

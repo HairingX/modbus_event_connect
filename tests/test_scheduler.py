@@ -3,30 +3,31 @@ by hand; nothing here sleeps."""
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Mapping
+from typing import Any, Mapping
 
 import logging
 
 import pytest
 
-from src.modbus_event_connect.modbus._access import HoldingRegister
+from src.modbus_event_connect._key import Key
 from src.modbus_event_connect._point import DEFAULT_INTERVALS, Point, PollRate
 from src.modbus_event_connect._scheduler import Scheduler
-from src.modbus_event_connect.testing._clock import FakeClock
 from src.modbus_event_connect._value import DataValue, Quality
+from src.modbus_event_connect.modbus._access import HoldingRegister
+from src.modbus_event_connect.testing._clock import FakeClock
 
 # ================================================================================== helpers
 
 
 def _point(key: str, poll_rate: PollRate = PollRate.SLOW, *, address: int = 1, readable: bool = True,
-           writable: bool = False) -> Point:
+           writable: bool = False) -> Point[Any]:
     """A minimal point - only what scheduling cares about: key, poll rate and which sides it has."""
-    return Point(key, read=HoldingRegister(address) if readable else None,
+    return Point(Key(key, int), read=HoldingRegister(address) if readable else None,
                  write=HoldingRegister(address) if writable else None, poll_rate=poll_rate)
 
 
 def _dv(value: object, quality: Quality = Quality.GOOD,
-        ts: datetime = datetime(2026, 1, 1, tzinfo=timezone.utc)) -> DataValue:
+        ts: datetime = datetime(2026, 1, 1, tzinfo=timezone.utc)) -> DataValue[Any]:
     return DataValue(value, quality, ts)  # type: ignore[arg-type]
 
 

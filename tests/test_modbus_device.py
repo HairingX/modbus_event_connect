@@ -13,6 +13,8 @@ from src.modbus_event_connect._device import (
     ProtocolOptions,
     ReadResult,
 )
+from src.modbus_event_connect._key import Key
+from src.modbus_event_connect._point import Point
 from src.modbus_event_connect.micro_nabto._access import DatapointRegister
 from src.modbus_event_connect.modbus._access import (
     BitWrite,
@@ -34,7 +36,6 @@ from src.modbus_event_connect.modbus._connection import (
     Response,
 )
 from src.modbus_event_connect.modbus._device import ModbusDevice
-from src.modbus_event_connect._point import Point
 from src.modbus_event_connect.testing._clock import FakeClock
 from src.modbus_event_connect.testing._modbus import (
     NO_ANSWER,
@@ -82,8 +83,8 @@ class Rig:
         return [(r.function, r.address, r.count) for r in self.unit.requests]
 
 
-def u16(key: str, access: Any, **kw: Any) -> Point:
-    return Point(key, read=access, data_type=DataType.UINT16, **kw)
+def u16(key: str, access: Any, **kw: Any) -> Point[Any]:
+    return Point(Key(key, int), read=access, data_type=DataType.UINT16, **kw)
 
 
 def ok(*registers: int) -> ReadResult:
@@ -120,7 +121,7 @@ async def test_each_register_table_is_read_with_its_function_code(access: Any, f
 async def test_each_bit_table_is_read_with_its_function_code(access: Any, function: FunctionCode,
                                                              unit: SimulatedModbusDevice) -> None:
     rig = Rig(unit)
-    result = await rig.device.read([Point("p", read=access, data_type=DataType.BOOL)])
+    result = await rig.device.read([Point(Key("p", bool), read=access, data_type=DataType.BOOL)])
     assert result == {"p": ok(1)}
     assert rig.sent() == [(function, 3, 1)]
 
@@ -129,9 +130,9 @@ async def test_each_point_gets_exactly_its_own_registers_from_a_batch() -> None:
     rig = Rig(SimulatedModbusDevice(holding_registers=image(10, 1, 0xAAAA, 0xBBBB, 4, 0x4142, 0x4300)))
     points = [
         u16("a", HoldingRegister(10)),
-        Point("b", read=HoldingRegister(11), data_type=DataType.UINT32),
+        Point(Key("b", int), read=HoldingRegister(11), data_type=DataType.UINT32),
         u16("c", HoldingRegister(13)),
-        Point("d", read=HoldingRegister(14), data_type=DataType.string(2)),
+        Point(Key("d", str), read=HoldingRegister(14), data_type=DataType.string(2)),
     ]
     result = await rig.device.read(points)
     assert result == {"a": ok(1), "b": ok(0xAAAA, 0xBBBB), "c": ok(4), "d": ok(0x4142, 0x4300)}
@@ -160,7 +161,7 @@ async def test_tables_are_never_merged() -> None:
     rig = Rig(SimulatedModbusDevice(input_registers={10: 1}, holding_registers={10: 2, 11: 3}, coils={10: 1}, discrete_inputs={11: 0}))
     result = await rig.device.read([
         u16("in", InputRegister(10)), u16("h0", HoldingRegister(10)), u16("h1", HoldingRegister(11)),
-        Point("coil", read=Coil(10), data_type=DataType.BOOL), Point("di", read=DiscreteInput(11), data_type=DataType.BOOL),
+        Point(Key("coil", bool), read=Coil(10), data_type=DataType.BOOL), Point(Key("di", bool), read=DiscreteInput(11), data_type=DataType.BOOL),
     ])
     assert result == {"in": ok(1), "h0": ok(2), "h1": ok(3), "coil": ok(1), "di": ok(0)}
     assert sorted(rig.sent()) == sorted([
@@ -179,30 +180,30 @@ async def test_a_batch_stops_at_max_registers() -> None:
 async def test_a_multi_register_point_is_never_split_across_requests() -> None:
     rig = Rig(SimulatedModbusDevice(holding_registers=image(0, 1, 2, 3, 4)), options=ModbusOptions(numbering=plain(first_address=1), max_registers=3))
     result = await rig.device.read([u16("a", HoldingRegister(0)), u16("b", HoldingRegister(1)),
-                                    Point("c", read=HoldingRegister(2), data_type=DataType.UINT32)])
+                                    Point(Key("c", int), read=HoldingRegister(2), data_type=DataType.UINT32)])
     assert result == {"a": ok(1), "b": ok(2), "c": ok(3, 4)}
     assert rig.sent() == [(FC.READ_HOLDING_REGISTERS, 0, 2), (FC.READ_HOLDING_REGISTERS, 2, 2)]
 
 
 async def test_a_batch_stops_at_max_bits() -> None:
     rig = Rig(SimulatedModbusDevice(coils=image(0, 1, 0, 1, 0, 1)), options=ModbusOptions(numbering=plain(first_address=1), max_bits=2))
-    result = await rig.device.read([Point(f"c{i}", read=Coil(i), data_type=DataType.BOOL) for i in range(5)])
+    result = await rig.device.read([Point(Key(f"c{i}", bool), read=Coil(i), data_type=DataType.BOOL) for i in range(5)])
     assert result == {f"c{i}": ok(1 - i % 2) for i in range(5)}
     assert rig.sent() == [(FC.READ_COILS, 0, 2), (FC.READ_COILS, 2, 2), (FC.READ_COILS, 4, 1)]
 
 
 async def test_max_registers_does_not_limit_a_bit_table() -> None:
     rig = Rig(SimulatedModbusDevice(discrete_inputs=image(0, *[1] * 10)), options=ModbusOptions(numbering=plain(first_address=1), max_registers=2))
-    await rig.device.read([Point(f"d{i}", read=DiscreteInput(i), data_type=DataType.BOOL) for i in range(10)])
+    await rig.device.read([Point(Key(f"d{i}", bool), read=DiscreteInput(i), data_type=DataType.BOOL) for i in range(10)])
     assert rig.sent() == [(FC.READ_DISCRETE_INPUTS, 0, 10)]
 
 
 async def test_two_views_of_one_register_share_one_request() -> None:
     rig = Rig(SimulatedModbusDevice(holding_registers={5: 0b1001}))
     result = await rig.device.read([
-        u16("raw", HoldingRegister(5)), Point("signed", read=HoldingRegister(5), data_type=DataType.INT16),
-        Point("bit0", read=HoldingRegister(5), data_type=DataType.bit(0)),
-        Point("bit3", read=HoldingRegister(5), data_type=DataType.bit(3)),
+        u16("raw", HoldingRegister(5)), Point(Key("signed", int), read=HoldingRegister(5), data_type=DataType.INT16),
+        Point(Key("bit0", bool), read=HoldingRegister(5), data_type=DataType.bit(0)),
+        Point(Key("bit3", bool), read=HoldingRegister(5), data_type=DataType.bit(3)),
     ])
     assert result == {"raw": ok(9), "signed": ok(9), "bit0": ok(9), "bit3": ok(9)}
     assert rig.sent() == [(FC.READ_HOLDING_REGISTERS, 5, 1)]
@@ -210,8 +211,8 @@ async def test_two_views_of_one_register_share_one_request() -> None:
 
 async def test_overlapping_spans_are_read_together() -> None:
     rig = Rig(SimulatedModbusDevice(holding_registers={10: 1, 11: 2}))
-    result = await rig.device.read([Point("wide", read=HoldingRegister(10), data_type=DataType.UINT32),
-                                    Point("flag", read=HoldingRegister(11), data_type=DataType.bit(1))])
+    result = await rig.device.read([Point(Key("wide", int), read=HoldingRegister(10), data_type=DataType.UINT32),
+                                    Point(Key("flag", bool), read=HoldingRegister(11), data_type=DataType.bit(1))])
     assert result == {"wide": ok(1, 2), "flag": ok(2)}
     assert rig.sent() == [(FC.READ_HOLDING_REGISTERS, 10, 2)]
 
@@ -236,14 +237,14 @@ async def test_a_register_number_is_sent_as_its_address(
     rig = Rig(SimulatedModbusDevice(coils=everything, discrete_inputs=everything, holding_registers=everything, input_registers=everything),
               options=ModbusOptions(numbering=numbering))
     data_type = DataType.BOOL if access.bits else DataType.UINT16
-    result = await rig.device.read([Point("p", read=access, data_type=data_type)])
+    result = await rig.device.read([Point(Key("p", bool if access.bits else int), read=access, data_type=data_type)])
     assert result == {"p": ok(1)}
     assert rig.sent() == [(function, address, 1)]
 
 
 async def test_a_write_goes_to_the_address_of_its_register_number() -> None:
     rig = Rig(SimulatedModbusDevice(holding_registers={119: 0}), options=ModbusOptions(numbering=modicon(digits=5, first_address=0)))
-    point = Point("t", read=HoldingRegister(40120), write=HoldingRegister(40120), data_type=DataType.UINT16)
+    point = Point(Key("t", int), read=HoldingRegister(40120), write=HoldingRegister(40120), data_type=DataType.UINT16)
     assert (await rig.device.write(point, EncodedWrite((215,)))).ok
     assert rig.unit.holding_registers[119] == 215
 
@@ -260,7 +261,9 @@ async def test_a_write_goes_to_the_address_of_its_register_number() -> None:
 async def test_a_refused_batch_is_re_read_so_only_the_missing_point_is_missing(
         access: Any, data_type: DataType, unit: SimulatedModbusDevice) -> None:
     rig = Rig(unit)
-    result = await rig.device.read([Point(f"p{a}", read=access(a), data_type=data_type) for a in (10, 11, 12)])
+    value_type = bool if data_type.is_boolean else int
+    result = await rig.device.read([Point(Key(f"p{a}", value_type), read=access(a), data_type=data_type)
+                                    for a in (10, 11, 12)])
     assert outcomes(result) == {"p10": Outcome.OK, "p11": Outcome.MISSING, "p12": Outcome.OK}
     assert result["p10"] == ok(1) and result["p11"].exception_code == 0x02
     assert [(a, c) for _, a, c in rig.sent()] == [(10, 3), (10, 1), (11, 2), (11, 1), (12, 1)]
@@ -276,9 +279,9 @@ async def test_one_absent_address_among_many_is_found_in_few_requests() -> None:
 async def test_points_sharing_a_refused_span_share_its_re_read() -> None:
     rig = Rig(SimulatedModbusDevice(holding_registers={10: 7}))
     result = await rig.device.read([
-        u16("present", HoldingRegister(10)), Point("present_bit", read=HoldingRegister(10), data_type=DataType.bit(0)),
-        Point("gone0", read=HoldingRegister(11), data_type=DataType.bit(0)),
-        Point("gone1", read=HoldingRegister(11), data_type=DataType.bit(1)),
+        u16("present", HoldingRegister(10)), Point(Key("present_bit", bool), read=HoldingRegister(10), data_type=DataType.bit(0)),
+        Point(Key("gone0", bool), read=HoldingRegister(11), data_type=DataType.bit(0)),
+        Point(Key("gone1", bool), read=HoldingRegister(11), data_type=DataType.bit(1)),
     ])
     assert outcomes(result) == {"present": Outcome.OK, "present_bit": Outcome.OK,
                                 "gone0": Outcome.MISSING, "gone1": Outcome.MISSING}
@@ -288,7 +291,7 @@ async def test_points_sharing_a_refused_span_share_its_re_read() -> None:
 
 async def test_a_refused_single_span_is_missing_without_a_re_read() -> None:
     rig = Rig(SimulatedModbusDevice())
-    result = await rig.device.read([u16("a", HoldingRegister(4)), Point("b", read=HoldingRegister(4), data_type=DataType.bit(2))])
+    result = await rig.device.read([u16("a", HoldingRegister(4)), Point(Key("b", bool), read=HoldingRegister(4), data_type=DataType.bit(2))])
     assert outcomes(result) == {"a": Outcome.MISSING, "b": Outcome.MISSING}
     assert rig.sent() == [(FC.READ_HOLDING_REGISTERS, 4, 1)]
 
@@ -322,7 +325,7 @@ async def test_every_exception_code_has_its_outcome(code: int, outcome: Outcome)
 
 async def test_an_unsupported_function_is_unsupported() -> None:
     rig = Rig(SimulatedModbusDevice(discrete_inputs={0: 1}, unsupported=[FC.READ_DISCRETE_INPUTS]))
-    raw = (await rig.device.read([Point("d", read=DiscreteInput(0), data_type=DataType.BOOL)]))["d"]
+    raw = (await rig.device.read([Point(Key("d", bool), read=DiscreteInput(0), data_type=DataType.BOOL)]))["d"]
     assert (raw.outcome, raw.exception_code) == (Outcome.UNSUPPORTED, 0x01)
 
 
@@ -387,7 +390,7 @@ async def test_busy_gives_up_after_its_retries() -> None:
 
 async def test_busy_is_retried_for_a_write_too() -> None:
     rig = Rig(SimulatedModbusDevice(holding_registers={0: 0}, busy_for=1))
-    point = Point("s", write=HoldingRegister(0), data_type=DataType.UINT16)
+    point = Point(Key("s", int), write=HoldingRegister(0), data_type=DataType.UINT16)
     assert (await rig.device.write(point, EncodedWrite((9,)))).ok
     assert rig.unit.holding_registers[0] == 9 and rig.sleeps.waits == [0.2]
 
@@ -401,8 +404,8 @@ async def test_without_busy_retries_busy_is_answered_at_once() -> None:
 # ================================================================================ writing
 
 
-def setting(access: Any, data_type: DataType = DataType.UINT16) -> Point:
-    return Point("w", read=access, write=access, data_type=data_type)
+def setting(access: Any, data_type: DataType = DataType.UINT16) -> Point[Any]:
+    return Point(Key("w", bool if data_type.is_boolean else int), read=access, write=access, data_type=data_type)
 
 
 async def test_one_holding_register_is_written_with_0x06() -> None:
@@ -486,7 +489,7 @@ async def test_a_failed_read_in_read_modify_write_writes_nothing() -> None:
 @pytest.mark.parametrize("value, stored", [(1, 1), (0, 0)])
 async def test_a_coil_is_written_with_0x05(value: int, stored: int) -> None:
     rig = Rig(SimulatedModbusDevice(coils={4: 1 - stored}))
-    point = Point("c", read=Coil(4), write=Coil(4), data_type=DataType.BOOL)
+    point = Point(Key("c", bool), read=Coil(4), write=Coil(4), data_type=DataType.BOOL)
     assert (await rig.device.write(point, EncodedWrite((value,)))).ok
     assert rig.unit.requests == [Request(1, FC.WRITE_SINGLE_COIL, 4, values=(value,))]
     assert rig.unit.coils[4] == stored
@@ -496,13 +499,13 @@ async def test_a_coil_is_written_with_0x05(value: int, stored: int) -> None:
 async def test_a_coil_takes_exactly_one_value_of_zero_or_one(value: EncodedWrite) -> None:
     rig = Rig(SimulatedModbusDevice(coils={4: 0}))
     with pytest.raises(ValueError):
-        await rig.device.write(Point("c", write=Coil(4), data_type=DataType.BOOL), value)
+        await rig.device.write(Point(Key("c", bool), write=Coil(4), data_type=DataType.BOOL), value)
     assert rig.unit.requests == []
 
 
 @pytest.mark.parametrize("access", [InputRegister(1), DiscreteInput(1)])
 async def test_a_read_only_table_cannot_be_written(access: Any) -> None:
-    point = Point("p", read=HoldingRegister(1), write=HoldingRegister(1), data_type=DataType.BOOL)
+    point = Point(Key("p", bool), read=HoldingRegister(1), write=HoldingRegister(1), data_type=DataType.BOOL)
     object.__setattr__(point, "write", access)          # a point would refuse this; the device must too
     rig = Rig(SimulatedModbusDevice())
     with pytest.raises(TypeError):
@@ -529,7 +532,7 @@ async def test_a_write_to_an_absent_register_is_missing() -> None:
 
 async def test_a_point_without_a_read_side_is_a_programming_error() -> None:
     with pytest.raises(TypeError):
-        await Rig(SimulatedModbusDevice()).device.read([Point("w", write=HoldingRegister(0), data_type=DataType.UINT16)])
+        await Rig(SimulatedModbusDevice()).device.read([Point(Key("w", int), write=HoldingRegister(0), data_type=DataType.UINT16)])
 
 
 async def test_a_point_without_a_write_side_is_a_programming_error() -> None:
@@ -540,7 +543,7 @@ async def test_a_point_without_a_write_side_is_a_programming_error() -> None:
 async def test_a_point_of_another_protocol_is_a_programming_error() -> None:
     rig = Rig(SimulatedModbusDevice())
     with pytest.raises(TypeError):
-        await rig.device.read([Point("n", read=DatapointRegister(3), data_type=DataType.UINT16)])
+        await rig.device.read([Point(Key("n", int), read=DatapointRegister(3), data_type=DataType.UINT16)])
     assert rig.unit.requests == []
 
 
@@ -549,7 +552,7 @@ async def test_a_device_reads_nothing_before_it_knows_the_models_options() -> No
     device = ModbusDevice(gateway)
     assert device.options is None
     with pytest.raises(RuntimeError):
-        await device.read([Point("p", read=HoldingRegister(0))])
+        await device.read([Point(Key("p", int), read=HoldingRegister(0))])
     assert gateway.requests == []
 
 
@@ -673,7 +676,7 @@ async def test_each_device_reaches_its_own_unit() -> None:
 
 async def test_requests_from_several_devices_never_overlap() -> None:
     gateway, first, second, _, _ = two_devices(delay=0.001)
-    gap = [u16("a", HoldingRegister(0)), Point("c", read=HoldingRegister(1), data_type=DataType.bit(0))]
+    gap = [u16("a", HoldingRegister(0)), Point(Key("c", bool), read=HoldingRegister(1), data_type=DataType.bit(0))]
     results = await asyncio.gather(*(device.read(gap) for device in (first, second, first, second)))
     assert all(r["a"].outcome is Outcome.OK for r in results)
     assert gateway.max_in_flight == 1

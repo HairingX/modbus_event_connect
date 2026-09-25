@@ -7,7 +7,8 @@ from dataclasses import dataclass
 
 from .._client import Client
 from .._conversion import encode
-from .._value import Quality, Value
+from .._key import Key
+from .._value import Quality
 
 
 @dataclass(frozen=True)
@@ -44,7 +45,7 @@ class ReadBackMeasurement:
         return "\n".join(lines)
 
 
-async def measure_read_back(client: Client, key: str, values: tuple[Value, Value], *,
+async def measure_read_back[T](client: Client, key: Key[T], values: tuple[T, T], *,
                             delays: Sequence[float] = (1, 2, 3, 4, 5), repeats: int = 3,
                             sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> ReadBackMeasurement:
     """Write to `key` and count, for each delay, how often a read that long after shows the value.
@@ -69,13 +70,14 @@ async def measure_read_back(client: Client, key: str, values: tuple[Value, Value
     if not delays or any(delay < 0 for delay in delays) or repeats < 1:
         raise ValueError("give at least one delay, none negative, and at least one repeat")
     original = client.value(key)
-    if original is None or original.quality is not Quality.GOOD:
+    restore = original.value if original is not None and original.quality is Quality.GOOD else None
+    if restore is None:
         raise ValueError(f"{key!r} has no good value to write back afterwards")
-    for value in (*values, original.value):
+    for value in (*values, restore):
         encode(client.points[key], value)
     longest = max(delays)
 
-    async def shows(value: Value) -> bool:
+    async def shows(value: T) -> bool:
         await client.refresh([key])
         current = client.value(key)
         return current is not None and current.quality is Quality.GOOD and current.value == value
@@ -97,5 +99,5 @@ async def measure_read_back(client: Client, key: str, values: tuple[Value, Value
                     seen += 1
             trials.append(ReadBackTrial(delay, written, seen))
     finally:
-        await client.write(key, original.value)
+        await client.write(key, restore)
     return ReadBackMeasurement(key, tuple(trials))

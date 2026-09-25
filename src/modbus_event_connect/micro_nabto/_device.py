@@ -41,7 +41,7 @@ class MicroNabtoOptions(ProtocolOptions):
         if self.max_registers < 1:
             raise ValueError(f"max_registers must be at least 1, got {self.max_registers}")
 
-    def problems(self, point: Point) -> list[str]:
+    def problems(self, point: Point[Any]) -> list[str]:
         found: list[str] = []
         for side, access in (("read", point.read), ("write", point.write)):
             if access is None:
@@ -67,7 +67,7 @@ class _Batch:
     """Points read with one request, and the registers each spans."""
     space: type[Access]
     obj: int
-    points: tuple[Point, ...]
+    points: tuple[Point[Any], ...]
 
     @property
     def items(self) -> list[tuple[int, int]]:
@@ -119,8 +119,8 @@ class MicroNabtoDevice:
             raise RuntimeError("configure() the device with its model's options before using it")
         return self._options
 
-    async def read(self, points: Sequence[Point]) -> Mapping[str, ReadResult]:
-        spaces: dict[tuple[type[Access], int], list[Point]] = {}
+    async def read(self, points: Sequence[Point[Any]]) -> Mapping[str, ReadResult]:
+        spaces: dict[tuple[type[Access], int], list[Point[Any]]] = {}
         for point in points:
             access = _read_side(point)
             if point.registers > self._configured().max_registers:
@@ -133,7 +133,7 @@ class MicroNabtoDevice:
                 await self._read_batch(batch, result)
         return result
 
-    async def write(self, point: Point, value: EncodedWrite) -> WriteResult:
+    async def write(self, point: Point[Any], value: EncodedWrite) -> WriteResult:
         """Send the write without waiting for the device to confirm it: OK means sent."""
         access = point.write
         if not isinstance(access, SetpointRegister):
@@ -158,9 +158,9 @@ class MicroNabtoDevice:
 
     # ---------------------------------------------------------------------- reading
 
-    def _batches(self, space: type[Access], obj: int, points: list[Point]) -> list[_Batch]:
+    def _batches(self, space: type[Access], obj: int, points: list[Point[Any]]) -> list[_Batch]:
         batches: list[_Batch] = []
-        current: list[Point] = []
+        current: list[Point[Any]] = []
         registers = 0
         for point in points:
             if registers + point.registers > self._configured().max_registers:
@@ -202,7 +202,7 @@ class MicroNabtoDevice:
             result[point.key] = raw
 
 
-def _read_side(point: Point) -> Access:
+def _read_side(point: Point[Any]) -> Access:
     access = point.read
     if access is None:
         raise TypeError(f"point {point.key!r} has no read side")

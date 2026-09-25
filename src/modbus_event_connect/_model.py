@@ -8,7 +8,7 @@ from collections import Counter
 from collections.abc import Awaitable, Callable, Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Protocol
+from typing import Any, Protocol
 
 from ._device import Identity, ProtocolOptions
 from ._errors import ModelError
@@ -21,10 +21,10 @@ from ._value import DataValue
 @dataclass(frozen=True)
 class Section:
     """A fixed group of points, included whenever `when` allows it (`None` means always)."""
-    points: tuple[Point, ...]
+    points: tuple[Point[Any], ...]
     when: Callable[[Identity], bool] | None = None
 
-    def __init__(self, points: Sequence[Point], when: Callable[[Identity], bool] | None = None) -> None:
+    def __init__(self, points: Sequence[Point[Any]], when: Callable[[Identity], bool] | None = None) -> None:
         object.__setattr__(self, "points", tuple(points))
         object.__setattr__(self, "when", when)
 
@@ -32,12 +32,12 @@ class Section:
 @dataclass(frozen=True)
 class Instances:
     """A section repeated once per number, labeling every point it produces with `{label: n}`."""
-    factory: Callable[[int], Sequence[Point]]
+    factory: Callable[[int], Sequence[Point[Any]]]
     numbers: tuple[int, ...]
     label: str
     when: Callable[[Identity], bool] | None = None
 
-    def __init__(self, factory: Callable[[int], Sequence[Point]], numbers: Iterable[int], label: str,
+    def __init__(self, factory: Callable[[int], Sequence[Point[Any]]], numbers: Iterable[int], label: str,
                  when: Callable[[Identity], bool] | None = None) -> None:
         object.__setattr__(self, "factory", factory)
         object.__setattr__(self, "numbers", tuple(numbers))
@@ -54,7 +54,7 @@ class Scan(Protocol):
     @property
     def identity(self) -> Identity: ...
 
-    async def read(self, targets: Selector | Sequence[str]) -> Mapping[str, DataValue]: ...
+    async def read(self, targets: Selector | Sequence[str]) -> Mapping[str, DataValue[Any]]: ...
 
     def set_available(self, targets: Selector | Sequence[str], available: bool, *,
                       reason: str = "") -> None: ...
@@ -77,7 +77,7 @@ class Model:
     """How the device is reached, in its protocol's terms."""
     read_back_after: float
     """Seconds from a write until a read shows the written value, on this device."""
-    identity_points: tuple[Point, ...] = ()
+    identity_points: tuple[Point[Any], ...] = ()
     """Read before the model resolves, to add to what the handshake says about the device."""
     scan_steps: tuple[ScanStep, ...] = ()
     poll_intervals: Mapping[PollRate, float | None] = DEFAULT_INTERVALS
@@ -85,7 +85,7 @@ class Model:
 
     def __init__(self, name: str, manufacturer: str, sections: Sequence[Section | Instances], *,
                  options: ProtocolOptions, read_back_after: float,
-                 identity_points: Sequence[Point] = (), scan_steps: Sequence[ScanStep] = (),
+                 identity_points: Sequence[Point[Any]] = (), scan_steps: Sequence[ScanStep] = (),
                  poll_intervals: Mapping[PollRate, float | None] = DEFAULT_INTERVALS,
                  min_poll_interval: float = 0.0) -> None:
         object.__setattr__(self, "name", name)
@@ -98,7 +98,7 @@ class Model:
         object.__setattr__(self, "poll_intervals", poll_intervals)
         object.__setattr__(self, "min_poll_interval", min_poll_interval)
 
-    def read_back_delay(self, point: Point) -> float:
+    def read_back_delay(self, point: Point[Any]) -> float:
         """Seconds after writing `point` before it, and what its write disturbs, are read."""
         if point.on_write is not None and point.on_write.after is not None:
             return point.on_write.after
@@ -117,12 +117,12 @@ class ResolvedModel:
     """A model resolved against one identity: matched sections, expanded, checked, ready to use."""
     model: Model
     identity: Identity
-    points: Mapping[str, Point]
+    points: Mapping[str, Point[Any]]
     """Every resolved point, keyed by `key`, in declaration order."""
     instances: Mapping[str, tuple[int, ...]]
     """label -> the instance numbers resolved for it (failed factories excluded)."""
 
-    def select(self, targets: Selector) -> tuple[Point, ...]:
+    def select(self, targets: Selector) -> tuple[Point[Any], ...]:
         """Every point matching `targets`, in declaration order. May be empty for `Labels`."""
         if isinstance(targets, Labels):
             return tuple(point for point in self.points.values() if targets.matches(point.labels))
@@ -131,7 +131,7 @@ class ResolvedModel:
             raise KeyError("unknown key(s): " + ", ".join(repr(key) for key in unknown))
         return tuple(self.points[key] for key in targets)
 
-    def point(self, key: str) -> Point:
+    def point(self, key: str) -> Point[Any]:
         """The point for `key`. Raises `KeyError` naming the key if this model has none."""
         try:
             return self.points[key]
@@ -145,7 +145,7 @@ class ResolvedModel:
 @dataclass
 class _Resolution:
     """What resolving one model against one identity produced, problems included."""
-    points: dict[str, Point]
+    points: dict[str, Point[Any]]
     instances: dict[str, tuple[int, ...]]
     problems: list[str]
     """Parallel to `model.sections`: whether each section's `when` applied for this identity."""
@@ -163,7 +163,7 @@ def _space_name(space: Hashable) -> str:
     return name if isinstance(name, str) else str(space)
 
 
-def _selection_problem(points: Mapping[str, Point], targets: Selector) -> str | None:
+def _selection_problem(points: Mapping[str, Point[Any]], targets: Selector) -> str | None:
     """What is wrong with a selector used inside a model (`on_write` / `on_change`): it must
     select at least one point of *this* resolved model. None means it is fine."""
     if isinstance(targets, Labels):
@@ -176,7 +176,7 @@ def _selection_problem(points: Mapping[str, Point], targets: Selector) -> str | 
     return None
 
 
-def _overlap_problems(all_points: Sequence[Point], options: ProtocolOptions) -> list[str]:
+def _overlap_problems(all_points: Sequence[Point[Any]], options: ProtocolOptions) -> list[str]:
     """Partial overlaps of addresses within one access space, read and write sides separately."""
     found: list[str] = []
     for side in ("read", "write"):
@@ -209,7 +209,7 @@ def _resolve(model: Model, identity: Identity) -> _Resolution:
     """Everything `resolve()` and `problems()` share: expand the model against `identity` and
     check every validation rule, without raising."""
     problems = _model_problems(model)
-    all_points: list[Point] = []
+    all_points: list[Point[Any]] = []
     instances: dict[str, tuple[int, ...]] = {}
 
     for point in model.identity_points:
@@ -230,7 +230,7 @@ def _resolve(model: Model, identity: Identity) -> _Resolution:
         else:
             all_points.extend(section.points)
 
-    points = {point.key: point for point in all_points}
+    points: dict[str, Point[Any]] = {point.key: point for point in all_points}
     problems.extend(_cross_problems(model, all_points, points))
     return _Resolution(points=points, instances=instances, problems=problems)
 
@@ -264,14 +264,14 @@ def _applies(section: Section | Instances, identity: Identity, label: str, probl
         return False
 
 
-def _expand_instances(section: Instances, label: str, problems: list[str]) -> tuple[list[Point], tuple[int, ...]]:
+def _expand_instances(section: Instances, label: str, problems: list[str]) -> tuple[list[Point[Any]], tuple[int, ...]]:
     """Every instance's points, labeled with its number, and the numbers whose factory succeeded."""
     if not section.label:
         problems.append(f"{label}: the label must not be empty")
     for number, count in Counter(section.numbers).items():
         if count > 1:
             problems.append(f"{label}: instance number {number} appears {count} times")
-    produced_points: list[Point] = []
+    produced_points: list[Point[Any]] = []
     numbers: list[int] = []
     for number in section.numbers:
         try:
@@ -291,7 +291,7 @@ def _expand_instances(section: Instances, label: str, problems: list[str]) -> tu
     return produced_points, tuple(numbers)
 
 
-def _cross_problems(model: Model, all_points: Sequence[Point], points: Mapping[str, Point]) -> list[str]:
+def _cross_problems(model: Model, all_points: Sequence[Point[Any]], points: Mapping[str, Point[Any]]) -> list[str]:
     """What is wrong between points: duplicates, overlaps, targets, protocol limits."""
     problems = [f"duplicate key {key!r} ({count} times)"
                 for key, count in Counter(point.key for point in all_points).items() if count > 1]

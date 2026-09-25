@@ -6,9 +6,10 @@ from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import KW_ONLY, dataclass, field, replace
 from enum import Enum, auto
 from types import MappingProxyType
-from typing import ClassVar, Hashable
+from typing import Any, ClassVar, Hashable
 
 from ._data_type import ByteOrder, DataType, DataTypeKind, WordOrder
+from ._key import Key, is_key, is_state_type
 from ._unit import Unit
 
 # ================================================================================== enums
@@ -150,9 +151,9 @@ class Transforms:
 
 
 @dataclass(frozen=True)
-class Pulse:
+class Pulse[T]:
     """A command that returns to its idle value by itself: write, wait `after`, write `idle`."""
-    idle: float | int | bool
+    idle: T
     after: float
 
     def __post_init__(self) -> None:
@@ -193,12 +194,14 @@ class Refresh:
 
 
 @dataclass(frozen=True, eq=False)
-class Point:
+class Point[T]:
     """One value a device has: a read side, a write side, or both, sharing type, scale and unit.
 
-    `key` must never change once a consumer has stored it.
+    `key` must never change once a consumer has stored it. Its type is the type of the value:
+    `bool` for a boolean, `str` for text, `int` for an integer that stays one after scaling,
+    `float` for any number, and an `IntEnum` for an integer naming states.
     """
-    key: str
+    key: Key[T]
     _: KW_ONLY
     read: Access | None = None
     write: Access | None = None
@@ -226,7 +229,7 @@ class Point:
     deadband: float | None = None
     """Changes smaller than this, from the last value reported, are not reported."""
     write_kind: WriteKind = WriteKind.STATE
-    pulse: Pulse | None = None
+    pulse: Pulse[T] | None = None
     read_back_after: float | None = None
     """Seconds from a write until a read shows it, where this point differs from its device."""
     on_write: Refresh | None = None
@@ -281,12 +284,13 @@ def _decimals(number: float) -> int:
     return len(fraction)
 
 
-def _problems(point: Point) -> list[str]:
+def _problems(point: Point[Any]) -> list[str]:
     """Everything wrong with a point, so one error names every mistake at once."""
-    return [*_shape_problems(point), *_value_problems(point), *_read_problems(point), *_write_problems(point)]
+    return [*_shape_problems(point), *_type_problems(point), *_value_problems(point), *_read_problems(point),
+            *_write_problems(point)]
 
 
-def _shape_problems(point: Point) -> list[str]:
+def _shape_problems(point: Point[Any]) -> list[str]:
     found: list[str] = []
     if not point.key or point.key != point.key.strip():
         found.append("the key must be a non-empty string without surrounding spaces")
@@ -303,7 +307,36 @@ def _shape_problems(point: Point) -> list[str]:
     return found
 
 
-def _value_problems(point: Point) -> list[str]:
+def _type_problems(point: Point[Any]) -> list[str]:
+    """Whether the registers can hold the type the key names."""
+    if not is_key(point.key):
+        return [f"the key must be a Key naming the value's type, such as Key({str(point.key)!r}, float)"]
+    value_type: type[object] = point.key.type
+    data_type = point.data_type
+    if is_state_type(value_type):
+        found: list[str] = []
+        if not data_type.is_integer:
+            found.append(f"the states of {value_type.__name__} are integers, not {data_type!r}")
+        if point.scale != 1 or point.offset != 0 or point.transform is not None:
+            found.append(f"the states of {value_type.__name__} are the raw integer: no scale, offset or transform")
+        if point.limits is not None:
+            found.append(f"the states of {value_type.__name__} are what may be written: no limits")
+        return found
+    if value_type is bool:
+        return [] if data_type.is_boolean else [f"a bool is held by BOOL or a bit, not {data_type!r}"]
+    if value_type is str:
+        return [] if data_type.kind is DataTypeKind.STRING else [f"text is held by a STRING, not {data_type!r}"]
+    if value_type is int:
+        if data_type.is_integer and point.effective_precision == 0:
+            return []
+        return [f"an int needs an integer data type that stays whole after scale, offset and precision; "
+                f"use float, or precision=0 (got {data_type!r}, scale {point.scale}, offset {point.offset})"]
+    if value_type is float:
+        return [] if data_type.is_numeric else [f"a float is held by a number, not {data_type!r}"]
+    return [f"a value is a bool, int, float, str or IntEnum, not {value_type.__name__}"]
+
+
+def _value_problems(point: Point[Any]) -> list[str]:
     found: list[str] = []
     data_type = point.data_type
     if not math.isfinite(point.scale) or point.scale == 0:
@@ -324,7 +357,7 @@ def _value_problems(point: Point) -> list[str]:
     return found
 
 
-def _read_problems(point: Point) -> list[str]:
+def _read_problems(point: Point[Any]) -> list[str]:
     found: list[str] = []
     data_type = point.data_type
     if point.no_data or point.raw_range is not None:
@@ -351,7 +384,7 @@ def _read_problems(point: Point) -> list[str]:
     return found
 
 
-def _write_problems(point: Point) -> list[str]:
+def _write_problems(point: Point[Any]) -> list[str]:
     found: list[str] = []
     if point.read_back_after is not None:
         if not point.writable:
@@ -364,6 +397,8 @@ def _write_problems(point: Point) -> list[str]:
         found.append("a COMMAND is written, but it has no write side")
     if point.pulse is not None and point.write_kind is not WriteKind.COMMAND:
         found.append("only a COMMAND can pulse")
+    if point.pulse is not None and not _is_instance(point.pulse.idle, point.key.type):
+        found.append(f"the pulse's idle value {point.pulse.idle!r} is not a {point.key.type.__name__}")
     if point.on_write is not None:
         if not point.writable:
             found.append("on_write re-reads after a write, but it has no write side")
@@ -373,3 +408,12 @@ def _write_problems(point: Point) -> list[str]:
         if point.on_write.until_stable is not None and after is not None and not after > 0:
             found.append("on_write re-reads until stable, which needs a positive after to re-read at")
     return found
+
+
+def _is_instance(value: object, value_type: type[object]) -> bool:
+    """Whether `value` is of `value_type`, where an int counts as a float and a bool as neither."""
+    if isinstance(value, bool) and value_type is not bool:
+        return False
+    if value_type is float:
+        return isinstance(value, (int, float))
+    return isinstance(value, value_type)

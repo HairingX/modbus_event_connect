@@ -1,5 +1,7 @@
 """Points, data_types, access, selectors, the protocol contract's value types, and the clock."""
+import pickle
 from datetime import datetime, timezone
+from enum import IntEnum
 from typing import Any, Callable
 
 import pytest
@@ -8,18 +10,7 @@ from src.modbus_event_connect import _unit as unit_module
 from src.modbus_event_connect._clock import Clock, SystemClock
 from src.modbus_event_connect._data_type import DataType, DataTypeKind
 from src.modbus_event_connect._device import EncodedWrite, Outcome, ReadResult, WriteResult
-from src.modbus_event_connect.micro_nabto._access import DatapointRegister, SetpointRegister
-from src.modbus_event_connect.modbus._access import (
-    Coil,
-    DiscreteInput,
-    HoldingRegister,
-    InputRegister,
-    ModbusOptions,
-    NumberRange,
-    RegisterNumbering,
-    modicon,
-    plain,
-)
+from src.modbus_event_connect._key import Key
 from src.modbus_event_connect._point import (
     DEFAULT_INTERVALS,
     Access,
@@ -34,14 +25,38 @@ from src.modbus_event_connect._point import (
     Transforms,
     WriteKind,
 )
-from src.modbus_event_connect.testing._clock import FakeClock
 from src.modbus_event_connect._unit import Unit
 from src.modbus_event_connect._value import DataValue, Quality
+from src.modbus_event_connect.micro_nabto._access import DatapointRegister, SetpointRegister
+from src.modbus_event_connect.modbus._access import (
+    Coil,
+    DiscreteInput,
+    HoldingRegister,
+    InputRegister,
+    ModbusOptions,
+    NumberRange,
+    RegisterNumbering,
+    modicon,
+    plain,
+)
+from src.modbus_event_connect.testing._clock import FakeClock
+
+
+def _key(fields: dict[str, Any]) -> Key[Any]:
+    """A key of the type a point with these fields holds, so only the fault under test remains."""
+    data_type: DataType = fields.get("data_type", DataType.UINT16)
+    if data_type.is_boolean:
+        return Key("p", bool)
+    if data_type.kind is DataTypeKind.STRING:
+        return Key("p", str)
+    if data_type.is_float or "transform" in fields or fields.get("scale", 1) != 1 or fields.get("offset", 0) != 0:
+        return Key("p", float)
+    return Key("p", int)
 
 
 def _refused(match: str, **fields: Any) -> None:
     with pytest.raises(ValueError, match=match):
-        Point("p", **fields)
+        Point(fields.pop("key", None) or _key(fields), **fields)
 
 
 # ================================================================================== data_types
@@ -50,7 +65,7 @@ def _refused(match: str, **fields: Any) -> None:
     (DataType.UINT16, 1), (DataType.INT16, 1), (DataType.BCD16, 1), (DataType.BOOL, 1), (DataType.bit(0), 1),
     (DataType.UINT32, 2), (DataType.INT32, 2), (DataType.FLOAT32, 2), (DataType.BCD32, 2),
     (DataType.UINT64, 4), (DataType.INT64, 4), (DataType.FLOAT64, 4),
-    (DataType.string(16), 16), (DataType.enum({0: "off"}), 1), (DataType.enum({0: "off"}, DataTypeKind.UINT32), 2),
+    (DataType.string(16), 16),
 ])
 def test_a_data_type_knows_its_width(data_type: DataType, registers: int) -> None:
     assert data_type.registers == registers
@@ -69,13 +84,7 @@ def test_the_data_type_constants_are_distinct_kinds() -> None:
     (lambda: DataType(DataTypeKind.UINT16, bit_index=3), "only a BIT data type has a bit"),
     (lambda: DataType.string(0), "length of at least one"),
     (lambda: DataType(DataTypeKind.UINT16, length=4), "only a STRING data type has a length"),
-    (lambda: DataType.enum({}), "at least one state"),
-    (lambda: DataType.enum({0: "on", 1: "on"}), "same name"),
-    (lambda: DataType.enum({0: "off"}, DataTypeKind.FLOAT32), "binary integer"),
-    (lambda: DataType.enum({0: "off"}, DataTypeKind.BCD16), "binary integer"),
-    (lambda: DataType(DataTypeKind.UINT16, mapping={0: "x"}), "only an ENUM data type has a mapping"),
-], ids=["bit-16", "bit-negative", "bit-missing", "bit-on-u16", "string-empty", "length-on-u16",
-        "enum-empty", "enum-duplicate-name", "enum-on-float", "enum-on-bcd", "mapping-on-u16"])
+], ids=["bit-16", "bit-negative", "bit-missing", "bit-on-u16", "string-empty", "length-on-u16"])
 def test_a_contradictory_data_type_is_refused(build: Callable[[], DataType], match: str) -> None:
     with pytest.raises(ValueError, match=match):
         build()
@@ -86,13 +95,6 @@ def test_an_unknown_string_encoding_is_refused_at_construction() -> None:
         DataType.string(4, "no-such-encoding")
 
 
-def test_an_enum_mapping_cannot_be_changed_after_construction() -> None:
-    mapping = {0: "off", 1: "on"}
-    data_type = DataType.enum(mapping)
-    mapping[2] = "surprise"
-    assert data_type.mapping is not None and 2 not in data_type.mapping
-
-
 @pytest.mark.parametrize("data_type,numeric,integer,floating,boolean", [
     (DataType.UINT16, True, True, False, False),
     (DataType.BCD32, True, True, False, False),
@@ -100,7 +102,6 @@ def test_an_enum_mapping_cannot_be_changed_after_construction() -> None:
     (DataType.BOOL, False, False, False, True),
     (DataType.bit(2), False, False, False, True),
     (DataType.string(2), False, False, False, False),
-    (DataType.enum({0: "a"}), False, False, False, False),
 ])
 def test_a_data_type_classifies_itself(data_type: DataType, numeric: bool, integer: bool, floating: bool,
                                    boolean: bool) -> None:
@@ -120,7 +121,6 @@ def test_a_data_type_classifies_itself(data_type: DataType, numeric: bool, integ
     {"read": HoldingRegister(1), "data_type": DataType.bit(3)},
     {"read": HoldingRegister(1), "write": HoldingRegister(1), "data_type": DataType.bit(15)},
     {"read": InputRegister(1), "data_type": DataType.string(8)},
-    {"read": HoldingRegister(1), "write": HoldingRegister(1), "data_type": DataType.enum({0: "off", 1: "on"})},
     {"read": InputRegister(1), "data_type": DataType.INT16, "scale": 0.01, "no_data": (0x7FFF,), "deadband": 0.05},
     {"read": InputRegister(1), "data_type": DataType.UINT16, "raw_range": (0, 1000)},
     {"write": HoldingRegister(1), "write_kind": WriteKind.COMMAND, "pulse": Pulse(idle=0, after=1.0)},
@@ -133,7 +133,7 @@ def test_a_data_type_classifies_itself(data_type: DataType, numeric: bool, integ
     {"read": SetpointRegister(5), "write": SetpointRegister(5)},
 ], ids=lambda f: "-".join(sorted(f)))
 def test_a_valid_point_is_accepted(fields: dict[str, Any]) -> None:
-    Point("p", **fields)
+    Point(_key(fields), **fields)
 
 
 # =========================================================================== refused points
@@ -145,7 +145,62 @@ def test_a_point_needs_a_side() -> None:
 @pytest.mark.parametrize("key", ["", " padded ", "trailing "])
 def test_a_key_must_be_a_clean_non_empty_string(key: str) -> None:
     with pytest.raises(ValueError, match="non-empty string"):
-        Point(key, read=InputRegister(1))
+        Point(Key(key, int), read=InputRegister(1))
+
+
+def test_a_key_is_its_text_wherever_it_goes() -> None:
+    key = Key("temperature", float)
+    assert key == "temperature" and hash(key) == hash("temperature") and {"temperature": 1}[key] == 1
+    assert repr(key) == "'temperature'"
+    copied = pickle.loads(pickle.dumps(key))
+    assert (copied, copied.type) == ("temperature", float) and isinstance(copied, Key)
+
+
+def test_a_key_must_be_a_key_not_only_its_text() -> None:
+    _refused("must be a Key", key="p", read=InputRegister(1))
+
+
+class Mode(IntEnum):
+    OFF = 0
+    ON = 1
+
+
+@pytest.mark.parametrize("value_type,fields", [
+    (bool, {"data_type": DataType.bit(0)}),
+    (str, {"data_type": DataType.string(2)}),
+    (int, {"data_type": DataType.INT32, "scale": 10}),
+    (int, {"data_type": DataType.INT16, "scale": 0.1, "precision": 0}),
+    (float, {"data_type": DataType.INT16}),
+    (float, {"data_type": DataType.FLOAT32}),
+    (Mode, {"data_type": DataType.UINT16}),
+    (Mode, {"data_type": DataType.INT16, "no_data": (0x7FFF,)}),
+], ids=["bool-bit", "str-string", "int-whole-scale", "int-precision-0", "float-int16", "float-float32",
+        "states-u16", "states-with-no-data"])
+def test_a_key_type_the_registers_can_hold_is_accepted(value_type: type[Any], fields: dict[str, Any]) -> None:
+    Point(Key("p", value_type), read=HoldingRegister(1), write=HoldingRegister(1), **fields)
+
+
+@pytest.mark.parametrize("value_type,fields,match", [
+    (bool, {"data_type": DataType.UINT16}, "bool is held by BOOL"),
+    (str, {"data_type": DataType.UINT16}, "text is held by a STRING"),
+    (int, {"data_type": DataType.INT16, "scale": 0.1}, "an int needs an integer"),
+    (int, {"data_type": DataType.FLOAT32}, "an int needs an integer"),
+    (int, {"data_type": DataType.UINT16, "transform": Transforms.SECONDS_AS_MINUTES}, "an int needs an integer"),
+    (float, {"data_type": DataType.string(2)}, "a float is held by a number"),
+    (Mode, {"data_type": DataType.FLOAT32}, "states of Mode are integers"),
+    (Mode, {"data_type": DataType.UINT16, "scale": 10}, "no scale, offset or transform"),
+    (Mode, {"data_type": DataType.UINT16, "limits": Limits(0, 1)}, "no limits"),
+    (bytes, {"data_type": DataType.UINT16}, "not bytes"),
+], ids=["bool-u16", "str-u16", "int-fraction", "int-float", "int-transform", "float-string", "states-float",
+        "states-scaled", "states-limited", "bytes"])
+def test_a_key_type_the_registers_cannot_hold_is_refused(value_type: type[Any], fields: dict[str, Any],
+                                                         match: str) -> None:
+    _refused(match, key=Key("p", value_type), read=HoldingRegister(1), write=HoldingRegister(1), **fields)
+
+
+def test_a_pulse_returns_to_a_value_of_the_key_type() -> None:
+    _refused("idle value 0 is not a bool", key=Key("p", bool), write=Coil(1), data_type=DataType.BOOL,
+             write_kind=WriteKind.COMMAND, pulse=Pulse(idle=0, after=1.0))
 
 
 @pytest.mark.parametrize("access", [InputRegister(1), DiscreteInput(1), DatapointRegister(1)])
@@ -173,7 +228,7 @@ def test_precision_cannot_be_negative() -> None:
     _refused("precision cannot be negative", read=InputRegister(1), precision=-1)
 
 
-@pytest.mark.parametrize("data_type", [DataType.BOOL, DataType.bit(1), DataType.string(2), DataType.enum({0: "a"})])
+@pytest.mark.parametrize("data_type", [DataType.BOOL, DataType.bit(1), DataType.string(2)])
 @pytest.mark.parametrize("fields,match", [
     ({"scale": 2}, "scale and offset apply to numbers"),
     ({"offset": 1}, "scale and offset apply to numbers"),
@@ -190,7 +245,7 @@ def test_no_data_needs_a_read_side() -> None:
     _refused("has no read side", write=HoldingRegister(1), no_data=(0xFFFF,))
 
 
-@pytest.mark.parametrize("data_type", [DataType.FLOAT32, DataType.string(2), DataType.BOOL, DataType.enum({0: "a"})])
+@pytest.mark.parametrize("data_type", [DataType.FLOAT32, DataType.string(2), DataType.BOOL])
 def test_no_data_and_raw_range_compare_raw_integers_only(data_type: DataType) -> None:
     _refused("compare raw integers", read=HoldingRegister(1), data_type=data_type, no_data=(0,))
     _refused("compare raw integers", read=HoldingRegister(1), data_type=data_type, raw_range=(0, 1))
@@ -242,7 +297,7 @@ def test_a_label_needs_a_name() -> None:
 
 def test_every_problem_is_named_in_one_error() -> None:
     with pytest.raises(ValueError) as caught:
-        Point("p", read=InputRegister(1), scale=0, limits=Limits(0, 1), poll_always=True, write_kind=WriteKind.COMMAND)
+        Point(Key("p", int), read=InputRegister(1), scale=0, limits=Limits(0, 1), poll_always=True, write_kind=WriteKind.COMMAND)
     message = str(caught.value)
     for fragment in ("scale must be", "limits describe writes", "COMMAND is written"):
         assert fragment in message
@@ -253,7 +308,7 @@ def test_every_problem_is_named_in_one_error() -> None:
 def test_no_data_and_labels_are_frozen_copies() -> None:
     labels = {"room": 3}
     sentinels = [0x7FFF]
-    point = Point("p", read=InputRegister(1), labels=labels, no_data=sentinels)
+    point = Point(Key("p", int), read=InputRegister(1), labels=labels, no_data=sentinels)
     labels["room"] = 4
     sentinels.append(0)
     assert point.labels == {"room": 3}
@@ -263,13 +318,13 @@ def test_no_data_and_labels_are_frozen_copies() -> None:
 
 
 def test_a_point_is_immutable() -> None:
-    point = Point("p", read=InputRegister(1))
+    point = Point(Key("p", int), read=InputRegister(1))
     with pytest.raises(AttributeError):
         point.key = "q"  # type: ignore[misc]
 
 
 def test_readable_writable_and_registers() -> None:
-    point = Point("p", read=InputRegister(1), data_type=DataType.FLOAT64)
+    point = Point(Key("p", float), read=InputRegister(1), data_type=DataType.FLOAT64)
     assert (point.readable, point.writable, point.registers) == (True, False, 4)
 
 
@@ -288,7 +343,7 @@ def test_readable_writable_and_registers() -> None:
 ], ids=["plain", "tenths", "hundredths", "halves", "tens", "tiny", "offset-wins", "explicit",
         "transform", "float", "float-explicit"])
 def test_the_rounding_follows_how_the_scale_was_written(fields: dict[str, Any], precision: int | None) -> None:
-    assert Point("p", read=InputRegister(1), **fields).effective_precision == precision
+    assert Point(_key(fields), read=InputRegister(1), **fields).effective_precision == precision
 
 
 # ================================================================== selectors and effects
@@ -332,7 +387,7 @@ def test_a_contradictory_effect_is_refused(build: Callable[[], object], error: t
 
 
 def test_a_write_refresh_waits_as_its_point_does_and_a_change_refresh_not_at_all() -> None:
-    point = Point("p", read=HoldingRegister(1), write=HoldingRegister(1),
+    point = Point(Key("p", int), read=HoldingRegister(1), write=HoldingRegister(1),
                   on_write=Refresh(["a"]), on_change=Refresh(["b"]))
     assert point.on_write is not None and point.on_write.after is None
     assert point.on_change is not None and point.on_change.after == 0.0
@@ -494,16 +549,16 @@ def test_numberings_with_the_same_ranges_are_equal() -> None:
 
 def test_options_name_every_problem_of_a_point() -> None:
     options = ModbusOptions(numbering=modicon(digits=5, first_address=0), max_registers=32)
-    assert options.problems(Point("ok", read=HoldingRegister(40001), write=HoldingRegister(40001))) == []
-    assert options.problems(Point("wrong-table", read=HoldingRegister(30001)))
-    assert options.problems(Point("too-wide", read=HoldingRegister(40001), data_type=DataType.string(40)))
-    assert options.problems(Point("nabto", read=DatapointRegister(1)))
+    assert options.problems(Point(Key("ok", int), read=HoldingRegister(40001), write=HoldingRegister(40001))) == []
+    assert options.problems(Point(Key("wrong-table", int), read=HoldingRegister(30001)))
+    assert options.problems(Point(Key("too-wide", str), read=HoldingRegister(40001), data_type=DataType.string(40)))
+    assert options.problems(Point(Key("nabto", int), read=DatapointRegister(1)))
 
 
 def test_a_multi_register_point_cannot_run_off_the_end() -> None:
     options = ModbusOptions(numbering=plain(first_address=1))
-    assert options.problems(Point("edge", read=HoldingRegister(65534), data_type=DataType.UINT16)) == []
-    assert options.problems(Point("over", read=HoldingRegister(65535), data_type=DataType.UINT32))
+    assert options.problems(Point(Key("edge", int), read=HoldingRegister(65534), data_type=DataType.UINT16)) == []
+    assert options.problems(Point(Key("over", int), read=HoldingRegister(65535), data_type=DataType.UINT32))
 
 
 @pytest.mark.parametrize("build", [
@@ -646,4 +701,4 @@ def test_the_poll_rates_climb_from_seconds_to_a_quarter_of_an_hour() -> None:
 
 
 def test_a_point_is_polled_at_the_medium_rate_unless_it_says_otherwise() -> None:
-    assert Point("p", read=InputRegister(1)).poll_rate is PollRate.MEDIUM
+    assert Point(Key("p", int), read=InputRegister(1)).poll_rate is PollRate.MEDIUM

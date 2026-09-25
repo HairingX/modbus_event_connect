@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from ._point import Access, Point
 
@@ -86,7 +86,7 @@ class ProtocolOptions:
     The base class states nothing; a protocol supplies its own subclass.
     """
 
-    def problems(self, point: Point) -> list[str]:
+    def problems(self, point: Point[Any]) -> list[str]:
         """What is wrong with `point` under these options. Empty when nothing is."""
         return []
 
@@ -115,11 +115,11 @@ class Device(Protocol):
         """Apply the chosen model's options. Called once the model is known, before any read."""
         ...
 
-    async def read(self, points: Sequence[Point]) -> Mapping[str, ReadResult]:
+    async def read(self, points: Sequence[Point[Any]]) -> Mapping[str, ReadResult]:
         """Read the read side of each point. Every key gets an entry; raises for nothing the device can do."""
         ...
 
-    async def write(self, point: Point, value: EncodedWrite) -> WriteResult:
+    async def write(self, point: Point[Any], value: EncodedWrite) -> WriteResult:
         """Write to the write side of `point`, reporting the outcome rather than raising."""
         ...
 

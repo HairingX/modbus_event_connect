@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Any
 
 from .._device import Identity
 from .._model import Instances, Model, Section, problems, resolve
@@ -56,7 +57,7 @@ def _label(index: int, section: Section | Instances) -> str:
     return f"sections[{index}] (Section)"
 
 
-def _transform_problem(point: Point) -> str | None:
+def _transform_problem(point: Point[Any]) -> str | None:
     """What is wrong with `point`'s transform, or None if it round-trips every sample."""
     transform = point.transform
     if transform is None:

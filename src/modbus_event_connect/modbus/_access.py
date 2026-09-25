@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import ClassVar, Literal
+from typing import Any, ClassVar, Literal
 
 from .._device import ProtocolOptions
 from .._point import Access, Point
@@ -188,7 +188,7 @@ class ModbusOptions(ProtocolOptions):
         """The address sent for `access`. Raises ValueError if it has none."""
         return self.numbering.address(access)
 
-    def problems(self, point: Point) -> list[str]:
+    def problems(self, point: Point[Any]) -> list[str]:
         found: list[str] = []
         for side, access in (("read", point.read), ("write", point.write)):
             if access is None:

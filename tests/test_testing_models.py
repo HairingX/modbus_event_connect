@@ -3,14 +3,15 @@ import pytest
 
 from src.modbus_event_connect._data_type import DataType
 from src.modbus_event_connect._device import Identity
-from src.modbus_event_connect.modbus._access import HoldingRegister, ModbusOptions, plain
+from src.modbus_event_connect._key import Key
 from src.modbus_event_connect._model import Model, Section, problems, resolve
 from src.modbus_event_connect._point import Point, Transform, Transforms
+from src.modbus_event_connect.modbus._access import HoldingRegister, ModbusOptions, plain
 from src.modbus_event_connect.testing._models import assert_models_valid
 
 
 def _with_transform(transform: Transform) -> Model:
-    point = Point("value", read=HoldingRegister(1), write=HoldingRegister(1), data_type=DataType.INT16,
+    point = Point(Key("value", float), read=HoldingRegister(1), write=HoldingRegister(1), data_type=DataType.INT16,
                   transform=transform)
     return Model(name="X", manufacturer="Y", sections=[Section([point])], options=ModbusOptions(numbering=plain(first_address=1)), read_back_after=1.0)
 
@@ -23,13 +24,13 @@ def test_at_least_one_identity_is_needed() -> None:
 
 
 def test_a_model_that_resolves_passes_silently() -> None:
-    good = Point("good", read=HoldingRegister(1), data_type=DataType.UINT16)
+    good = Point(Key("good", int), read=HoldingRegister(1), data_type=DataType.UINT16)
     assert_models_valid(Model(name="X", manufacturer="Y", sections=[Section([good])], options=ModbusOptions(numbering=plain(first_address=1)), read_back_after=1.0), identities=[{}])
 
 
 def test_a_section_broken_only_under_one_identity_is_caught() -> None:
-    wide = Point("wide", read=HoldingRegister(100), data_type=DataType.INT32)
-    narrow = Point("narrow", read=HoldingRegister(101), data_type=DataType.UINT16)
+    wide = Point(Key("wide", int), read=HoldingRegister(100), data_type=DataType.INT32)
+    narrow = Point(Key("narrow", int), read=HoldingRegister(101), data_type=DataType.UINT16)
     broken = Section([wide, narrow], when=lambda identity: identity.get("variant") == "broken")
     identities: list[Identity] = [{"variant": "ok"}, {"variant": "broken"}]
     with pytest.raises(AssertionError, match="overlap"):
@@ -37,7 +38,7 @@ def test_a_section_broken_only_under_one_identity_is_caught() -> None:
 
 
 def test_a_section_no_identity_includes_is_reported_as_untested() -> None:
-    p = Point("feature", read=HoldingRegister(1), data_type=DataType.UINT16)
+    p = Point(Key("feature", int), read=HoldingRegister(1), data_type=DataType.UINT16)
     unreachable = Section([p], when=lambda identity: identity.get("variant") == "never-happens")
     identities: list[Identity] = [{"variant": "a"}, {"variant": "b"}]
     with pytest.raises(AssertionError, match="never resolved"):
@@ -45,7 +46,7 @@ def test_a_section_no_identity_includes_is_reported_as_untested() -> None:
 
 
 def test_a_section_without_a_condition_is_never_reported_as_untested() -> None:
-    p = Point("always", read=HoldingRegister(1), data_type=DataType.UINT16)
+    p = Point(Key("always", int), read=HoldingRegister(1), data_type=DataType.UINT16)
     assert_models_valid(Model(name="X", manufacturer="Y", sections=[Section([p])], options=ModbusOptions(numbering=plain(first_address=1)), read_back_after=1.0), identities=[{}])
 
 

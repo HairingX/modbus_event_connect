@@ -68,7 +68,7 @@ class _Batch:
     """Spans read with one request. `spans` maps each distinct span to the points sharing it."""
     start: int
     end: int
-    spans: dict[_Span, list[Point]] = field(default_factory=lambda: {})
+    spans: dict[_Span, list[Point[Any]]] = field(default_factory=lambda: {})
 
 
 @dataclass(frozen=True)
@@ -169,8 +169,8 @@ class ModbusDevice:
             raise RuntimeError("configure() the device with its model's options before using it")
         return self._options
 
-    async def read(self, points: Sequence[Point]) -> Mapping[str, ReadResult]:
-        tables: dict[type[Access], dict[_Span, list[Point]]] = {}
+    async def read(self, points: Sequence[Point[Any]]) -> Mapping[str, ReadResult]:
+        tables: dict[type[Access], dict[_Span, list[Point[Any]]]] = {}
         for point in points:
             access = point.read
             if access is None:
@@ -186,7 +186,7 @@ class ModbusDevice:
                 await self._read_batch(_READ_FUNCTION[table], batch, result)
         return result
 
-    async def write(self, point: Point, value: EncodedWrite) -> WriteResult:
+    async def write(self, point: Point[Any], value: EncodedWrite) -> WriteResult:
         access = point.write
         if access is None:
             raise TypeError(f"point {point.key!r} has no write side")
@@ -325,14 +325,14 @@ class ModbusDevice:
 # ================================================================================ helpers
 
 
-def _table(access: Access, point: Point, side: str) -> type[Access]:
+def _table(access: Access, point: Point[Any], side: str) -> type[Access]:
     table = type(access)
     if table not in _READ_FUNCTION:
         raise TypeError(f"point {point.key!r}: the {side} side is {table.__name__}, not a Modbus table")
     return table
 
 
-def _batches(spans: Mapping[_Span, list[Point]], limit: int) -> list[_Batch]:
+def _batches(spans: Mapping[_Span, list[Point[Any]]], limit: int) -> list[_Batch]:
     """Groups spans into requests of at most `limit` registers or bits, joining only spans that
     touch or overlap - reading across a gap could ask for addresses no point needs."""
     batches: list[_Batch] = []

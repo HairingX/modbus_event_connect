@@ -14,14 +14,8 @@ from ._errors import (
     UnsupportedDeviceError,
 )
 from ._events import ValueCallback
-from ._model import (
-    Instances,
-    Model,
-    ModelSelector,
-    Scan,
-    ScanStep,
-    Section,
-)
+from ._key import Key
+from ._model import Instances, Model, ModelSelector, Scan, ScanStep, Section
 from ._point import (
     Change,
     Labels,
@@ -36,7 +30,8 @@ from ._point import (
     WriteKind,
 )
 from ._unit import Unit
-from ._value import DataValue, Quality, Value
+from ._value import DataValue, Quality
+from ._writes import Write
 
 __version__ = "0.2.0rc1"
 __all__ = [
@@ -53,6 +48,7 @@ __all__ = [
     "Identity",
     "Instances",
     "InvalidValueError",
+    "Key",
     "Labels",
     "Limits",
     "Model",
@@ -75,8 +71,8 @@ __all__ = [
     "Transforms",
     "Unit",
     "UnsupportedDeviceError",
-    "Value",
     "ValueCallback",
     "WordOrder",
+    "Write",
     "WriteKind",
 ]

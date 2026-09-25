@@ -5,20 +5,28 @@ import asyncio
 import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 from ._conversion import encode
 from ._device import Device, EncodedWrite, Outcome
+from ._key import Key
 from ._point import Point, WriteKind
-from ._value import Value
 
 _LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class Write[T]:
+    """One write of a sequence: `value` to the point `key` names."""
+    key: Key[T]
+    value: T
 
 
 @dataclass(eq=False)
 class _Write:
     """One queued write. A `superseded` write is never sent; its `result` is its successor's."""
-    point: Point
-    value: Value
+    point: Point[Any]
+    value: object
     result: asyncio.Future[bool] = field(default_factory=lambda: asyncio.get_running_loop().create_future())
     superseded: bool = False
     sending: bool = False
@@ -35,7 +43,7 @@ class WriteQueue:
     """
 
     def __init__(self, device: Device, *, answered: Callable[[bool], None],
-                 written: Callable[[Point], None], pending: Callable[[bool], None]) -> None:
+                 written: Callable[[Point[Any]], None], pending: Callable[[bool], None]) -> None:
         """Args:
             answered: told after every write whether the device answered it.
             written: told after every accepted write, to read it back.
@@ -50,11 +58,11 @@ class WriteQueue:
         self._in_flight = 0
         self._pulses: set[asyncio.Task[None]] = set()
 
-    async def write(self, point: Point, value: Value) -> bool:
+    async def write(self, point: Point[Any], value: object) -> bool:
         """Write `value`, already checked against `point`; returns whether the device accepted it."""
         return await self._enqueue(_Write(point, value))
 
-    async def write_sequence(self, writes: Sequence[tuple[Point, EncodedWrite]]) -> bool:
+    async def write_sequence(self, writes: Sequence[tuple[Point[Any], EncodedWrite]]) -> bool:
         """Send `writes` in order as one operation, stopping at the first refusal."""
         self._begin()
         try:
@@ -120,7 +128,7 @@ class WriteQueue:
             self._start_pulse(point)
         return True
 
-    def _start_pulse(self, point: Point) -> None:
+    def _start_pulse(self, point: Point[Any]) -> None:
         pulse = point.pulse
         assert pulse is not None
 

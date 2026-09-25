@@ -23,7 +23,7 @@ class ByteOrder(StrEnum):
 
 
 class DataTypeKind(Enum):
-    """What a data type is, before its parameters: which bit, how long, which states."""
+    """What a data type is, before its parameters: which bit, how long."""
     UINT16 = auto()
     INT16 = auto()
     UINT32 = auto()
@@ -42,8 +42,6 @@ class DataTypeKind(Enum):
     BIT = auto()
     """One bit of a 16-bit register."""
     STRING = auto()
-    ENUM = auto()
-    """An integer mapped to named states."""
 
 
 _REGISTERS: Mapping[DataTypeKind, int] = MappingProxyType({
@@ -70,10 +68,6 @@ class DataType:
     """STRING: how many registers the text occupies."""
     encoding: str = "utf-8"
     """STRING: the text encoding."""
-    mapping: Mapping[int, str] | None = None
-    """ENUM: raw value -> state name."""
-    base: DataTypeKind = DataTypeKind.UINT16
-    """ENUM: the integer type the raw value is read as."""
 
     UINT16: ClassVar[DataType]
     INT16: ClassVar[DataType]
@@ -99,16 +93,6 @@ class DataType:
             "".encode(self.encoding)                     # raises LookupError for an unknown encoding
         elif self.length is not None:
             raise ValueError(f"only a STRING data type has a length, not {self.kind.name}")
-        if self.kind is DataTypeKind.ENUM:
-            if not self.mapping:
-                raise ValueError("an ENUM data type needs a mapping with at least one state")
-            if self.base not in _INTEGER_KINDS or self.base in (DataTypeKind.BCD16, DataTypeKind.BCD32):
-                raise ValueError(f"an ENUM is read as a binary integer, not {self.base.name}")
-            if len(set(self.mapping.values())) != len(self.mapping):
-                raise ValueError("an ENUM maps two raw values to the same name; a write could not choose")
-            object.__setattr__(self, "mapping", MappingProxyType(dict(self.mapping)))
-        elif self.mapping is not None:
-            raise ValueError(f"only an ENUM data type has a mapping, not {self.kind.name}")
 
     @staticmethod
     def bit(index: int) -> DataType:
@@ -120,19 +104,12 @@ class DataType:
         """Text occupying `length` registers, two bytes each, cut at the first NUL."""
         return DataType(DataTypeKind.STRING, length=length, encoding=encoding)
 
-    @staticmethod
-    def enum(mapping: Mapping[int, str], base: DataTypeKind = DataTypeKind.UINT16) -> DataType:
-        """Named states. A raw value missing from `mapping` reads as NO_DATA."""
-        return DataType(DataTypeKind.ENUM, mapping=mapping, base=base)
-
     @property
     def registers(self) -> int:
         """How many 16-bit registers a value occupies. One for a coil or discrete input."""
         if self.kind is DataTypeKind.STRING:
             assert self.length is not None
             return self.length
-        if self.kind is DataTypeKind.ENUM:
-            return _REGISTERS[self.base]
         return _REGISTERS[self.kind]
 
     @property
@@ -155,7 +132,6 @@ class DataType:
     def __repr__(self) -> str:
         if self.kind is DataTypeKind.BIT: return f"DataType.bit({self.bit_index})"
         if self.kind is DataTypeKind.STRING: return f"DataType.string({self.length}, {self.encoding!r})"
-        if self.kind is DataTypeKind.ENUM: return f"DataType.enum({dict(self.mapping or {})!r})"
         return f"DataType.{self.kind.name}"
 
 

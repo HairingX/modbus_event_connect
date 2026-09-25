@@ -23,7 +23,7 @@ import asyncio
 from collections import Counter
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import NoReturn
+from typing import Any, NoReturn
 
 import pytest
 import pytest_asyncio
@@ -32,12 +32,13 @@ from conftest import live_or_skip, live_setting
 from src.modbus_event_connect._client import Client
 from src.modbus_event_connect._data_type import DataType
 from src.modbus_event_connect._device import Outcome
-from src.modbus_event_connect.micro_nabto._access import DatapointRegister, SetpointRegister
-from src.modbus_event_connect.micro_nabto._connection import MicroNabtoConnection, discover
-from src.modbus_event_connect.micro_nabto._device import MicroNabtoDevice, MicroNabtoOptions
+from src.modbus_event_connect._key import Key
 from src.modbus_event_connect._model import Model, Section
 from src.modbus_event_connect._point import Point
 from src.modbus_event_connect._value import DataValue, Quality
+from src.modbus_event_connect.micro_nabto._access import DatapointRegister, SetpointRegister
+from src.modbus_event_connect.micro_nabto._connection import MicroNabtoConnection, discover
+from src.modbus_event_connect.micro_nabto._device import MicroNabtoDevice, MicroNabtoOptions
 
 HOST = live_setting("MICRO_NABTO_HOST")
 EMAIL = live_setting("MICRO_NABTO_EMAIL")
@@ -57,9 +58,9 @@ TEMPERATURES = (27, 28, 29, 30)
 
 LIVE_MODEL = Model(
     name="live", manufacturer="any",
-    sections=[Section([*(Point(f"dp_{a}", read=DatapointRegister(a), data_type=DataType.INT16 if a in TEMPERATURES else DataType.UINT16,
+    sections=[Section([*(Point(Key(f"dp_{a}", float if a in TEMPERATURES else int), read=DatapointRegister(a), data_type=DataType.INT16 if a in TEMPERATURES else DataType.UINT16,
                            scale=0.1 if a in TEMPERATURES else 1.0) for a in DATAPOINTS),
-                   *(Point(f"sp_{a}", read=SetpointRegister(a), data_type=DataType.UINT16) for a in SETPOINTS)])],
+                   *(Point(Key(f"sp_{a}", int), read=SetpointRegister(a), data_type=DataType.UINT16) for a in SETPOINTS)])],
     options=MicroNabtoOptions(), read_back_after=1.0)
 
 
@@ -70,8 +71,8 @@ class Live:
     connection: MicroNabtoConnection
 
 
-def _single(address: int, key: str = "a") -> Point:
-    return Point(key, read=DatapointRegister(address), data_type=DataType.UINT16)
+def _single(address: int, key: str = "a") -> Point[Any]:
+    return Point(Key(key, int), read=DatapointRegister(address), data_type=DataType.UINT16)
 
 
 def _count(live: Live, name: str) -> int:
@@ -125,15 +126,15 @@ async def test_every_value_is_good(live: Live) -> None:
 
 async def test_temperatures_decode_as_temperatures(live: Live) -> None:
     for address in TEMPERATURES:
-        current = live.client.value(f"dp_{address}")
+        current = live.client.value(Key(f"dp_{address}", float))
         print(f"  dp_{address}: {current.value if current else None}")
         assert current is not None and isinstance(current.value, float) and -40.0 < current.value < 70.0
 
 
 async def test_every_subscriber_hears_its_value(live: Live) -> None:
-    heard: dict[str, DataValue] = {}
+    heard: dict[str, DataValue[Any]] = {}
 
-    def listen(key: str, old: DataValue | None, new: DataValue) -> None:
+    def listen(key: str, old: DataValue[Any] | None, new: DataValue[Any]) -> None:
         heard[key] = new
     for unsubscribe in [live.client.subscribe(k, listen) for k in live.client.points]:
         unsubscribe()

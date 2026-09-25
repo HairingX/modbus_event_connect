@@ -26,6 +26,10 @@ from conftest import live_or_skip, live_setting
 from src.modbus_event_connect._client import Client
 from src.modbus_event_connect._data_type import DataType
 from src.modbus_event_connect._device import Outcome
+from src.modbus_event_connect._key import Key
+from src.modbus_event_connect._model import Model, Section
+from src.modbus_event_connect._point import Point
+from src.modbus_event_connect._value import Quality
 from src.modbus_event_connect.modbus._access import (
     HoldingRegister,
     InputRegister,
@@ -34,9 +38,6 @@ from src.modbus_event_connect.modbus._access import (
 )
 from src.modbus_event_connect.modbus._connection import ModbusTcpConnection, Request, Response
 from src.modbus_event_connect.modbus._device import ModbusDevice
-from src.modbus_event_connect._model import Model, Section
-from src.modbus_event_connect._point import Point
-from src.modbus_event_connect._value import Quality
 
 HOST = live_setting("MODBUS_TCP_HOST")
 PORT = int(live_setting("MODBUS_TCP_PORT") or "502")
@@ -48,10 +49,10 @@ pytestmark = [
 ]
 
 LIVE_MODEL = Model(name="live", manufacturer="any", sections=[Section([
-    Point("u16", read=InputRegister(1), data_type=DataType.UINT16),
-    Point("s16_scaled", read=InputRegister(104), data_type=DataType.INT16, scale=0.01, no_data=(0x7FFF,)),
-    Point("text", read=HoldingRegister(10), data_type=DataType.string(16)),
-    Point("u32", read=HoldingRegister(28), data_type=DataType.UINT32),
+    Point(Key("u16", int), read=InputRegister(1), data_type=DataType.UINT16),
+    Point(Key("s16_scaled", float), read=InputRegister(104), data_type=DataType.INT16, scale=0.01, no_data=(0x7FFF,)),
+    Point(Key("text", str), read=HoldingRegister(10), data_type=DataType.string(16)),
+    Point(Key("u32", int), read=HoldingRegister(28), data_type=DataType.UINT32),
 ])], options=ModbusOptions(numbering=plain(first_address=1)), read_back_after=1.0)
 
 
@@ -84,7 +85,7 @@ async def live() -> AsyncGenerator[Live, None]:
     await client.disconnect()
 
 
-def _good(client: Client, key: str) -> object:
+def _good[V](client: Client, key: Key[V]) -> V | None:
     current = client.value(key)
     assert current is not None and current.quality is Quality.GOOD, f"{key}: {current}"
     print(f"  {key}: {current.value!r}")
@@ -96,26 +97,26 @@ async def test_nothing_here_can_be_written(live: Live) -> None:
 
 
 async def test_a_register_reads_as_an_integer(live: Live) -> None:
-    assert isinstance(_good(live.client, "u16"), int)
+    assert isinstance(_good(live.client, Key("u16", int)), int)
 
 
 async def test_a_signed_scaled_register_reads_as_a_float(live: Live) -> None:
-    assert isinstance(_good(live.client, "s16_scaled"), float)
+    assert isinstance(_good(live.client, Key("s16_scaled", float)), float)
 
 
 async def test_sixteen_registers_read_as_text(live: Live) -> None:
-    assert isinstance(_good(live.client, "text"), str)
+    assert isinstance(_good(live.client, Key("text", str)), str)
 
 
 async def test_two_registers_read_as_one_32_bit_number(live: Live) -> None:
-    value = _good(live.client, "u32")
+    value = _good(live.client, Key("u32", int))
     assert isinstance(value, int) and value > 0xFFFF
 
 
 async def test_an_address_the_device_lacks_is_missing_and_the_rest_are_still_read(live: Live) -> None:
-    answers = await live.device.read([Point("a", read=InputRegister(1), data_type=DataType.UINT16),
-                                      Point("absent", read=InputRegister(9999), data_type=DataType.UINT16),
-                                      Point("b", read=InputRegister(2), data_type=DataType.UINT16)])
+    answers = await live.device.read([Point(Key("a", int), read=InputRegister(1), data_type=DataType.UINT16),
+                                      Point(Key("absent", int), read=InputRegister(9999), data_type=DataType.UINT16),
+                                      Point(Key("b", int), read=InputRegister(2), data_type=DataType.UINT16)])
     print(f"\n  {({k: a.outcome.name for k, a in answers.items()})}")
     assert (answers["a"].outcome, answers["b"].outcome) == (Outcome.OK, Outcome.OK)
     assert answers["absent"].outcome is Outcome.MISSING

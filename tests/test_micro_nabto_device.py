@@ -1,5 +1,6 @@
 """`MicroNabtoDevice`, alone and under a client, against a simulated device on localhost UDP."""
 import asyncio
+from typing import Any
 
 import pytest
 
@@ -11,27 +12,34 @@ from src.modbus_event_connect._errors import (
     ReadOnlyError,
     UnsupportedDeviceError,
 )
+from src.modbus_event_connect._key import Key
+from src.modbus_event_connect._model import Model, Section
+from src.modbus_event_connect._point import Limits, Point
+from src.modbus_event_connect._unit import Unit
+from src.modbus_event_connect._value import DataValue, Quality
 from src.modbus_event_connect.micro_nabto._access import DatapointRegister, SetpointRegister
 from src.modbus_event_connect.micro_nabto._connection import MicroNabtoConnection
 from src.modbus_event_connect.micro_nabto._device import MicroNabtoDevice, MicroNabtoOptions
 from src.modbus_event_connect.modbus._access import HoldingRegister, ModbusOptions, plain
-from src.modbus_event_connect._model import Model, Section
-from src.modbus_event_connect._point import Limits, Point
 from src.modbus_event_connect.testing._clock import FakeClock
 from src.modbus_event_connect.testing._micro_nabto import Command, SimulatedMicroNabtoDevice
-from src.modbus_event_connect._unit import Unit
-from src.modbus_event_connect._value import DataValue, Quality
 
 EMAIL = "user@example.invalid"
 DATAPOINT_READ, SETPOINT_READ, SETPOINT_WRITE = 0x2D, 0x2A, 0x2B
 
 
-def _dp(address: int, *, obj: int = 0, data_type: DataType = DataType.UINT16) -> Point:
-    return Point(f"dp_{obj}_{address}", read=DatapointRegister(address, obj=obj), data_type=data_type)
+def _key(text: str, data_type: DataType) -> Key[Any]:
+    """A key of the one type a point of `data_type` with no scale holds."""
+    return Key(text, bool if data_type.is_boolean else float if data_type.is_float else int)
 
 
-def _sp(address: int, *, data_type: DataType = DataType.UINT16) -> Point:
-    return Point(f"sp_{address}", read=SetpointRegister(address), write=SetpointRegister(address), data_type=data_type)
+def _dp(address: int, *, obj: int = 0, data_type: DataType = DataType.UINT16) -> Point[Any]:
+    return Point(_key(f"dp_{obj}_{address}", data_type), read=DatapointRegister(address, obj=obj), data_type=data_type)
+
+
+def _sp(address: int, *, data_type: DataType = DataType.UINT16) -> Point[Any]:
+    return Point(_key(f"sp_{address}", data_type), read=SetpointRegister(address), write=SetpointRegister(address),
+                 data_type=data_type)
 
 
 def _simulated(*, clock: FakeClock | None = None, emails: frozenset[str] = frozenset({EMAIL})) -> SimulatedMicroNabtoDevice:
@@ -59,7 +67,7 @@ async def _arrived(simulated: SimulatedMicroNabtoDevice, code: int) -> list[Comm
     return simulated.received(code)
 
 
-def _nothing(key: str, old: DataValue | None, new: DataValue) -> None:
+def _nothing(key: str, old: DataValue[Any] | None, new: DataValue[Any]) -> None:
     pass
 
 
@@ -180,7 +188,7 @@ async def test_an_answer_cut_short_is_an_error_and_not_a_missing_point() -> None
 async def test_a_point_of_another_protocol_cannot_be_read() -> None:
     async with _simulated() as simulated:
         with pytest.raises(TypeError):
-            await _device(simulated).read([Point("modbus", read=HoldingRegister(1), data_type=DataType.UINT16)])
+            await _device(simulated).read([Point(Key("modbus", int), read=HoldingRegister(1), data_type=DataType.UINT16)])
 
 
 # ================================================================================= writing
@@ -212,7 +220,7 @@ async def test_only_a_setpoint_is_written_and_never_a_single_bit() -> None:
     async with _simulated() as simulated:
         device = _device(simulated)
         with pytest.raises(TypeError):
-            await device.write(Point("modbus", read=HoldingRegister(1), write=HoldingRegister(1), data_type=DataType.UINT16),
+            await device.write(Point(Key("modbus", int), read=HoldingRegister(1), write=HoldingRegister(1), data_type=DataType.UINT16),
                                EncodedWrite((1,)))
         with pytest.raises(ValueError):
             await device.write(_sp(30), EncodedWrite(bit_index=0, bit_value=True))
@@ -221,15 +229,15 @@ async def test_only_a_setpoint_is_written_and_never_a_single_bit() -> None:
 # ================================================================================= options
 
 @pytest.mark.parametrize("point,problem", [
-    (Point("p", read=SetpointRegister(0xFFFF), data_type=DataType.UINT16), None),
-    (Point("p", read=SetpointRegister(0xFFFF), data_type=DataType.UINT32), "ends past address 65535"),
-    (Point("p", read=DatapointRegister(0x1_0000), data_type=DataType.UINT32), None),
-    (Point("p", read=DatapointRegister(1, obj=256), data_type=DataType.UINT16), "object 256"),
-    (Point("p", read=HoldingRegister(1), data_type=DataType.UINT16), "not a micro_nabto space"),
-    (Point("p", read=SetpointRegister(1), write=SetpointRegister(1), data_type=DataType.bit(3)), "single bit"),
-    (Point("p", read=DatapointRegister(1), data_type=DataType.string(65)), "spans 65, more than the 64"),
+    (Point(Key("p", int), read=SetpointRegister(0xFFFF), data_type=DataType.UINT16), None),
+    (Point(Key("p", int), read=SetpointRegister(0xFFFF), data_type=DataType.UINT32), "ends past address 65535"),
+    (Point(Key("p", int), read=DatapointRegister(0x1_0000), data_type=DataType.UINT32), None),
+    (Point(Key("p", int), read=DatapointRegister(1, obj=256), data_type=DataType.UINT16), "object 256"),
+    (Point(Key("p", int), read=HoldingRegister(1), data_type=DataType.UINT16), "not a micro_nabto space"),
+    (Point(Key("p", bool), read=SetpointRegister(1), write=SetpointRegister(1), data_type=DataType.bit(3)), "single bit"),
+    (Point(Key("p", str), read=DatapointRegister(1), data_type=DataType.string(65)), "spans 65, more than the 64"),
 ])
-def test_the_options_name_what_micro_nabto_cannot_carry(point: Point, problem: str | None) -> None:
+def test_the_options_name_what_micro_nabto_cannot_carry(point: Point[Any], problem: str | None) -> None:
     found = MicroNabtoOptions().problems(point)
     assert (found == []) if problem is None else any(problem in p for p in found), found
 
@@ -267,8 +275,8 @@ async def test_diagnostics_count_without_naming_the_address_or_the_email() -> No
 
 # =============================================================================== the client
 
-TEMP = Point("temp_outside", read=DatapointRegister(27), data_type=DataType.INT16, scale=0.1, unit=Unit.CELSIUS)
-FAN = Point("fan_level", read=SetpointRegister(30), write=SetpointRegister(30), data_type=DataType.UINT16, limits=Limits(min=0, max=200))
+TEMP = Point(Key("temp_outside", float), read=DatapointRegister(27), data_type=DataType.INT16, scale=0.1, unit=Unit.CELSIUS)
+FAN = Point(Key("fan_level", int), read=SetpointRegister(30), write=SetpointRegister(30), data_type=DataType.UINT16, limits=Limits(min=0, max=200))
 CTS = Model(name="CTS", manufacturer="Example", sections=[Section([TEMP, FAN])], options=MicroNabtoOptions(), read_back_after=1.0)
 
 
@@ -285,7 +293,7 @@ async def test_a_client_picks_its_model_from_the_handshake_and_reads_negative_va
     async with _simulated() as simulated:
         client = _client(simulated)
         await client.connect()
-        temp, fan = client.value("temp_outside"), client.value("fan_level")
+        temp, fan = client.value(Key("temp_outside", float)), client.value(Key("fan_level", int))
         assert temp is not None and (temp.value, temp.quality) == (-5.3, Quality.GOOD)
         assert fan is not None and fan.value == 130
 
@@ -308,7 +316,7 @@ async def test_a_read_only_client_never_sends_a_setpoint_write() -> None:
         client = _client(simulated, read_only=True)
         await client.connect()
         with pytest.raises(ReadOnlyError):
-            await client.write("fan_level", 3)
+            await client.write(Key("fan_level", int), 3)
         assert simulated.received(SETPOINT_WRITE) == []
 
 
@@ -316,7 +324,7 @@ async def test_a_written_setpoint_reaches_the_device() -> None:
     async with _simulated() as simulated:
         client = _client(simulated)
         await client.connect()
-        assert await client.write("fan_level", 3) is True
+        assert await client.write(Key("fan_level", int), 3) is True
         assert await _arrived(simulated, SETPOINT_WRITE) == [Command(SETPOINT_WRITE, ((0, 30, 3),))]
 
 
@@ -325,18 +333,18 @@ async def test_a_silent_device_makes_the_client_unavailable_until_it_answers_aga
     async with _simulated(clock=clock) as simulated:
         client = _client(simulated, clock=clock)
         await client.connect()
-        client.subscribe("temp_outside", _nothing)
+        client.subscribe(Key("temp_outside", float), _nothing)
         simulated.silent = True
         clock.advance(60)
         await client.poll()
-        stale = client.value("temp_outside")
+        stale = client.value(Key("temp_outside", float))
         assert client.status(Status.CONNECTED).value is False and stale is not None and stale.quality is Quality.STALE
 
         simulated.silent = False
         clock.advance(60)
         await client.poll()
         await client.poll()
-        good = client.value("temp_outside")
+        good = client.value(Key("temp_outside", float))
         assert client.status(Status.CONNECTED).value is True and good is not None and good.quality is Quality.GOOD
 
 
@@ -345,9 +353,9 @@ async def test_a_restarted_device_goes_unnoticed_by_the_client() -> None:
     async with _simulated(clock=clock) as simulated:
         client = _client(simulated, clock=clock)
         await client.connect()
-        client.subscribe("temp_outside", _nothing)
+        client.subscribe(Key("temp_outside", float), _nothing)
         simulated.restart()
         clock.advance(60)
         await client.poll()
-        temp = client.value("temp_outside")
+        temp = client.value(Key("temp_outside", float))
         assert client.status(Status.CONNECTED).value is True and temp is not None and temp.quality is Quality.GOOD

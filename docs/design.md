@@ -82,7 +82,7 @@ They differed only in that one could be written; the address space now travels w
 
 ```python
 Point(
-    key="room_3_temp_target",                     # stable string, see 3.8
+    key=Key("room_3_temp_target", float),         # stable string and value type, see 3.8
     read=HoldingRegister(119),                    # optional
     write=HoldingRegister(119),                   # optional; may be a different space
     data_type=DataType.INT16,
@@ -163,15 +163,15 @@ heuristics:
 
 ```
 UINT16  INT16  UINT32  INT32  UINT64  INT64  FLOAT32  FLOAT64  BCD16  BCD32  BOOL
-bit(n)  string(n, encoding)  enum(map)
+bit(n)  string(n, encoding)
 ```
 
 - `FLOAT32` / `FLOAT64` are IEEE 754 — the format of most energy meters and drives. A scaled
   integer is an integer type with a `scale`, never a float.
 - `bit(n)` is bit *n* of a 16-bit register; several points may share the address and are read
   with one request.
-- `enum(map)` maps raw values to named states (fan modes, blind states), so every consumer does
-  not re-implement the mapping.
+- Named states (fan modes, blind states) are not a data type: the key's type is an `IntEnum`,
+  see 3.8, so every consumer uses the same states without re-implementing a mapping.
 - Word and byte order apply to every multi-register type.
 
 ### 3.5 The value pipeline
@@ -229,8 +229,28 @@ Labels are free: `{"room": 3}`, `{"feature": "cooling"}`. Their meaning belongs 
 A key is a stable string. It ends up in the consumer's storage, typically in ids it builds from
 it, so once a device is in use, changing a key string loses what the consumer built on it.
 
-- Static points may keep a typed `StrEnum` for use in plugin code.
-- Repeated points get their key from the template, e.g. `f"room_{n}_temp_air"`.
+A key also carries the type of its point's value: `Key("room_3_temp_target", float)`. It is a
+`str` subclass, so it is stored, compared and hashed as its text, and a type checker knows from
+it what `value()` returns and what `write()` accepts: a wrong type is an error before the program
+runs, not a surprise at a device. The same pattern types keys elsewhere: Home Assistant's
+`HassKey[_T](str)` and aiohttp's `web.AppKey`.
+
+| Key type | Registers | A read gives |
+|---|---|---|
+| `bool` | `BOOL`, a bit | `True` / `False` |
+| `str` | `STRING` | the text |
+| `int` | an integer that stays whole after scale, offset and precision | an `int` |
+| `float` | any number | a `float` |
+| an `IntEnum` | an integer, unscaled | its member; a number no member names is `NO_DATA` |
+
+A point whose registers cannot hold its key's type is refused when it is created. The client
+refuses a key whose type differs from the model's point (`TypeError`), and a subscription made
+before `connect()` with such a key is logged and never told. The states stay integers: an
+`IntEnum` member equals its number, and `DataValue.raw` keeps what the device sent, so a state
+no enum names yet can still be told.
+
+- A device library publishes its keys with its model; they are how a consumer names points.
+- Repeated points get their key from the template, e.g. `Key(f"room_{n}_temp_air", float)`.
 - The library is being built new and nobody runs it yet, so Sentio — the first consumer — is
   free to choose its keys now. After that they are frozen.
 - **Nilan is different:** `nilan_proxy` runs in production behind the `nilan_connect`
@@ -454,7 +474,7 @@ Order within a pass: points due because of a write or a trigger first, then the 
 ### 5.5 Write effects
 
 ```python
-Point("ventilation_step", read=HoldingRegister(1003), write=HoldingRegister(1003),
+Point(Key("ventilation_step", int), read=HoldingRegister(1003), write=HoldingRegister(1003),
       limits=Limits(0, 4, step=1),
       on_write=Refresh(["fan_inlet_pct", "fan_outlet_pct", "fan_inlet_rpm", "fan_outlet_rpm"],
                        until_stable=30.0))
@@ -488,7 +508,7 @@ t = 6 s …  every `after` while the values change
 A cheap point that changes when expensive ones do:
 
 ```python
-Point("alarm_summary", read=DiscreteInput(1), data_type=DataType.BOOL,
+Point(Key("alarm_summary", bool), read=DiscreteInput(1), data_type=DataType.BOOL,
       poll_rate=PollRate.FAST, on_change=Refresh(Labels(kind="alarm")))
 ```
 
@@ -535,14 +555,16 @@ Without a `clock` argument the client uses the system clocks.
 
 ```python
 @dataclass(frozen=True)
-class DataValue:
-    value: float | int | str | bool | None
+class DataValue[T]:
+    value: T | None                # of the key's type, see 3.8
     quality: Quality
     timestamp: datetime            # when the device answered; timezone-aware UTC
+    raw: tuple[int, ...] = ()      # what the device answered, before decoding
 ```
 
 `timestamp` is a `datetime` in UTC, Python's own type for a moment in time. Scheduling does not
-use it: see 5.7.
+use it: see 5.7. `raw` is kept for `NO_DATA` too, so a sentinel or a state no enum names yet is
+still there to see and to report.
 
 This is OPC UA's DataValue. It is what the earlier `PointRead` was reaching for, and it applies
 to every read, not only to a scan step's question.
@@ -585,7 +607,7 @@ The callback receives the old and the new `DataValue`.
 ## 7. Writes
 
 ```python
-await client.write("room_3_temp_target", 21.5)
+await client.write(ROOM_3_TEMP_TARGET, 21.5)          # Key("room_3_temp_target", float)
 ```
 
 1. Refused at once in read-only mode (7.4).
@@ -607,8 +629,9 @@ await client.write("room_3_temp_target", 21.5)
 **Coalescing** applies to `WriteKind.STATE` only (3.6). Writes to one device are sent in order;
 a write rejected as busy is retried before later writes, not after them.
 
-**Sequences:** some devices need unlock → write → save. `client.write_sequence([...])` sends an
-ordered list as one operation and stops at the first refusal.
+**Sequences:** some devices need unlock → write → save. `client.write_sequence([Write(key, value),
+...])` sends an ordered list as one operation and stops at the first refusal; each `Write` is
+typed by its key.
 
 ### 7.4 Read-only mode
 

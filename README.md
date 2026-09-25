@@ -32,8 +32,10 @@ Device  how to reach it: ModbusDevice or MicroNabtoDevice                      (
 Client  joins the two: connect, subscribe, poll, write                          (Part 1)
 ```
 
-A *point* is one value the device has, such as a temperature or a setting. Its *key*, like
-`"temperature"`, is how you name it everywhere.
+A *point* is one value the device has, such as a temperature or a setting. Its *key*,
+`Key("temperature", float)`, names it everywhere and says what its value is. A key is its text
+wherever it is stored, and a type checker knows from it what reading the point gives and what
+writing it takes.
 
 Everything is imported from four places. The modules inside them are internal, and may change in
 any release.
@@ -55,7 +57,7 @@ any release.
 import asyncio
 from modbus_event_connect import Client
 from modbus_event_connect.modbus import ModbusDevice
-from my_devices import THERMOSTAT          # a model, see Part 2
+from my_devices import TARGET, TEMPERATURE, THERMOSTAT   # a model and its keys, see Part 2
 
 def on_change(key, old, new):
     print(f"{key}: {new.value} ({new.quality.name})")
@@ -63,8 +65,8 @@ def on_change(key, old, new):
 async def main():
     client = Client(ModbusDevice.tcp("<device-ip>"), THERMOSTAT)
     await client.connect()                  # reads every point once
-    client.subscribe("temperature", on_change)
-    await client.write("target", 21.5)
+    client.subscribe(TEMPERATURE, on_change)
+    await client.write(TARGET, 21.5)
     try:
         while True:
             await client.poll()             # reads whatever is due
@@ -129,13 +131,16 @@ value, then on every change. `old` is `None` the first time. It returns a functi
 unsubscribes.
 
 `client.value(key)` gives the current value at any time, or `None` before the first read.
+Its type follows the key: `client.value(TEMPERATURE)` is a `DataValue[float]`, and a key of
+another type than the model gives the point raises `TypeError`.
 
-Every value is a `DataValue` with `.value`, `.quality` and `.timestamp`:
+Every value is a `DataValue` with `.value`, `.quality`, `.timestamp`, and `.raw`: what the
+device answered, before it was decoded.
 
 | Quality | Meaning | Show it as |
 |---|---|---|
 | `GOOD` | A real value. | the value |
-| `NO_DATA` | The device says it has no reading, such as a sensor not fitted. | unknown |
+| `NO_DATA` | The device says it has no reading, such as a sensor not fitted, or sent a number no state names. | unknown |
 | `STALE` | The last read failed. `.value` and `.timestamp` are the last good read's. | the value, or unavailable |
 | `OFFLINE` | Something behind the device is not answering. It will come back. | unavailable |
 | `MISSING` | This device does not have the value. | leave it out |
@@ -157,32 +162,33 @@ These are the library's defaults; a model may set its own. You can change them:
 
 ```python
 client.set_poll_interval(PollRate.FAST, 5)       # every FAST point
-client.set_poll_interval("temperature", 2)       # one point
-client.set_poll_interval("temperature", None)    # back to the model's interval
+client.set_poll_interval(TEMPERATURE, 2)         # one point
+client.set_poll_interval(TEMPERATURE, None)      # back to the model's interval
 ```
 
 A model can set a floor, the shortest interval its device copes with. `set_poll_interval`
 returns the interval actually used.
 
-To read now, call `await client.refresh(["temperature"])`. `refresh(PollRate.SLOW)` reads a
+To read now, call `await client.refresh([TEMPERATURE])`. `refresh(PollRate.SLOW)` reads a
 whole poll rate, and `refresh()` reads everything. `subscribe(key, callback, poll=False)` is
 told about changes without asking for the point to be read on a timer.
 
 ## Writing
 
 ```python
-accepted = await client.write("target", 21.5)
+accepted = await client.write(TARGET, 21.5)
 ```
 
-`write` returns whether the device accepted the value. Before anything is sent, the value is
-checked against the point's limits, and `InvalidValueError` says why it was refused.
+`write` returns whether the device accepted the value. A value of another type than the key's
+is a type error before the program runs. Before anything is sent, the value is also checked
+against the point's limits, or its states, and `InvalidValueError` says why it was refused.
 
 - Writes are sent one at a time, in order.
 - If a setting is written several times while earlier writes are still waiting, only the newest
   value is sent. Commands are always all sent.
 - After a write, the point is read back, so subscribers see what the device really did.
-- `await client.write_sequence([("mode", 2), ("target", 21.5)])` checks every value first,
-  then writes them in order and stops at the first refusal.
+- `await client.write_sequence([Write(MODE, Mode.HEAT), Write(TARGET, 21.5)])` checks every
+  value first, then writes them in order and stops at the first refusal.
 - `client.status(Status.WRITE_PENDING).value` is `True` while writes are waiting or being sent.
 
 `Client(device, model, read_only=True)` refuses every write with `ReadOnlyError` before it
@@ -206,7 +212,7 @@ rooms. After `connect()`:
 
 | | |
 |---|---|
-| `client.points` | the points this unit has, by key |
+| `client.points` | the points this unit has, by their keys, each with its type |
 | `client.has(key)`, `client.can_write(key)` | whether it has the key, and whether it can be written |
 | `client.instances("room")` | which rooms, zones or channels are installed, such as `(1, 3)` |
 | `client.unavailable_reasons` | keys the unit does not have, with the reason |
@@ -234,6 +240,7 @@ rooms. After `connect()`:
 | `InvalidValueError` | `write()` | The point cannot take the value. |
 | `ReadOnlyError` | `write()` | The client is read-only. |
 | `KeyError` | `subscribe()`, `write()` | This unit has no such key. |
+| `TypeError` | `value()`, `subscribe()`, `write()` | The key names another type than the model gives the point. |
 
 ---
 
@@ -245,36 +252,56 @@ it. You write it once, from the device's manual, and every app uses it.
 ## A first model
 
 ```python
-from modbus_event_connect import DataType, Limits, Model, Point, PollRate, Section, Unit
+from enum import IntEnum
+from modbus_event_connect import DataType, Key, Limits, Model, Point, PollRate, Section, Unit
 from modbus_event_connect.modbus import HoldingRegister, InputRegister, ModbusOptions, plain
+
+class Mode(IntEnum):                      # the states the device documents
+    OFF = 0
+    HEAT = 1
+    COOL = 2
+
+TEMPERATURE = Key("temperature", float)
+TARGET = Key("target", float)
+MODE = Key("mode", Mode)
+SERIAL_NUMBER = Key("serial_number", int)
 
 THERMOSTAT = Model(name="Thermostat", manufacturer="Example",
                    options=ModbusOptions(numbering=plain(first_address=1)),  # the manual gives addresses
                    read_back_after=2.0,   # seconds before a write shows in a read
                    sections=[Section([
-    Point("temperature",
+    Point(TEMPERATURE,
           read=InputRegister(10),         # where the value is
           data_type=DataType.INT16,       # a signed 16-bit number
           scale=0.1,                      # the device sends 215 for 21.5
           unit=Unit.CELSIUS,
           no_data=(0x7FFF,)),             # what the device sends when it has no reading
-    Point("target",
+    Point(TARGET,
           read=HoldingRegister(20), write=HoldingRegister(20),
           data_type=DataType.INT16, scale=0.1, unit=Unit.CELSIUS,
           limits=Limits(min=5, max=30, step=0.5)),   # checked before anything is written
-    Point("serial_number",
+    Point(MODE,
+          read=HoldingRegister(21), write=HoldingRegister(21)),   # 0, 1 or 2; nothing else
+    Point(SERIAL_NUMBER,
           read=InputRegister(1), data_type=DataType.UINT32,
           poll_rate=PollRate.STATIC),     # read once, when connecting
                    ])])
 ```
 
-A mistake in a point, such as limits on a point that cannot be written, raises `ValueError`
-when the point is created, naming every problem at once. A mistake between points, such as two
+A key's type is what the point's value is: `bool` for `BOOL` or a bit, `str` for text, `int` for
+an integer that stays whole after scaling, `float` for any number, and an `IntEnum` for a number
+that names a state. Publish the keys with the model; they are how an application names the
+points, with their types.
+
+A mistake in a point, such as limits on a point that cannot be written, or a key type its
+registers cannot hold, raises `ValueError` when the point is created, naming every problem at
+once. A mistake between points, such as two
 overlapping, raises `ModelError` from `connect()`; test for it first, see
 [Testing a model](#testing-a-model).
 
 **Keys are forever.** Applications store them, for example in the ids of what they build. Choose them
-carefully, and never rename one.
+carefully, and never rename one. The names of a state's members are forever too: an
+application may show or store them.
 
 ## Where a value lives
 
@@ -334,7 +361,6 @@ device's documentation gives them.
 |---|---|
 | `data_type` | `UINT16` (the default), `INT16`, `UINT32`, `INT32`, `UINT64`, `INT64`, `FLOAT32`, `FLOAT64`, `BCD16`, `BCD32`, `BOOL` |
 | `DataType.bit(3)` | one bit of a register |
-| `DataType.enum({0: "off", 1: "heat"})` | a number that means a word |
 | `DataType.string(8)` | text over 8 registers |
 | `word_order`, `byte_order` | for values over several registers; high word and big-endian by default |
 | `scale`, `offset` | value = raw × scale + offset |
@@ -342,7 +368,9 @@ device's documentation gives them.
 | `transform` | a conversion after scaling, such as `Transforms.SECONDS_AS_MINUTES` |
 | `no_data`, `raw_range` | raw values that mean "no reading"; they read as `NO_DATA` |
 
-A `FLOAT32` or `FLOAT64` that reads NaN or infinity is `NO_DATA` by itself.
+A `FLOAT32` or `FLOAT64` that reads NaN or infinity is `NO_DATA` by itself. A point whose key
+is an `IntEnum` reads its number as that state; a number no state names is `NO_DATA`, and
+`.raw` still holds it.
 
 ## Units
 
@@ -396,7 +424,7 @@ they keep changing, for up to 30 s, for a device that moves slowly to a new valu
 ```python
 from modbus_event_connect.testing import measure_read_back
 
-measured = await measure_read_back(client, "target", (20.0, 21.0), delays=(1, 2, 3, 4, 5))
+measured = await measure_read_back(client, TARGET, (20.0, 21.0), delays=(1, 2, 3, 4, 5))
 print(measured)
 ```
 
@@ -421,7 +449,7 @@ device reported when connecting, plus any `identity_points` the model reads firs
 
 ```python
 Model(...,
-      identity_points=[Point("firmware", read=InputRegister(0), poll_rate=PollRate.STATIC)],
+      identity_points=[Point(Key("firmware", int), read=InputRegister(0), poll_rate=PollRate.STATIC)],
       sections=[Section(common_points),
                 Section(cooling_points, when=lambda identity: identity["firmware"] >= 20)])
 ```
@@ -438,9 +466,9 @@ connecting, finds out which ones this installation has:
 from modbus_event_connect import Instances, Labels, Scan
 
 def room(n):
-    return [Point(f"room_{n}_installed", read=InputRegister(100 + 10 * n),
+    return [Point(Key(f"room_{n}_installed", int), read=InputRegister(100 + 10 * n),
                   poll_rate=PollRate.STATIC),
-            Point(f"room_{n}_temperature", read=InputRegister(101 + 10 * n),
+            Point(Key(f"room_{n}_temperature", float), read=InputRegister(101 + 10 * n),
                   data_type=DataType.INT16, scale=0.1, unit=Unit.CELSIUS)]
 
 async def skip_empty_rooms(scan: Scan):
@@ -481,7 +509,7 @@ async def test_temperature_is_read():
                                    holding_registers={20: 210})
     client = Client(ModbusDevice(SimulatedModbusGateway({1: device})), THERMOSTAT)
     await client.connect()
-    assert client.value("temperature").value == 21.5
+    assert client.value(TEMPERATURE).value == 21.5
 ```
 
 `SimulatedModbusDevice` refuses an unknown address with exception 0x02, Illegal Data Address,
