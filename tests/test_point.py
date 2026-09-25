@@ -245,7 +245,7 @@ def test_no_data_needs_a_read_side() -> None:
     _refused("has no read side", write=HoldingRegister(1), no_data=(0xFFFF,))
 
 
-@pytest.mark.parametrize("data_type", [DataType.FLOAT32, DataType.string(2), DataType.BOOL])
+@pytest.mark.parametrize("data_type", [DataType.FLOAT32, DataType.string(2), DataType.bit(0)])
 def test_no_data_and_raw_range_compare_raw_integers_only(data_type: DataType) -> None:
     _refused("compare raw integers", read=HoldingRegister(1), data_type=data_type, no_data=(0,))
     _refused("compare raw integers", read=HoldingRegister(1), data_type=data_type, raw_range=(0, 1))

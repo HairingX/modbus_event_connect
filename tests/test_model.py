@@ -11,7 +11,7 @@ from src.modbus_event_connect._device import Identity
 from src.modbus_event_connect._errors import ModelError
 from src.modbus_event_connect._key import Key
 from src.modbus_event_connect._model import (
-    Instances,
+    RepeatedSection,
     Model,
     ModelSelector,
     Scan,
@@ -47,7 +47,7 @@ def _room(n: int) -> list[Point[Any]]:
 
 SENTIO_LIKE = Model(
     name="Sentio-like", manufacturer="Wavin",
-    sections=[Instances(_room, range(1, 25), label="room")], options=ModbusOptions(numbering=plain(first_address=1)), read_back_after=1.0
+    sections=[RepeatedSection(_room, range(1, 25), label="room")], options=ModbusOptions(numbering=plain(first_address=1)), read_back_after=1.0
 )
 
 
@@ -69,7 +69,7 @@ def test_select_by_label_returns_exactly_that_instance() -> None:
     assert {point.key for point in room3} == {"room_3_temp", "room_3_setpoint"}
 
 
-# ============================================================================ Section / Instances
+# ============================================================================ Section / RepeatedSection
 
 
 def test_a_section_accepts_any_sequence_and_stores_a_tuple() -> None:
@@ -80,7 +80,7 @@ def test_a_section_accepts_any_sequence_and_stores_a_tuple() -> None:
 
 
 def test_instances_accepts_any_iterable_and_stores_a_tuple() -> None:
-    instances = Instances(lambda n: [], (n for n in range(3)), label="x")
+    instances = RepeatedSection(lambda n: [], (n for n in range(3)), label="x")
     assert instances.numbers == (0, 1, 2)
     assert isinstance(instances.numbers, tuple)
 
@@ -178,7 +178,7 @@ def test_a_factory_that_raises_is_reported_with_its_instance_number() -> None:
             raise ValueError("unlucky")
         return [Point(Key(f"p_{n}", int), read=InputRegister(n), data_type=DataType.UINT16)]
 
-    model = Model(name="X", manufacturer="Y", sections=[Instances(flaky, [1, 2, 3], label="unit")], options=ModbusOptions(numbering=plain(first_address=1)), read_back_after=1.0)
+    model = Model(name="X", manufacturer="Y", sections=[RepeatedSection(flaky, [1, 2, 3], label="unit")], options=ModbusOptions(numbering=plain(first_address=1)), read_back_after=1.0)
     found = problems(model, {})
     assert len(found) == 1
     assert "instance 2" in found[0] and "factory raised" in found[0]
@@ -186,7 +186,7 @@ def test_a_factory_that_raises_is_reported_with_its_instance_number() -> None:
 
 def test_instance_numbers_must_be_unique() -> None:
     model = Model(name="X", manufacturer="Y",
-                  sections=[Instances(lambda n: [Point(Key(f"p_{n}", int), read=InputRegister(n), data_type=DataType.UINT16)],
+                  sections=[RepeatedSection(lambda n: [Point(Key(f"p_{n}", int), read=InputRegister(n), data_type=DataType.UINT16)],
                                      [1, 2, 2, 3], label="unit")], options=ModbusOptions(numbering=plain(first_address=1)), read_back_after=1.0)
     found = problems(model, {})
     assert any("instance number 2 appears 2 times" in msg for msg in found)
@@ -194,7 +194,7 @@ def test_instance_numbers_must_be_unique() -> None:
 
 def test_instance_label_must_not_be_empty() -> None:
     model = Model(name="X", manufacturer="Y",
-                  sections=[Instances(lambda n: [Point(Key(f"p_{n}", int), read=InputRegister(n), data_type=DataType.UINT16)],
+                  sections=[RepeatedSection(lambda n: [Point(Key(f"p_{n}", int), read=InputRegister(n), data_type=DataType.UINT16)],
                                      [1, 2], label="")], options=ModbusOptions(numbering=plain(first_address=1)), read_back_after=1.0)
     found = problems(model, {})
     assert any("label must not be empty" in msg for msg in found)
@@ -202,7 +202,7 @@ def test_instance_label_must_not_be_empty() -> None:
 
 def test_duplicate_keys_across_instances_are_reported() -> None:
     model = Model(name="X", manufacturer="Y",
-                  sections=[Instances(lambda n: [Point(Key("shared_key", int), read=InputRegister(n), data_type=DataType.UINT16)],
+                  sections=[RepeatedSection(lambda n: [Point(Key("shared_key", int), read=InputRegister(n), data_type=DataType.UINT16)],
                                      [1, 2], label="unit")], options=ModbusOptions(numbering=plain(first_address=1)), read_back_after=1.0)
     found = problems(model, {})
     assert any("duplicate key 'shared_key'" in msg and "2 times" in msg for msg in found)
@@ -212,7 +212,7 @@ def test_a_point_already_carrying_the_instance_label_with_a_different_value_is_a
     def conflicting(n: int) -> list[Point[Any]]:
         return [Point(Key(f"p_{n}", int), read=InputRegister(n), data_type=DataType.UINT16, labels={"unit": 999})]
 
-    model = Model(name="X", manufacturer="Y", sections=[Instances(conflicting, [1], label="unit")], options=ModbusOptions(numbering=plain(first_address=1)), read_back_after=1.0)
+    model = Model(name="X", manufacturer="Y", sections=[RepeatedSection(conflicting, [1], label="unit")], options=ModbusOptions(numbering=plain(first_address=1)), read_back_after=1.0)
     found = problems(model, {})
     assert any("already labeled unit=999" in msg for msg in found)
 

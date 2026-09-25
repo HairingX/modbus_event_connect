@@ -13,7 +13,7 @@ from src.modbus_event_connect._client import Client, Status
 from src.modbus_event_connect._data_type import DataType
 from src.modbus_event_connect._errors import CannotConnectError, InvalidValueError, ReadOnlyError
 from src.modbus_event_connect._key import Key
-from src.modbus_event_connect._model import Instances, Model, Section
+from src.modbus_event_connect._model import RepeatedSection, Model, Section
 from src.modbus_event_connect._point import Labels, Point, PollRate, Pulse, Refresh, WriteKind
 from src.modbus_event_connect._unit import Unit
 from src.modbus_event_connect._value import DataValue, Quality
@@ -85,7 +85,7 @@ MODEL = Model(
             Point(ALARM_1, read=DiscreteInput(2), data_type=DataType.BOOL, poll_rate=PollRate.STATIC, labels={"kind": "alarm"}),
             Point(ALARM_2, read=DiscreteInput(3), data_type=DataType.BOOL, poll_rate=PollRate.STATIC, labels={"kind": "alarm"}),
         ]),
-        Instances(_room, range(1, 4), label="room"),
+        RepeatedSection(_room, range(1, 4), label="room"),
     ], read_back_after=1.0
 )
 

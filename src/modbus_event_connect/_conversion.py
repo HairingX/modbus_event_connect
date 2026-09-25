@@ -47,6 +47,8 @@ def decode(point: Point[Any], registers: Sequence[int]) -> tuple[Value, Quality]
     data_type = point.data_type
     kind = data_type.kind
     if kind is DataTypeKind.BOOL:
+        if not _is_reading(point, registers[0]):
+            return (None, Quality.NO_DATA)
         return (registers[0] != 0, Quality.GOOD)
     if kind is DataTypeKind.BIT:
         assert data_type.bit_index is not None
@@ -66,7 +68,11 @@ def encode(point: Point[Any], value: object) -> EncodedWrite:
     data_type = point.data_type
     kind = data_type.kind
     if kind is DataTypeKind.BOOL:
-        return EncodedWrite(registers=(1,) if _as_bit_value(point, value) else (0,))
+        raw = 1 if _as_bit_value(point, value) else 0
+        if not _is_reading(point, raw):
+            raise InvalidValueError(f"point {point.key!r}: {value!r} encodes to {raw}, which this point reads "
+                                    f"as no data")
+        return EncodedWrite(registers=(raw,))
     if kind is DataTypeKind.BIT:
         assert data_type.bit_index is not None
         return EncodedWrite(bit_index=data_type.bit_index, bit_value=_as_bit_value(point, value))
@@ -219,6 +225,13 @@ def _decode_string(point: Point[Any], registers: Sequence[int]) -> tuple[Value, 
     raw_bytes = _string_bytes(registers, point.byte_order)
     cut = raw_bytes.split(b"\x00", 1)[0]
     return (cut.decode(data_type.encoding, errors="replace"), Quality.GOOD)
+
+
+def _is_reading(point: Point[Any], raw: int) -> bool:
+    """Whether `raw` is a reading, not one of the point's "no reading" values."""
+    if raw in point.no_data:
+        return False
+    return point.raw_range is None or point.raw_range[0] <= raw <= point.raw_range[1]
 
 
 def _bcd_unpack(combined: int, nibble_count: int) -> int | None:

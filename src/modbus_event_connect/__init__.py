@@ -15,7 +15,7 @@ from ._errors import (
 )
 from ._events import ValueCallback
 from ._key import Key
-from ._model import Instances, Model, ModelSelector, Scan, ScanStep, Section
+from ._model import Model, ModelSelector, RepeatedSection, Scan, ScanStep, Section
 from ._point import (
     Change,
     Labels,
@@ -46,7 +46,6 @@ __all__ = [
     "DataTypeKind",
     "DataValue",
     "Identity",
-    "Instances",
     "InvalidValueError",
     "Key",
     "Labels",
@@ -61,6 +60,7 @@ __all__ = [
     "Quality",
     "ReadOnlyError",
     "Refresh",
+    "RepeatedSection",
     "Scan",
     "ScanStep",
     "Section",

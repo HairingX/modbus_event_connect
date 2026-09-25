@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from .._device import Identity
-from .._model import Instances, Model, Section, problems, resolve
+from .._model import RepeatedSection, Model, Section, problems, resolve
 from .._point import Point
 
 _ROUND_TRIP_SAMPLES = (-7.5, -1.0, 0.0, 0.5, 1.0, 7.0, 60.0, 100.0, 1000.0)
@@ -44,16 +44,16 @@ def assert_models_valid(*models: Model, identities: Sequence[Identity]) -> None:
         raise AssertionError("\n".join(dict.fromkeys(findings)))
 
 
-def _includes(section: Section | Instances, identity: Identity) -> bool:
+def _includes(section: Section | RepeatedSection, identity: Identity) -> bool:
     try:
         return bool(section.when is None or section.when(identity))
     except Exception:
         return False            # reported by problems()
 
 
-def _label(index: int, section: Section | Instances) -> str:
-    if isinstance(section, Instances):
-        return f"sections[{index}] (Instances label={section.label!r})"
+def _label(index: int, section: Section | RepeatedSection) -> str:
+    if isinstance(section, RepeatedSection):
+        return f"sections[{index}] (RepeatedSection label={section.label!r})"
     return f"sections[{index}] (Section)"
 
 

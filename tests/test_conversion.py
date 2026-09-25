@@ -456,6 +456,33 @@ def test_a_state_can_be_a_signed_integer() -> None:
 # ==================================================================================== no_data / raw_range
 
 
+def _switch() -> Point[bool]:
+    """A 0/1 switch in a whole register, answering 255 when it has no value."""
+    return Point(Key("switch", bool), read=HoldingRegister(0), write=HoldingRegister(0), data_type=DataType.BOOL,
+                 raw_range=(0, 1))
+
+
+@pytest.mark.parametrize("raw,value", [(0, False), (1, True)])
+def test_a_bool_register_reads_its_values(raw: int, value: bool) -> None:
+    assert decode(_switch(), [raw]) == (value, Quality.GOOD)
+
+
+@pytest.mark.parametrize("raw", [255, 2])
+def test_a_bool_register_outside_its_raw_range_is_no_data(raw: int) -> None:
+    assert decode(_switch(), [raw]) == (None, Quality.NO_DATA)
+
+
+def test_a_bool_register_writes_zero_or_one() -> None:
+    assert (encode(_switch(), True).registers, encode(_switch(), False).registers) == ((1,), (0,))
+
+
+def test_a_bool_whose_value_is_its_no_data_sentinel_is_refused() -> None:
+    point = Point(Key("p", bool), read=HoldingRegister(0), write=HoldingRegister(0), data_type=DataType.BOOL,
+                  no_data=(0,))
+    with pytest.raises(InvalidValueError, match="no data"):
+        encode(point, False)
+
+
 def test_no_data_sentinel_reads_as_no_data() -> None:
     point = Point(Key("p", int), read=InputRegister(0), write=HoldingRegister(0), data_type=DataType.INT16, no_data=(0x7FFF,))
     assert decode(point, [0x7FFF]) == (None, Quality.NO_DATA)

@@ -26,7 +26,7 @@ from src.modbus_event_connect._errors import (
     UnsupportedDeviceError,
 )
 from src.modbus_event_connect._key import Key
-from src.modbus_event_connect._model import Instances, Model, Scan, Section
+from src.modbus_event_connect._model import RepeatedSection, Model, Scan, Section
 from src.modbus_event_connect._point import (
     Change,
     Labels,
@@ -184,7 +184,7 @@ MODEL = Model(
     name="TEST", manufacturer="TEST",
     identity_points=IDENTITY,
     sections=[Section(BASE), Section(COOLING, when=_has_cooling),
-            Instances(_room, range(1, 4), label="room")],
+            RepeatedSection(_room, range(1, 4), label="room")],
     scan_steps=[_no_rooms_missing],
     options=OPTIONS, read_back_after=1.0
 )

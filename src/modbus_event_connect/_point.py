@@ -218,9 +218,11 @@ class Point[T]:
     """
     transform: Transform | None = None
     no_data: Collection[int] = ()
-    """Raw values meaning "no reading" - a missing sensor answering 0x7FFF, for instance."""
+    """Raw values meaning "no reading" - a missing sensor answering 0x7FFF, for instance.
+
+    For an integer, or a BOOL register: a switch that answers 255 for no value, say."""
     raw_range: tuple[int, int] | None = None
-    """Raw values outside this range read as no data."""
+    """Raw values outside this range read as no data; for an integer or a BOOL register."""
     limits: Limits | None = None
     unit: Unit | None = None
     poll_rate: PollRate = PollRate.MEDIUM
@@ -363,7 +365,7 @@ def _read_problems(point: Point[Any]) -> list[str]:
     if point.no_data or point.raw_range is not None:
         if not point.readable:
             found.append("no_data and raw_range describe reads, but it has no read side")
-        if not data_type.is_integer:
+        if not data_type.is_integer and data_type.kind is not DataTypeKind.BOOL:
             found.append(f"no_data and raw_range compare raw integers, not {data_type!r}"
                          + (" (a float reads NaN and infinity as no data by itself)"
                             if data_type.is_float else ""))

@@ -366,7 +366,7 @@ device's documentation gives them.
 | `scale`, `offset` | value = raw × scale + offset |
 | `precision` | decimals to round to; by default, enough for `scale` and `offset` |
 | `transform` | a conversion after scaling, such as `Transforms.SECONDS_AS_MINUTES` |
-| `no_data`, `raw_range` | raw values that mean "no reading"; they read as `NO_DATA` |
+| `no_data`, `raw_range` | raw values that mean "no reading", of an integer or a `BOOL` register; they read as `NO_DATA` |
 
 A `FLOAT32` or `FLOAT64` that reads NaN or infinity is `NO_DATA` by itself. A point whose key
 is an `IntEnum` reads its number as that state; a number no state names is `NO_DATA`, and
@@ -463,7 +463,7 @@ A device with rooms, zones or channels describes one of them once. A scan step, 
 connecting, finds out which ones this installation has:
 
 ```python
-from modbus_event_connect import Instances, Labels, Scan
+from modbus_event_connect import RepeatedSection, Labels, Scan
 
 def room(n):
     return [Point(Key(f"room_{n}_installed", int), read=InputRegister(100 + 10 * n),
@@ -479,7 +479,7 @@ async def skip_empty_rooms(scan: Scan):
 
 HEATING = Model(name="Heating", manufacturer="Example",
                 options=ModbusOptions(numbering=plain(first_address=1)), read_back_after=2.0,
-                sections=[Instances(room, range(1, 9), label="room")],
+                sections=[RepeatedSection(room, range(1, 9), label="room")],
                 scan_steps=[skip_empty_rooms])
 ```
 

@@ -289,8 +289,8 @@ SENTIO = Model(
     read_back_after=1.0,
     sections=[
         Section(BASE_POINTS),
-        Instances(room, range(1, 25), label="room"),           # 24 rooms from one definition
-        Instances(peripheral, range(1, 33), label="peripheral"),
+        RepeatedSection(room, range(1, 25), label="room"),     # 24 rooms from one definition
+        RepeatedSection(peripheral, range(1, 33), label="peripheral"),
     ],
     scan_steps=[probe_rooms, probe_peripherals],
 )
@@ -309,7 +309,7 @@ NILAN = Model(
 
 (Addresses and names here are illustrative.)
 
-`room(n)` is an ordinary function, so a model can loop, branch and compute. `Instances` calls it
+`room(n)` is an ordinary function, so a model can loop, branch and compute. `RepeatedSection` calls it
 for each number and labels every point with its instance, which is what lets the library:
 
 - remove a whole instance in one call (4.3),

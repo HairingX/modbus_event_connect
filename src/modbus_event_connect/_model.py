@@ -30,8 +30,8 @@ class Section:
 
 
 @dataclass(frozen=True)
-class Instances:
-    """A section repeated once per number, labeling every point it produces with `{label: n}`."""
+class RepeatedSection:
+    """A section repeated once per number: `factory(n)` gives its points, each labelled `{label: n}`."""
     factory: Callable[[int], Sequence[Point[Any]]]
     numbers: tuple[int, ...]
     label: str
@@ -72,7 +72,7 @@ class Model:
     """A device, as data: sections of points, identity points, scan steps and protocol options."""
     name: str
     manufacturer: str
-    sections: tuple[Section | Instances, ...]
+    sections: tuple[Section | RepeatedSection, ...]
     options: ProtocolOptions
     """How the device is reached, in its protocol's terms."""
     read_back_after: float
@@ -83,7 +83,7 @@ class Model:
     poll_intervals: Mapping[PollRate, float | None] = DEFAULT_INTERVALS
     min_poll_interval: float = 0.0
 
-    def __init__(self, name: str, manufacturer: str, sections: Sequence[Section | Instances], *,
+    def __init__(self, name: str, manufacturer: str, sections: Sequence[Section | RepeatedSection], *,
                  options: ProtocolOptions, read_back_after: float,
                  identity_points: Sequence[Point[Any]] = (), scan_steps: Sequence[ScanStep] = (),
                  poll_intervals: Mapping[PollRate, float | None] = DEFAULT_INTERVALS,
@@ -151,10 +151,10 @@ class _Resolution:
     """Parallel to `model.sections`: whether each section's `when` applied for this identity."""
 
 
-def _section_label(index: int, section: Section | Instances) -> str:
+def _section_label(index: int, section: Section | RepeatedSection) -> str:
     """Names a section in a problem message - there is no other identifier for one."""
-    if isinstance(section, Instances):
-        return f"sections[{index}] (Instances label={section.label!r})"
+    if isinstance(section, RepeatedSection):
+        return f"sections[{index}] (RepeatedSection label={section.label!r})"
     return f"sections[{index}] (Section)"
 
 
@@ -222,8 +222,8 @@ def _resolve(model: Model, identity: Identity) -> _Resolution:
         applies = _applies(section, identity, label, problems)
         if not applies:
             continue
-        if isinstance(section, Instances):
-            produced, numbers = _expand_instances(section, label, problems)
+        if isinstance(section, RepeatedSection):
+            produced, numbers = _expand_repeated(section, label, problems)
             all_points.extend(produced)
             if section.label:
                 instances[section.label] = numbers
@@ -256,7 +256,7 @@ def _model_problems(model: Model) -> list[str]:
     return problems
 
 
-def _applies(section: Section | Instances, identity: Identity, label: str, problems: list[str]) -> bool:
+def _applies(section: Section | RepeatedSection, identity: Identity, label: str, problems: list[str]) -> bool:
     try:
         return bool(section.when is None or section.when(identity))
     except Exception as err:
@@ -264,7 +264,7 @@ def _applies(section: Section | Instances, identity: Identity, label: str, probl
         return False
 
 
-def _expand_instances(section: Instances, label: str, problems: list[str]) -> tuple[list[Point[Any]], tuple[int, ...]]:
+def _expand_repeated(section: RepeatedSection, label: str, problems: list[str]) -> tuple[list[Point[Any]], tuple[int, ...]]:
     """Every instance's points, labeled with its number, and the numbers whose factory succeeded."""
     if not section.label:
         problems.append(f"{label}: the label must not be empty")
