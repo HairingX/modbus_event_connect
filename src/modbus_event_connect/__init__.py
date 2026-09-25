@@ -33,7 +33,7 @@ from ._unit import Unit
 from ._value import DataValue, Quality
 from ._writes import Write
 
-__version__ = "0.2.0rc1"
+__version__ = "0.1.9"
 __all__ = [
     "AuthenticationError",
     "ByteOrder",
