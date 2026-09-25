@@ -37,5 +37,28 @@ obvious from the name - one or two lines, no narrative.
   never in the modules that run in production.
 - Live tests (`tests/test_live_*.py`) only read, and skip themselves unless a device is
   configured. CI runs `pytest -m "not live"`.
+- Test tools are pinned in `requirements-test.txt`: `pip install -e . -r requirements-test.txt`.
 - No real IP addresses, hostnames or email addresses in tracked files; real values live in the
   gitignored `mysecrets.py` or in environment variables.
+
+## Releasing
+
+**Never edit the version by hand, and never publish the draft release by hand.** Publishing the
+draft creates the tag at whatever `main` points to, before the version is set; every tag of
+`modbus_event_connect` up to `v0.1.8` carries the previous version for that reason.
+
+1. Merge pull requests into `main`. Release Drafter keeps a draft release with their notes and
+   the next version, from the labels `major`, `minor` or `patch` (no label: patch).
+2. Run the **Release** workflow from the Actions tab, on `main`. Leave the version empty to take
+   the draft's, or type one: canonical PEP 440, `MAJOR.MINOR.PATCH` with an optional
+   pre-release, such as `0.2.0rc1`.
+
+Release refuses a version already tagged or on PyPI, runs the tests on the commit it releases,
+sets `__version__`, builds, installs the wheel and checks that `__version__` and the metadata
+say the version, and only then pushes the version commit and the tag together - a fast-forward
+of `main` from the tested commit, refused if `main` moved. Then PyPI, then the GitHub release,
+marked as a pre-release where it is one.
+
+PyPI trusted publishing is bound to this repository, the file `release.yml` and the `pypi`
+environment: renaming either breaks the upload. Actions are pinned to commit SHAs; Dependabot
+proposes updates to them and to the test tools as pull requests.
