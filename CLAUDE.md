@@ -60,5 +60,5 @@ of `main` from the tested commit, refused if `main` moved. Then PyPI, then the G
 marked as a pre-release where it is one.
 
 PyPI trusted publishing is bound to this repository, the file `release.yml` and the `pypi`
-environment: renaming either breaks the upload. Actions are pinned to commit SHAs; Dependabot
-proposes updates to them and to the test tools as pull requests.
+environment: renaming either breaks the upload. Actions are referred to by their major version;
+Dependabot proposes a new major, and updates to the test tools, as pull requests.
