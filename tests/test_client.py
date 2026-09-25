@@ -672,6 +672,33 @@ def test_a_write_is_read_back_after_its_delay() -> None:
     assert relay is not None and relay.value is True
 
 
+def test_what_the_scan_read_is_not_read_again() -> None:
+    async def first(scan: Scan) -> None:
+        await scan.read(["a", "gone"])
+
+    async def second(scan: Scan) -> None:
+        found = await scan.read(["a", "b"])
+        assert found["a"].value == 1, "a later step gets what an earlier one read"
+    points = [Point(key, read=InputRegister(n)) for n, key in enumerate(("a", "b", "c", "gone"), 1)]
+    model = Model(name="S", manufacturer="S", sections=[Section(points)], scan_steps=[first, second],
+                  options=OPTIONS, read_back_after=1.0)
+    device = FakeDevice({"a": (1,), "b": (2,), "c": (3,)})
+    client = Client(device, model, clock=FakeClock())
+    asyncio.run(client.connect())
+    assert sorted(key for batch in device.reads for key in batch) == ["a", "b", "c", "gone"]
+    assert {key: value.value for key, value in client.values.items()} == {"a": 1, "b": 2, "c": 3}
+    assert "gone" in client.unavailable_reasons
+
+
+def test_values_holds_only_keys_the_unit_has() -> None:
+    registers = {k: v for k, v in REGISTERS.items() if k != "counter"}
+    client, _, _ = _connected(registers)
+    assert "counter" not in client.keys and "counter" not in client.values
+    missing = client.value("counter")
+    assert missing is not None and missing.quality is Quality.MISSING
+    assert set(client.values) <= set(client.keys)
+
+
 def test_a_point_with_its_own_read_back_delay_is_read_back_after_it() -> None:
     slow = Point("slow", read=HoldingRegister(60), write=HoldingRegister(60), read_back_after=5.0)
     model = Model(name="S", manufacturer="S", sections=[Section([slow])], options=OPTIONS, read_back_after=1.0)

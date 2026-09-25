@@ -135,16 +135,18 @@ class Client:
         answers = _ScanAnswers()
         try:
             resolved = resolve(model, await self._identify(model, handshake, answers))
-            unavailable = await self._run_scan_steps(model, resolved, answers)
-            first = [p for p in resolved.points.values() if p.readable and p.key not in unavailable]
-            first_answers: Mapping[str, ReadResult] = await self._device.read(first) if first else {}
+            scanned: dict[str, ReadResult] = {}
+            unavailable = await self._run_scan_steps(model, resolved, answers, scanned)
+            readable = [p for p in resolved.points.values() if p.readable and p.key not in unavailable]
+            unread = [p for p in readable if p.key not in scanned]
+            first_answers: Mapping[str, ReadResult] = await self._device.read(unread) if unread else {}
             answers.note(first_answers.values())
             answers.require_all_answered()
         except CannotConnectError:
             self._update_reachability(answers.any_answered)
             raise
         self._commit(model, resolved, unavailable)
-        self._publish(first, first_answers)
+        self._publish(readable, {**scanned, **first_answers})
 
     async def _identify(self, model: Model, handshake: Identity, answers: _ScanAnswers) -> Identity:
         """The handshake's identity, with what the model's identity points read added to it."""
@@ -159,16 +161,24 @@ class Client:
                     identity[point.key] = data.value
         return identity
 
-    async def _run_scan_steps(self, model: Model, resolved: ResolvedModel,
-                              answers: _ScanAnswers) -> dict[str, str]:
-        """What the model's scan steps find missing, key by key with the reason."""
+    async def _run_scan_steps(self, model: Model, resolved: ResolvedModel, answers: _ScanAnswers,
+                              scanned: dict[str, ReadResult]) -> dict[str, str]:
+        """What the model's scan steps find missing, key by key with the reason.
+
+        Every answer they get is kept in `scanned`, and a point is read at most once.
+        """
         unavailable: dict[str, str] = {}
 
         async def read(targets: Selector | Sequence[str]) -> Mapping[str, DataValue]:
             points = [p for p in _select(resolved, targets) if p.readable]
-            raw = await self._device.read(points)
-            answers.note(raw.values())
-            return {p.key: self._data_value(p, raw[p.key], previous=None) for p in points}
+            unread = [p for p in points if p.key not in scanned]
+            raw: Mapping[str, ReadResult] = {}
+            if unread:
+                raw = await self._device.read(unread)
+                answers.note(raw.values())
+                scanned.update((key, answer) for key, answer in raw.items() if answer.outcome not in _UNANSWERED)
+            return {p.key: self._data_value(p, scanned[p.key] if p.key in scanned else raw[p.key], previous=None)
+                    for p in points}
 
         def mark(targets: Selector | Sequence[str], available: bool, reason: str) -> None:
             _record_availability(unavailable, _select(resolved, targets), available, reason)
@@ -251,7 +261,8 @@ class Client:
 
     @property
     def values(self) -> Mapping[str, DataValue]:
-        return dict(self._values)
+        """The current value of each key this unit has, among those read."""
+        return {key: value for key, value in self._values.items() if self._is_available(key)}
 
     @property
     def connected(self) -> bool:
@@ -522,7 +533,10 @@ class _ScanContext:
         return self._identity
 
     async def read(self, targets: Selector | Sequence[str]) -> Mapping[str, DataValue]:
-        """Read the selected points now. Nothing is stored and nobody is notified."""
+        """Read the selected points; one this scan has read already is not read again.
+
+        Nobody is notified until the whole scan has been answered.
+        """
         return await self._read(targets)
 
     def set_available(self, targets: Selector | Sequence[str], available: bool, *,

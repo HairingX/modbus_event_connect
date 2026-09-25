@@ -233,11 +233,13 @@ class ModbusDevice:
         answer = await self._exchange(Request(self._unit, function, batch.start,
                                               count=batch.end - batch.start))
         if answer.outcome is Outcome.MISSING and len(batch.spans) > 1:
-            # One absent address refuses the whole request. Read each span alone, so only the
-            # points that really are missing are reported so.
-            for span, points in batch.spans.items():
-                alone = await self._exchange(Request(self._unit, function, span.start, count=span.count))
-                _deliver(function, _Batch(span.start, span.end, {span: points}), alone, result)
+            # One absent address refuses the whole request. Halving it until the refusal is
+            # pinned down finds a few absent addresses among many in few requests.
+            ordered = sorted(batch.spans, key=lambda s: (s.start, s.count))
+            middle = len(ordered) // 2
+            for half in (ordered[:middle], ordered[middle:]):
+                for part in _batches({span: batch.spans[span] for span in half}, batch.end - batch.start):
+                    await self._read_batch(function, part, result)
             return
         _deliver(function, batch, answer, result)
 

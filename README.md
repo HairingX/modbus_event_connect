@@ -492,8 +492,7 @@ target: read back after a write
 
 It writes to the device, so use a client that is not read-only, on a device you may change. It
 writes the point's old value back at the end. Before each measured write it writes the other
-value and waits the longest delay, so a late earlier write cannot pass for a quick one; with
-the defaults it takes about two minutes.
+value and waits the longest delay, so a late earlier write cannot pass for a quick one.
 
 ## Variants of a device
 

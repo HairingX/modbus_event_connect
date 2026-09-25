@@ -263,7 +263,14 @@ async def test_a_refused_batch_is_re_read_so_only_the_missing_point_is_missing(
     result = await rig.device.read([Point(f"p{a}", read=access(a), data_type=data_type) for a in (10, 11, 12)])
     assert outcomes(result) == {"p10": Outcome.OK, "p11": Outcome.MISSING, "p12": Outcome.OK}
     assert result["p10"] == ok(1) and result["p11"].exception_code == 0x02
-    assert [(a, c) for _, a, c in rig.sent()] == [(10, 3), (10, 1), (11, 1), (12, 1)]
+    assert [(a, c) for _, a, c in rig.sent()] == [(10, 3), (10, 1), (11, 2), (11, 1), (12, 1)]
+
+
+async def test_one_absent_address_among_many_is_found_in_few_requests() -> None:
+    rig = Rig(SimulatedModbusDevice(holding_registers={a: a for a in range(32) if a != 21}))
+    result = await rig.device.read([u16(f"p{a}", HoldingRegister(a)) for a in range(32)])
+    assert [k for k, r in result.items() if r.outcome is Outcome.MISSING] == ["p21"]
+    assert len(rig.sent()) <= 1 + 2 * 5, "halving: two reads per level of five"
 
 
 async def test_points_sharing_a_refused_span_share_its_re_read() -> None:

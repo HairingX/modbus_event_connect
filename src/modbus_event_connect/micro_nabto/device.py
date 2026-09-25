@@ -191,11 +191,12 @@ class MicroNabtoDevice:
             raw = ReadResult(Outcome.MISSING, detail=f"{batch.space.__name__} {items[0][1]}: refused by the device")
         self._outcomes[raw.outcome] += 1
         if raw.outcome is Outcome.MISSING and len(batch.points) > 1:
-            # A Nilan CTS 402 refuses a whole request for one absent address; alone, each point
-            # shows whether it is the one.
+            # A Nilan CTS 402 refuses a whole request for one absent address. Halving it until
+            # the refusal is pinned down finds a few absent addresses among many in few requests.
             self._isolated += 1
-            for point in batch.points:
-                await self._read_batch(_Batch(batch.space, batch.obj, (point,)), result)
+            middle = len(batch.points) // 2
+            for half in (batch.points[:middle], batch.points[middle:]):
+                await self._read_batch(_Batch(batch.space, batch.obj, half), result)
             return
         for point in batch.points:
             result[point.key] = raw

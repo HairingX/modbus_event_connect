@@ -311,7 +311,7 @@ connect()
   2  identity             — from the handshake (Nilan) or by reading the identity points
   3  resolve sections     — keep the sections whose `when` matches the identity
   4  scan steps           — the model's own probes, in its order (Sentio: which rooms exist)
-  5  first read           — everything due; MISSING outcomes recorded as unavailable
+  5  first read           — everything the scan steps have not read; MISSING recorded as unavailable
   6  return               — the key list is final; the consumer builds its entities now
 ```
 
@@ -325,9 +325,11 @@ There is no address-level bootstrap: a model is chosen from the handshake or fro
 identity points, and every step after that speaks in keys, so the register map is stated once.
 
 **Scan steps** are declared by the model and run in its order. Each gets a `Scan`: the
-identity, `read()` — which asks the device and neither stores nor notifies, so a rescan cannot
-cause a storm of events — and `set_available()`. A step marks what this unit lacks; it never
-treats an unanswered read as a missing register, since silence is not an answer.
+identity, `read()` — which asks the device for what this scan has not read yet, and notifies
+no one until the scan is committed, so a rescan cannot cause a storm of events — and
+`set_available()`. What the steps read is kept for the scan: a later step gets it without a
+request, and the first read (5) skips it. A step marks what this unit lacks; it never treats
+an unanswered read as a missing register, since silence is not an answer.
 
 `rescan()` runs 2–5 again on the open connection: availability is found afresh, the connection
 and the subscriptions are left alone. If a read goes unanswered it raises, and the current
@@ -648,8 +650,8 @@ blinds  = BlindClient(gateway, unit_id=3)
   timeouts do not starve every other device on the bus. On a shared RS-485 bus this is what
   keeps one dead fan from freezing the lights.
 
-A 9600-baud bus spends about 80 ms on a 32-register read, and every device behind the gateway
-shares that time. This is where poll rates (5.2) stop being an optimisation and become necessary.
+Every device behind a gateway shares its bus, and each request occupies it for all of them. On
+a slow serial bus this is where poll rates (5.2) stop being an optimisation and become necessary.
 
 **micro_nabto** is one device per UDP session, with no gateway to share. Where each fact below
 comes from is stated: uNabto's reference implementation
@@ -668,8 +670,9 @@ CTS 402 — which other devices may not share.
   even length); a damaged one counts as lost. The CTS 402 sends a packet without an answer
   ahead of every answer; any such packet is ignored.
 - **One unknown address refuses a whole read** on the CTS 402, answered with a count of 0.
-  A refused read is split point by point, as Modbus 0x02 is; any count that does not match
-  is treated the same way, so a device that answers differently is not misread.
+  A refused read is halved until the refusal is pinned down, as Modbus 0x02 is; any count
+  that does not match is treated the same way, so a device that answers differently is not
+  misread.
 - A setpoint write is sent without waiting for a confirmation; the read-back (7) shows whether
   it took.
 
@@ -708,7 +711,7 @@ A library that gets these wrong is worse than none.
 | `0x06`: busy | retried four times, the wait doubling from 0.2 s, then `BUSY` |
 | `0x0B`: the gateway's device did not answer | `NO_ANSWER`, counted towards backoff |
 | No answer at all | `NO_ANSWER`; the value goes `STALE`; reachability follows answers, never the socket |
-| One bad address refuses a whole request | the request is read again span by span |
+| One bad address refuses a whole request | the request is halved until the refusal is pinned down: a few absent addresses among many cost few requests, though a request where every address is absent costs about twice as many as reading each alone |
 | Devices accept different request sizes | `max_registers` / `max_bits` per model |
 | Four address spaces | one access class each; never batched together |
 | Word order and byte order | per point |

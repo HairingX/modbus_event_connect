@@ -124,7 +124,16 @@ async def test_an_address_the_device_lacks_is_missing_and_the_rest_are_still_rea
         assert [answers[k].outcome for k in ("dp_0_1", "dp_0_999", "dp_0_2")] == \
                [Outcome.OK, Outcome.MISSING, Outcome.OK]
         assert [c.items for c in simulated.received(DATAPOINT_READ)] == [
-            ((0, 1), (0, 999), (0, 2)), ((0, 1),), ((0, 999),), ((0, 2),)]
+            ((0, 1), (0, 999), (0, 2)), ((0, 1),), ((0, 999), (0, 2)), ((0, 999),), ((0, 2),)]
+
+
+async def test_one_absent_address_among_many_is_found_in_few_requests() -> None:
+    async with _simulated() as simulated:
+        device = await _connected(simulated)
+        before = len(simulated.received(DATAPOINT_READ))
+        answers = await device.read([_dp(a) for a in range(1, 32)] + [_dp(999)])
+        assert [k for k, r in answers.items() if r.outcome is Outcome.MISSING] == ["dp_0_999"]
+        assert len(simulated.received(DATAPOINT_READ)) - before <= 1 + 2 * 5, "halving: two reads per level of five"
 
 
 async def test_a_read_is_split_at_max_points() -> None:
