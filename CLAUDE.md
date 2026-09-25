@@ -64,3 +64,12 @@ marked as a pre-release where it is one.
 PyPI trusted publishing is bound to this repository, the file `release.yml` and the `pypi`
 environment: renaming either breaks the upload. Actions are referred to by their major version;
 Dependabot proposes a new major, and updates to the test tools, as pull requests.
+
+## Branches and pull requests
+
+- Name every branch by the kind of change, as the release draft's labels follow the name:
+  `feature/<what>` is labelled `feature request`, `fix/<what>` is labelled `bug`, and
+  `chore/<what>` - CI, tooling, documentation - is labelled `chore`.
+- A pull request's text describes only its own change: what it does and how it was tested. Never
+  releases to come, merge order, or other repositories.
+- Put `major` or `minor` on a pull request that needs that bump; a patch is the default.
