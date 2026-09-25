@@ -1,111 +1,121 @@
+"""Read-only tests of the Modbus TCP transport against a real device.
+
+    Configure it either way:
+        set MODBUS_TCP_HOST=<device-ip>          (environment variable)
+        MODBUS_TCP_HOST = "<device-ip>"          (in mysecrets.py, which is gitignored)
+
+    Optional:
+        MODBUS_TCP_PORT      default 502
+        MODBUS_TCP_UNIT_ID   default 1
+
+    Run:
+        pytest tests/test_live_modbus_tcp.py -v -s
+
+NOTHING HERE WRITES TO THE DEVICE: the model has no write side, the client is read-only, and
+any request that is not a read fails the test before it is sent.
+
+The addresses are a Wavin Sentio's. On another device, expect MISSING where it has none.
+"""
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import Any
-import logging
+
 import pytest
 import pytest_asyncio
-from datetime import UTC, datetime
 
 from conftest import live_or_skip, live_setting
+from src.modbus_event_connect.client import Client
+from src.modbus_event_connect.data_type import DataType
+from src.modbus_event_connect.device import Outcome
+from src.modbus_event_connect.modbus.access import (
+    HoldingRegister,
+    InputRegister,
+    ModbusOptions,
+    plain,
+)
+from src.modbus_event_connect.modbus.connection import ModbusTcpConnection, Request, Response
+from src.modbus_event_connect.modbus.device import ModbusDevice
+from src.modbus_event_connect.model import Model, Section
+from src.modbus_event_connect.point import Point
+from src.modbus_event_connect.value import Quality
 
-from src.modbus_event_connect.constants import ValueLimit
-from src.modbus_event_connect import MODBUS_VALUE_TYPES, ModbusPointKey
-from models.modbus_tcp_test_models import ModbusTestDatapointKey, ModbusTestSetpointKey, ModbusTestTCP
-import asyncio
-
-_LOGGER = logging.getLogger(__name__)
-
-# The client holds one socket bound to the loop it was opened on, so the fixture and every
-# test that uses it must share a single event loop. Without this each test gets a fresh loop
-# and its requests are never completed by the loop the socket belongs to.
 HOST = live_setting("MODBUS_TCP_HOST")
 PORT = int(live_setting("MODBUS_TCP_PORT") or "502")
+UNIT_ID = int(live_setting("MODBUS_TCP_UNIT_ID") or "1")
 
 pytestmark = [
-    pytest.mark.asyncio(loop_scope="session"),
+    pytest.mark.asyncio(loop_scope="module"),
     *live_or_skip("Modbus TCP", MODBUS_TCP_HOST=HOST),
 ]
 
+LIVE_MODEL = Model(name="live", manufacturer="any", sections=[Section([
+    Point("u16", read=InputRegister(1), data_type=DataType.UINT16),
+    Point("s16_scaled", read=InputRegister(104), data_type=DataType.INT16, scale=0.01, no_data=(0x7FFF,)),
+    Point("text", read=HoldingRegister(10), data_type=DataType.string(16)),
+    Point("u32", read=HoldingRegister(28), data_type=DataType.UINT32),
+])], options=ModbusOptions(numbering=plain(first_address=1)), read_back_after=1.0)
+
+
 @dataclass
-class TestData:
-    client: ModbusTestTCP
-    data = dict[str, Any]()
+class Live:
+    client: Client
+    device: ModbusDevice
 
-@pytest_asyncio.fixture(scope="session", loop_scope="session")  # pyright: ignore[reportUntypedFunctionDecorator, reportUnknownMemberType]
-async def testdata() -> AsyncGenerator[TestData, None]:
-    #setup
-    assert HOST is not None   # guarded by the skipif above
-    client = ModbusTestTCP()
-    await client.connect("DEVICE_ID", HOST, port=PORT)
-    #
-    yield TestData(client=client)
-    #teardown
-    await client.stop()
 
-async def test_connect(testdata: TestData):
-    client = testdata.client
-    assert client.is_connected
-    assert client.get_value(ModbusTestDatapointKey.MAJOR_VERSION) is not None
+@pytest_asyncio.fixture(scope="module", loop_scope="module")  # pyright: ignore[reportUntypedFunctionDecorator, reportUnknownMemberType]
+async def live() -> AsyncGenerator[Live, None]:
+    assert HOST is not None   # guarded by the skip above
+    connection = ModbusTcpConnection(HOST, PORT)
+    read = connection.request
 
-async def test_request_setpoint_value_type_bigint(testdata: TestData):
-    key = ModbusTestSetpointKey.DATETIME
-    client = testdata.client
-    event = asyncio.Event()
-    def callback(key: ModbusPointKey, oldval:MODBUS_VALUE_TYPES|None, newval:MODBUS_VALUE_TYPES|None):
-        _LOGGER.debug(f"{key}: {oldval if oldval is not None else 'None'} -> {newval if newval is not None else 'None'}")
-        event.set()
-    client.subscribe(key, callback)
-    await client.request_setpoint_read()
-    assert await asyncio.wait_for(event.wait(), 5)
-    value = client.get_value(key)
-    assert value is not None
-    assert isinstance(value, int)
-    assert value > ValueLimit.INT16_MAX, f"Expected value greater than {ValueLimit.INT16_MAX}, got {value}"
-    _LOGGER.debug(f"fromtimestamp(UTC): {datetime.fromtimestamp(value, UTC)}")
-    
-async def test_request_setpoint_value_type_int(testdata: TestData):
-   pass # no need, MAJOR_VERSION is an int, and is already tested in test_connect
+    async def only_reads(request: Request) -> Response:
+        if not request.function.is_read:
+            raise AssertionError("a write was attempted; these tests are read-only")
+        return await read(request)
+    setattr(connection, "request", only_reads)
+    device = ModbusDevice(connection, UNIT_ID, owns_connection=True)
+    client = Client(device, LIVE_MODEL, read_only=True)
+    try:
+        await client.connect()
+    except Exception as err:
+        pytest.fail(f"Could not bring up the device (unit id {UNIT_ID}): {err!r}\n"
+                    f"  - Is Modbus TCP enabled on the device?\n"
+                    f"  - Some devices answer on unit id 255: set MODBUS_TCP_UNIT_ID=255")
+    yield Live(client, device)
+    await client.disconnect()
 
-async def test_request_point_value_type_float(testdata: TestData):
-    key = ModbusTestDatapointKey.TEMPERATURE
-    client = testdata.client
-    event = asyncio.Event()
-    def callback(key: ModbusPointKey, oldval:MODBUS_VALUE_TYPES|None, newval:MODBUS_VALUE_TYPES|None):
-        _LOGGER.debug(f"{key}: {oldval if oldval is not None else 'None'} -> {newval if newval is not None else 'None'}")
-        event.set()
-    client.subscribe(key, callback)
-    await client.request_datapoint_read()
-    assert await asyncio.wait_for(event.wait(), 5)
-    value = client.get_value(key)
-    assert value is not None
-    assert isinstance(value, float), f"Expected float, got {type(value)} (value = {value})"
-    
-async def test_request_point_value_type_utf8(testdata: TestData):
-    key = ModbusTestSetpointKey.LOCATION_NAME
-    client = testdata.client
-    event = asyncio.Event()
-    def callback(key: ModbusPointKey, oldval:MODBUS_VALUE_TYPES|None, newval:MODBUS_VALUE_TYPES|None):
-        _LOGGER.debug(f"{key}: {oldval if oldval is not None else 'None'} -> {newval if newval is not None else 'None'}")
-        event.set()
-    client.subscribe(key, callback)
-    await client.request_setpoint_read()
-    assert await asyncio.wait_for(event.wait(), 5)
-    value = client.get_value(key)
-    assert value is not None
-    assert isinstance(value, str)
-    
 
-# async def test_request_datapoint_data_invalid_address(testdata: TestData):
-#     client = testdata.client
-#     event1 = asyncio.Event()
-#     event2 = asyncio.Event()
-#     events = {ModbusTestDatapointKey.INVALID: event1, ModbusTestDatapointKey.TEMPERATURE: event2}
-#     def callback(key: ModbusPointKey, oldval:MODBUS_VALUE_TYPES|None, newval:MODBUS_VALUE_TYPES|None):
-#         _LOGGER.debug(f"{key}: {oldval if oldval is not None else 'None'} -> {newval if newval is not None else 'None'}")
-#         if key in events: events[key].set()
-#     client.subscribe(ModbusTestDatapointKey.INVALID, callback)
-#     client.subscribe(ModbusTestDatapointKey.TEMPERATURE, callback)
-#     await client.request_datapoint_data()
-#     await asyncio.wait_for(asyncio.gather(event1.wait(), event2.wait()), 15)
-#     assert client.get_value(ModbusTestDatapointKey.INVALID) is None
-#     assert client.get_value(ModbusTestDatapointKey.TEMPERATURE) is not None
+def _good(client: Client, key: str) -> object:
+    current = client.value(key)
+    assert current is not None and current.quality is Quality.GOOD, f"{key}: {current}"
+    print(f"  {key}: {current.value!r}")
+    return current.value
+
+
+async def test_nothing_here_can_be_written(live: Live) -> None:
+    assert not any(live.client.can_write(k) for k in live.client.keys)
+
+
+async def test_a_register_reads_as_an_integer(live: Live) -> None:
+    assert isinstance(_good(live.client, "u16"), int)
+
+
+async def test_a_signed_scaled_register_reads_as_a_float(live: Live) -> None:
+    assert isinstance(_good(live.client, "s16_scaled"), float)
+
+
+async def test_sixteen_registers_read_as_text(live: Live) -> None:
+    assert isinstance(_good(live.client, "text"), str)
+
+
+async def test_two_registers_read_as_one_32_bit_number(live: Live) -> None:
+    value = _good(live.client, "u32")
+    assert isinstance(value, int) and value > 0xFFFF
+
+
+async def test_an_address_the_device_lacks_is_missing_and_the_rest_are_still_read(live: Live) -> None:
+    answers = await live.device.read([Point("a", read=InputRegister(1), data_type=DataType.UINT16),
+                                      Point("absent", read=InputRegister(9999), data_type=DataType.UINT16),
+                                      Point("b", read=InputRegister(2), data_type=DataType.UINT16)])
+    print(f"\n  {({k: a.outcome.name for k, a in answers.items()})}")
+    assert (answers["a"].outcome, answers["b"].outcome) == (Outcome.OK, Outcome.OK)
+    assert answers["absent"].outcome is Outcome.MISSING

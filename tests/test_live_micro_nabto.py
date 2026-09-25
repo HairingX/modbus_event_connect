@@ -1,8 +1,5 @@
 """Read-only tests of the micro_nabto transport against a real device.
 
-This library has two transports, and each one gets a live test named after it. Which product
-answers is not the library's business - point it at whatever you have.
-
     Configure it either way:
         set MICRO_NABTO_HOST=<device-ip>        (environment variables)
         set MICRO_NABTO_EMAIL=you@example.com
@@ -12,20 +9,18 @@ answers is not the library's business - point it at whatever you have.
 
     Optional:
         MICRO_NABTO_PORT        default 5570
-        MICRO_NABTO_DEVICE_ID   only a dictionary key while a host is given
+        MICRO_NABTO_DEVICE_ID   also finds the device again if its address changes
 
     Run:
         pytest tests/test_live_micro_nabto.py -v -s
 
-NOTHING HERE WRITES TO THE DEVICE. A guard in the fixture replaces every write path with one
-that fails the test, and a test checks the guard itself works.
+NOTHING HERE WRITES TO THE DEVICE: the model has no write side, the client is read-only, and
+the one path a write could take fails the test.
 
-These do not assert particular values - they report what the device says about itself. That is
-the point: a Nabto device hands over its identity during the handshake, and that identity is
-what a device model branches on, so it has to be seen before it can be designed against.
+The addresses are a Nilan CTS 400's. On another device, expect MISSING where it has none.
 """
 import asyncio
-import logging
+from collections import Counter
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import NoReturn
@@ -34,18 +29,19 @@ import pytest
 import pytest_asyncio
 
 from conftest import live_or_skip, live_setting
-from src.modbus_event_connect import MODBUS_VALUE_TYPES, ModbusPointKey
-from src.modbus_event_connect.micro_nabto.micro_nabto_connection import (
-    MicroNabtoConnectionErrorType,
-)
-from models.micro_nabto_test_models import ModbusTestDatapointKey, ModbusTestMicroNabto
-
-_LOGGER = logging.getLogger(__name__)
-
+from src.modbus_event_connect.client import Client
+from src.modbus_event_connect.data_type import DataType
+from src.modbus_event_connect.device import Outcome
+from src.modbus_event_connect.micro_nabto.access import DatapointRegister, SetpointRegister
+from src.modbus_event_connect.micro_nabto.connection import MicroNabtoConnection, discover
+from src.modbus_event_connect.micro_nabto.device import MicroNabtoDevice, MicroNabtoOptions
+from src.modbus_event_connect.model import Model, Section
+from src.modbus_event_connect.point import Point
+from src.modbus_event_connect.value import DataValue, Quality
 
 HOST = live_setting("MICRO_NABTO_HOST")
 EMAIL = live_setting("MICRO_NABTO_EMAIL")
-DEVICE_ID = live_setting("MICRO_NABTO_DEVICE_ID") or "device"
+DEVICE_ID = live_setting("MICRO_NABTO_DEVICE_ID")
 PORT = int(live_setting("MICRO_NABTO_PORT") or "5570")
 
 pytestmark = [
@@ -53,120 +49,128 @@ pytestmark = [
     *live_or_skip("micro_nabto", MICRO_NABTO_HOST=HOST, MICRO_NABTO_EMAIL=EMAIL),
 ]
 
+DATAPOINTS = (23, 24, 25, 27, 28, 29, 30, 31, 46, 47, 48, 49, 50, 51, 52, 53, 56, 57, 58, 63, 64, 66, 70,
+              72, 77, 91, 110)
+SETPOINTS = (30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 43, 45, 50, 51, 57, 58, 59, 60, 61, 62, 63, 64,
+             65, 66, 69, 70, 80)
+TEMPERATURES = (27, 28, 29, 30)
+
+LIVE_MODEL = Model(
+    name="live", manufacturer="any",
+    sections=[Section([*(Point(f"dp_{a}", read=DatapointRegister(a), data_type=DataType.INT16 if a in TEMPERATURES else DataType.UINT16,
+                           scale=0.1 if a in TEMPERATURES else 1.0) for a in DATAPOINTS),
+                   *(Point(f"sp_{a}", read=SetpointRegister(a), data_type=DataType.UINT16) for a in SETPOINTS)])],
+    options=MicroNabtoOptions(), read_back_after=1.0)
+
 
 @dataclass
 class Live:
-    client: ModbusTestMicroNabto
+    client: Client
+    device: MicroNabtoDevice
+    connection: MicroNabtoConnection
 
 
-def _forbid_writes(client: ModbusTestMicroNabto) -> None:
-    """Make any write attempt fail loudly instead of reaching the device."""
-    def refuse(*_args: object, **_kwargs: object) -> NoReturn:
-        raise AssertionError("A write was attempted. These tests are read-only.")
+def _single(address: int, key: str = "a") -> Point:
+    return Point(key, read=DatapointRegister(address), data_type=DataType.UINT16)
 
-    connection = client._client
-    connection.request_setpoint_write = refuse   # type: ignore[assignment]
-    connection.request_setpoint_writes = refuse  # type: ignore[assignment]
-    client._request_setpoint_write = refuse      # type: ignore[assignment]
-    client._request_setpoint_writes = refuse     # type: ignore[assignment]
+
+def _count(live: Live, name: str) -> int:
+    value = live.connection.diagnostics()[name]
+    assert isinstance(value, int)
+    return value
 
 
 @pytest_asyncio.fixture(scope="module", loop_scope="module")  # pyright: ignore[reportUntypedFunctionDecorator, reportUnknownMemberType]
 async def live() -> AsyncGenerator[Live, None]:
-    client = ModbusTestMicroNabto()
-    assert EMAIL is not None and HOST is not None   # guarded by the skipif above
-    connected = await client.connect(EMAIL, DEVICE_ID, HOST, PORT)
-    if not connected:
-        client.stop()
-        # The error says which half failed, so report that rather than a list of guesses.
-        error = client.last_error
-        if error == MicroNabtoConnectionErrorType.AUTHENTICATION_ERROR:
-            detail = ("The device answered and rejected us, so the network path is fine.\n"
-                      "  MICRO_NABTO_EMAIL must be an address authorised on the device through\n"
-                      "  its vendor's app.")
-        elif error == MicroNabtoConnectionErrorType.TIMEOUT:
-            detail = ("No answer at all.\n"
-                      "  - Is MICRO_NABTO_HOST right, and is the device on this subnet?\n"
-                      "  - Without a host the client broadcasts to find it, which needs UDP\n"
-                      "    broadcast allowed through the firewall.")
-        else:
-            detail = "Unexpected failure."
-        pytest.fail(f"Could not connect at {HOST}:{PORT}.\n  {detail}\n  last error: {error}")
-    _forbid_writes(client)
-    yield Live(client=client)
-    client.stop()
+    assert HOST is not None and EMAIL is not None   # guarded by the skip above
+    connection = MicroNabtoConnection(EMAIL, host=HOST, port=PORT, device_id=DEVICE_ID)
+
+    async def refuse(command: bytes) -> NoReturn:
+        raise AssertionError("a write was attempted; these tests are read-only")
+    setattr(connection, "send", refuse)
+    device = MicroNabtoDevice(connection, owns_connection=True)
+    client = Client(device, LIVE_MODEL, read_only=True)
+    try:
+        await client.connect()
+    except Exception as err:
+        pytest.fail(f"Could not bring up the device: {err!r}\n"
+                    f"  - Is the email the one paired with the device in its app?\n"
+                    f"  - Are the host and port right? The device answers on UDP.")
+    yield Live(client, device, connection)
+    await client.disconnect()
 
 
-async def test_connects_and_reports_its_identity(live: Live):
-    """The handshake carries the identity, so a model can be chosen without reading anything."""
-    client = live.client
-    assert client.is_connected
+# ================================================================================ safety
 
-    info = client.device_info
-    _LOGGER.info(f"device_info: {info}")
-    print(f"\n  device_info        {info}")
-    print(f"  manufacturer       {client.manufacturer}")
-    print(f"  model_name         {client.model_name}")
-    print(f"  version            {info.version}")
-
-    assert info.device_id
-
-
-async def test_reads_a_datapoint(live: Live):
-    """A value arrives, and the version the model declares is among what startup read."""
-    client = live.client
-    value = client.get_value(ModbusTestDatapointKey.MAJOR_VERSION)
-    print(f"\n  MAJOR_VERSION      {value}")
-    assert value is not None, "startup did not read the model's version datapoint"
-
-
-async def test_an_absent_register_does_not_break_the_others(live: Live):
-    """
-    The test model declares address 9191, which the device is not expected to have.
-
-    A point the device does not have must not cost the points read alongside it. The Modbus TCP
-    side gives that guarantee and has tests for it; this transport has never been checked.
-    """
-    client = live.client
-    for key in (ModbusTestDatapointKey.TEMPERATURE, ModbusTestDatapointKey.INVALID):
-        client.set_read(key, True)
-    await client.request_datapoint_read()
-
-    temperature = client.get_value(ModbusTestDatapointKey.TEMPERATURE)
-    invalid = client.get_value(ModbusTestDatapointKey.INVALID)
-    print(f"\n  TEMPERATURE        {temperature}")
-    print(f"  INVALID (9191)     {invalid}")
-
-    assert invalid is None, "address 9191 should not have produced a value"
-    assert temperature is not None, "a real register was lost alongside the absent one"
-
-
-async def test_a_subscriber_is_notified(live: Live):
-    """
-    Events are what this library is for, so delivery has to be checked against real hardware.
-
-    Either path counts as delivery: subscribe() hands over a value that is already held, and a
-    read hands over one that changed. Which one fires depends on what earlier tests already
-    read, so asserting on a particular one would only make this flaky.
-    """
-    client = live.client
-    delivered = asyncio.Event()
-    seen: list[tuple[str, MODBUS_VALUE_TYPES | None, MODBUS_VALUE_TYPES | None]] = []
-
-    def on_change(key: ModbusPointKey,
-                  old_value: MODBUS_VALUE_TYPES | None,
-                  new_value: MODBUS_VALUE_TYPES | None) -> None:
-        seen.append((str(key), old_value, new_value))
-        delivered.set()
-
-    client.subscribe(ModbusTestDatapointKey.TEMPERATURE, on_change)
-    await client.request_datapoint_read()
-    await asyncio.wait_for(delivered.wait(), 15)
-    print(f"\n  delivered          {seen[-1]}")
-    client.unsubscribe(ModbusTestDatapointKey.TEMPERATURE, on_change)
-
-
-async def test_the_write_guard_is_active(live: Live):
-    """The guard itself must work, or every other test here is worthless."""
+async def test_nothing_here_can_be_written(live: Live) -> None:
+    assert not any(live.client.can_write(k) for k in live.client.keys)
     with pytest.raises(AssertionError, match="read-only"):
-        live.client._client.request_setpoint_writes([])
+        await live.connection.send(b"")
+
+
+# ============================================================================ the picture
+
+async def test_the_handshake_identifies_the_device(live: Live) -> None:
+    identity = await live.device.connect()
+    print(f"\n  identity: {identity}")
+    assert identity is not None
+    assert set(identity) == {"device_number", "device_model", "slave_device_number", "slave_device_model"}
+
+
+async def test_every_value_is_good(live: Live) -> None:
+    qualities = Counter(v.quality.name for k in live.client.keys if (v := live.client.value(k)) is not None)
+    print(f"\n  {len(live.client.keys)} keys: {dict(qualities)}")
+    assert qualities == Counter({Quality.GOOD.name: len(DATAPOINTS) + len(SETPOINTS)})
+
+
+async def test_temperatures_decode_as_temperatures(live: Live) -> None:
+    for address in TEMPERATURES:
+        current = live.client.value(f"dp_{address}")
+        print(f"  dp_{address}: {current.value if current else None}")
+        assert current is not None and isinstance(current.value, float) and -40.0 < current.value < 70.0
+
+
+async def test_every_subscriber_hears_its_value(live: Live) -> None:
+    heard: dict[str, DataValue] = {}
+
+    def listen(key: str, old: DataValue | None, new: DataValue) -> None:
+        heard[key] = new
+    for unsubscribe in [live.client.subscribe(k, listen) for k in live.client.keys]:
+        unsubscribe()
+    assert set(heard) == set(live.client.keys)
+
+
+# ================================================================== what the device does
+
+async def test_an_address_the_device_lacks_is_missing_and_the_rest_are_still_read(live: Live) -> None:
+    answers = await live.device.read([_single(23, "a"), _single(9999, "absent"), _single(24, "b")])
+    assert [answers[k].outcome for k in ("a", "absent", "b")] == [Outcome.OK, Outcome.MISSING, Outcome.OK]
+
+
+async def test_a_read_of_108_registers_is_answered_in_one_exchange(live: Live) -> None:
+    live.device.configure(MicroNabtoOptions(max_registers=108))
+    try:
+        points = [_single(DATAPOINTS[i % len(DATAPOINTS)], f"r{i}") for i in range(108)]
+        exchanges = _count(live, "exchanges")
+        answers = await live.device.read(points)
+        assert {a.outcome for a in answers.values()} == {Outcome.OK}
+        assert _count(live, "exchanges") == exchanges + 1
+    finally:
+        live.device.configure(MicroNabtoOptions())
+
+
+async def test_a_session_left_unused_is_renewed_before_the_device_ends_it(live: Live) -> None:
+    """The device ends a session after 15-20 idle seconds."""
+    handshakes, resends = _count(live, "handshakes"), _count(live, "resends")
+    await asyncio.sleep(22)
+    answers = await live.device.read([_single(23)])
+    assert answers["a"].outcome is Outcome.OK
+    assert _count(live, "handshakes") == handshakes + 1
+    assert _count(live, "resends") == resends, "no request was lost to an ended session"
+
+
+async def test_discovery_asked_directly_is_answered_from_the_device_address() -> None:
+    """Asked directly, so a firewall that drops answers to a broadcast cannot fail it."""
+    assert HOST is not None
+    found = await discover(DEVICE_ID, timeout=2.0, target=(HOST, PORT))
+    assert [f.host for f in found] == [HOST]
