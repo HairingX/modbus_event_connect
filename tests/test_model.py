@@ -6,11 +6,11 @@ from typing import Any
 
 import pytest
 
-from src.modbus_event_connect._data_type import DataType
-from src.modbus_event_connect._device import Identity
-from src.modbus_event_connect._errors import ModelError
-from src.modbus_event_connect._key import Key
-from src.modbus_event_connect._model import (
+from modbus_event_connect._data_type import DataType
+from modbus_event_connect._device import Identity
+from modbus_event_connect._errors import ModelError
+from modbus_event_connect._key import Key
+from modbus_event_connect._model import (
     Model,
     ModelSelector,
     RepeatedSection,
@@ -19,9 +19,9 @@ from src.modbus_event_connect._model import (
     problems,
     resolve,
 )
-from src.modbus_event_connect._point import Labels, Limits, Point, PollRate, Refresh, WriteKind
-from src.modbus_event_connect._unit import Unit
-from src.modbus_event_connect.modbus._access import (
+from modbus_event_connect._point import Labels, Limits, Point, PollRate, Refresh, WriteKind
+from modbus_event_connect._unit import Unit
+from modbus_event_connect.modbus._access import (
     Coil,
     DiscreteInput,
     HoldingRegister,

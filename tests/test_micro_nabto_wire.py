@@ -6,7 +6,7 @@ from collections.abc import Callable
 
 import pytest
 
-from src.modbus_event_connect.micro_nabto import _wire as wire
+from modbus_event_connect.micro_nabto import _wire as wire
 
 CLIENT = bytes.fromhex("01020304")
 SERVER = bytes.fromhex("000001a7")

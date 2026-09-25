@@ -7,10 +7,10 @@ from typing import Any, TypeVar
 
 import pytest
 
-from src.modbus_event_connect import _client as client_module
-from src.modbus_event_connect._client import Client, Status
-from src.modbus_event_connect._data_type import DataType
-from src.modbus_event_connect._device import (
+from modbus_event_connect import _client as client_module
+from modbus_event_connect._client import Client, Status
+from modbus_event_connect._data_type import DataType
+from modbus_event_connect._device import (
     EncodedWrite,
     Identity,
     Outcome,
@@ -18,16 +18,16 @@ from src.modbus_event_connect._device import (
     ReadResult,
     WriteResult,
 )
-from src.modbus_event_connect._errors import (
+from modbus_event_connect._errors import (
     CannotConnectError,
     InvalidValueError,
     NotConnectedError,
     ReadOnlyError,
     UnsupportedDeviceError,
 )
-from src.modbus_event_connect._key import Key
-from src.modbus_event_connect._model import Model, RepeatedSection, Scan, Section
-from src.modbus_event_connect._point import (
+from modbus_event_connect._key import Key
+from modbus_event_connect._model import Model, RepeatedSection, Scan, Section
+from modbus_event_connect._point import (
     Change,
     Labels,
     Limits,
@@ -37,16 +37,16 @@ from src.modbus_event_connect._point import (
     Refresh,
     WriteKind,
 )
-from src.modbus_event_connect._value import DataValue, Quality
-from src.modbus_event_connect._writes import Write
-from src.modbus_event_connect.modbus._access import (
+from modbus_event_connect._value import DataValue, Quality
+from modbus_event_connect._writes import Write
+from modbus_event_connect.modbus._access import (
     Coil,
     HoldingRegister,
     InputRegister,
     ModbusOptions,
     plain,
 )
-from src.modbus_event_connect.testing._clock import FakeClock
+from modbus_event_connect.testing._clock import FakeClock
 
 T = TypeVar("T")
 

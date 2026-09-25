@@ -23,21 +23,21 @@ import pytest
 import pytest_asyncio
 
 from conftest import live_or_skip, live_setting
-from src.modbus_event_connect._client import Client
-from src.modbus_event_connect._data_type import DataType
-from src.modbus_event_connect._device import Outcome
-from src.modbus_event_connect._key import Key
-from src.modbus_event_connect._model import Model, Section
-from src.modbus_event_connect._point import Point
-from src.modbus_event_connect._value import Quality
-from src.modbus_event_connect.modbus._access import (
+from modbus_event_connect._client import Client
+from modbus_event_connect._data_type import DataType
+from modbus_event_connect._device import Outcome
+from modbus_event_connect._key import Key
+from modbus_event_connect._model import Model, Section
+from modbus_event_connect._point import Point
+from modbus_event_connect._value import Quality
+from modbus_event_connect.modbus._access import (
     HoldingRegister,
     InputRegister,
     ModbusOptions,
     plain,
 )
-from src.modbus_event_connect.modbus._connection import ModbusTcpConnection, Request, Response
-from src.modbus_event_connect.modbus._device import ModbusDevice
+from modbus_event_connect.modbus._connection import ModbusTcpConnection, Request, Response
+from modbus_event_connect.modbus._device import ModbusDevice
 
 HOST = live_setting("MODBUS_TCP_HOST")
 PORT = int(live_setting("MODBUS_TCP_PORT") or "502")

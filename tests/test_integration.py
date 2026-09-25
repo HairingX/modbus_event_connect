@@ -9,15 +9,15 @@ from typing import Any, TypeVar
 
 import pytest
 
-from src.modbus_event_connect._client import Client, Status
-from src.modbus_event_connect._data_type import DataType
-from src.modbus_event_connect._errors import CannotConnectError, InvalidValueError, ReadOnlyError
-from src.modbus_event_connect._key import Key
-from src.modbus_event_connect._model import Model, RepeatedSection, Section
-from src.modbus_event_connect._point import Labels, Point, PollRate, Pulse, Refresh, WriteKind
-from src.modbus_event_connect._unit import Unit
-from src.modbus_event_connect._value import DataValue, Quality
-from src.modbus_event_connect.modbus import (
+from modbus_event_connect._client import Client, Status
+from modbus_event_connect._data_type import DataType
+from modbus_event_connect._errors import CannotConnectError, InvalidValueError, ReadOnlyError
+from modbus_event_connect._key import Key
+from modbus_event_connect._model import Model, RepeatedSection, Section
+from modbus_event_connect._point import Labels, Point, PollRate, Pulse, Refresh, WriteKind
+from modbus_event_connect._unit import Unit
+from modbus_event_connect._value import DataValue, Quality
+from modbus_event_connect.modbus import (
     Coil,
     DiscreteInput,
     FunctionCode,
@@ -27,8 +27,8 @@ from src.modbus_event_connect.modbus import (
     ModbusOptions,
     plain,
 )
-from src.modbus_event_connect.testing import SimulatedModbusDevice, SimulatedModbusGateway
-from src.modbus_event_connect.testing._clock import FakeClock
+from modbus_event_connect.testing import SimulatedModbusDevice, SimulatedModbusGateway
+from modbus_event_connect.testing._clock import FakeClock
 
 T = TypeVar("T")
 

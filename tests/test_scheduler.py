@@ -9,12 +9,12 @@ import logging
 
 import pytest
 
-from src.modbus_event_connect._key import Key
-from src.modbus_event_connect._point import DEFAULT_INTERVALS, Point, PollRate
-from src.modbus_event_connect._scheduler import Scheduler
-from src.modbus_event_connect._value import DataValue, Quality
-from src.modbus_event_connect.modbus._access import HoldingRegister
-from src.modbus_event_connect.testing._clock import FakeClock
+from modbus_event_connect._key import Key
+from modbus_event_connect._point import DEFAULT_INTERVALS, Point, PollRate
+from modbus_event_connect._scheduler import Scheduler
+from modbus_event_connect._value import DataValue, Quality
+from modbus_event_connect.modbus._access import HoldingRegister
+from modbus_event_connect.testing._clock import FakeClock
 
 # ================================================================================== helpers
 
@@ -228,7 +228,7 @@ def test_set_interval_clamps_to_floor_and_warns_once() -> None:
     records: list[logging.LogRecord] = []
     handler = logging.Handler()
     handler.emit = records.append  # type: ignore[method-assign]
-    logger = logging.getLogger("src.modbus_event_connect._scheduler")
+    logger = logging.getLogger("modbus_event_connect._scheduler")
     logger.addHandler(handler)
     logger.setLevel(logging.WARNING)
     try:

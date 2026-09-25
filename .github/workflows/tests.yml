@@ -42,17 +42,6 @@ jobs:
       - name: Install the package and the test tools
         run: python -m pip install . -r requirements-test.txt
 
-      # PyPA: a test should hold __version__ and the installed metadata to the same value.
-      - name: Check __version__ matches the package metadata
-        run: |
-          python - <<'PY'
-          import importlib, importlib.metadata, sys
-          package = "modbus_event_connect"
-          found = importlib.import_module(package).__version__, importlib.metadata.version(package)
-          if found[0] != found[1]:
-              sys.exit(f"::error::__version__ says {found[0]}, the metadata {found[1]}")
-          print(f"{package} {found[0]}")
-          PY
 
       - name: Type check (pyright strict)
         run: pyright

@@ -4,15 +4,15 @@ import logging
 
 import pytest
 
-from src.modbus_event_connect._errors import AuthenticationError
-from src.modbus_event_connect.micro_nabto import _wire as wire
-from src.modbus_event_connect.micro_nabto._connection import (
+from modbus_event_connect._errors import AuthenticationError
+from modbus_event_connect.micro_nabto import _wire as wire
+from modbus_event_connect.micro_nabto._connection import (
     DiscoveredDevice,
     MicroNabtoConnection,
     discover,
 )
-from src.modbus_event_connect.testing._clock import FakeClock
-from src.modbus_event_connect.testing._micro_nabto import SimulatedMicroNabtoDevice
+from modbus_event_connect.testing._clock import FakeClock
+from modbus_event_connect.testing._micro_nabto import SimulatedMicroNabtoDevice
 
 EMAIL = "user@example.invalid"
 IDENTITY = {"device_number": 7, "device_model": 1140, "slave_device_number": 72270, "slave_device_model": 1}
@@ -231,7 +231,7 @@ async def test_nothing_logged_or_diagnosed_names_the_host_port_device_or_email()
     class Keep(logging.Handler):
         def emit(self, record: logging.LogRecord) -> None:
             records.append(record)
-    logger = logging.getLogger("src.modbus_event_connect")
+    logger = logging.getLogger("modbus_event_connect")
     handler, level = Keep(level=logging.DEBUG), logger.level
     logger.addHandler(handler)
     logger.setLevel(logging.DEBUG)

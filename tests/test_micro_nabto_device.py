@@ -4,25 +4,25 @@ from typing import Any
 
 import pytest
 
-from src.modbus_event_connect._client import Client, Status
-from src.modbus_event_connect._data_type import DataType
-from src.modbus_event_connect._device import Device, EncodedWrite, Identity, Outcome
-from src.modbus_event_connect._errors import (
+from modbus_event_connect._client import Client, Status
+from modbus_event_connect._data_type import DataType
+from modbus_event_connect._device import Device, EncodedWrite, Identity, Outcome
+from modbus_event_connect._errors import (
     AuthenticationError,
     ReadOnlyError,
     UnsupportedDeviceError,
 )
-from src.modbus_event_connect._key import Key
-from src.modbus_event_connect._model import Model, Section
-from src.modbus_event_connect._point import Limits, Point
-from src.modbus_event_connect._unit import Unit
-from src.modbus_event_connect._value import DataValue, Quality
-from src.modbus_event_connect.micro_nabto._access import DatapointRegister, SetpointRegister
-from src.modbus_event_connect.micro_nabto._connection import MicroNabtoConnection
-from src.modbus_event_connect.micro_nabto._device import MicroNabtoDevice, MicroNabtoOptions
-from src.modbus_event_connect.modbus._access import HoldingRegister, ModbusOptions, plain
-from src.modbus_event_connect.testing._clock import FakeClock
-from src.modbus_event_connect.testing._micro_nabto import Command, SimulatedMicroNabtoDevice
+from modbus_event_connect._key import Key
+from modbus_event_connect._model import Model, Section
+from modbus_event_connect._point import Limits, Point
+from modbus_event_connect._unit import Unit
+from modbus_event_connect._value import DataValue, Quality
+from modbus_event_connect.micro_nabto._access import DatapointRegister, SetpointRegister
+from modbus_event_connect.micro_nabto._connection import MicroNabtoConnection
+from modbus_event_connect.micro_nabto._device import MicroNabtoDevice, MicroNabtoOptions
+from modbus_event_connect.modbus._access import HoldingRegister, ModbusOptions, plain
+from modbus_event_connect.testing._clock import FakeClock
+from modbus_event_connect.testing._micro_nabto import Command, SimulatedMicroNabtoDevice
 
 EMAIL = "user@example.invalid"
 DATAPOINT_READ, SETPOINT_READ, SETPOINT_WRITE = 0x2D, 0x2A, 0x2B

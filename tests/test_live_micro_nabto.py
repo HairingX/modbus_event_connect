@@ -29,16 +29,16 @@ import pytest
 import pytest_asyncio
 
 from conftest import live_or_skip, live_setting
-from src.modbus_event_connect._client import Client
-from src.modbus_event_connect._data_type import DataType
-from src.modbus_event_connect._device import Outcome
-from src.modbus_event_connect._key import Key
-from src.modbus_event_connect._model import Model, Section
-from src.modbus_event_connect._point import Point
-from src.modbus_event_connect._value import DataValue, Quality
-from src.modbus_event_connect.micro_nabto._access import DatapointRegister, SetpointRegister
-from src.modbus_event_connect.micro_nabto._connection import MicroNabtoConnection, discover
-from src.modbus_event_connect.micro_nabto._device import MicroNabtoDevice, MicroNabtoOptions
+from modbus_event_connect._client import Client
+from modbus_event_connect._data_type import DataType
+from modbus_event_connect._device import Outcome
+from modbus_event_connect._key import Key
+from modbus_event_connect._model import Model, Section
+from modbus_event_connect._point import Point
+from modbus_event_connect._value import DataValue, Quality
+from modbus_event_connect.micro_nabto._access import DatapointRegister, SetpointRegister
+from modbus_event_connect.micro_nabto._connection import MicroNabtoConnection, discover
+from modbus_event_connect.micro_nabto._device import MicroNabtoDevice, MicroNabtoOptions
 
 HOST = live_setting("MICRO_NABTO_HOST")
 EMAIL = live_setting("MICRO_NABTO_EMAIL")

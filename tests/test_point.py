@@ -6,12 +6,12 @@ from typing import Any, Callable
 
 import pytest
 
-from src.modbus_event_connect import _unit as unit_module
-from src.modbus_event_connect._clock import Clock, SystemClock
-from src.modbus_event_connect._data_type import DataType, DataTypeKind
-from src.modbus_event_connect._device import EncodedWrite, Outcome, ReadResult, WriteResult
-from src.modbus_event_connect._key import Key
-from src.modbus_event_connect._point import (
+from modbus_event_connect import _unit as unit_module
+from modbus_event_connect._clock import Clock, SystemClock
+from modbus_event_connect._data_type import DataType, DataTypeKind
+from modbus_event_connect._device import EncodedWrite, Outcome, ReadResult, WriteResult
+from modbus_event_connect._key import Key
+from modbus_event_connect._point import (
     DEFAULT_INTERVALS,
     Access,
     Change,
@@ -25,10 +25,10 @@ from src.modbus_event_connect._point import (
     Transforms,
     WriteKind,
 )
-from src.modbus_event_connect._unit import Unit
-from src.modbus_event_connect._value import DataValue, Quality
-from src.modbus_event_connect.micro_nabto._access import DatapointRegister, SetpointRegister
-from src.modbus_event_connect.modbus._access import (
+from modbus_event_connect._unit import Unit
+from modbus_event_connect._value import DataValue, Quality
+from modbus_event_connect.micro_nabto._access import DatapointRegister, SetpointRegister
+from modbus_event_connect.modbus._access import (
     Coil,
     DiscreteInput,
     HoldingRegister,
@@ -39,7 +39,7 @@ from src.modbus_event_connect.modbus._access import (
     modicon,
     plain,
 )
-from src.modbus_event_connect.testing._clock import FakeClock
+from modbus_event_connect.testing._clock import FakeClock
 
 
 def _key(fields: dict[str, Any]) -> Key[Any]:

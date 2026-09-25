@@ -24,7 +24,7 @@ reportMissingTypeStubs = "none"   # pymodbus ships no stubs
 [[tool.pyright.executionEnvironments]]
 # Tests substitute transports and inspect internals on purpose; that is what a test double is.
 root = "tests"
-# Tests import the package as `src.modbus_event_connect` and each other as `conftest` /
-# `models.*`, exactly as pytest resolves them from the repository root.
-extraPaths = [".", "tests"]
+# Tests import the installed package, as its users do (pip install -e .), and each other as
+# `conftest`, as pytest resolves them from the tests directory.
+extraPaths = ["tests"]
 reportPrivateUsage = "none"

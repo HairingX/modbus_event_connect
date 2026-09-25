@@ -10,14 +10,14 @@ from typing import Any
 
 import pytest
 
-from src.modbus_event_connect._conversion import decode, encode
-from src.modbus_event_connect._data_type import ByteOrder, DataType, DataTypeKind, WordOrder
-from src.modbus_event_connect._device import EncodedWrite
-from src.modbus_event_connect._errors import InvalidValueError
-from src.modbus_event_connect._key import Key
-from src.modbus_event_connect._point import Limits, Point, Transforms
-from src.modbus_event_connect._value import Quality, Value
-from src.modbus_event_connect.modbus._access import (
+from modbus_event_connect._conversion import decode, encode
+from modbus_event_connect._data_type import ByteOrder, DataType, DataTypeKind, WordOrder
+from modbus_event_connect._device import EncodedWrite
+from modbus_event_connect._errors import InvalidValueError
+from modbus_event_connect._key import Key
+from modbus_event_connect._point import Limits, Point, Transforms
+from modbus_event_connect._value import Quality, Value
+from modbus_event_connect.modbus._access import (
     Coil,
     DiscreteInput,
     HoldingRegister,

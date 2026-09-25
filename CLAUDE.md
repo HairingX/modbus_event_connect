@@ -38,6 +38,8 @@ obvious from the name - one or two lines, no narrative.
 - Live tests (`tests/test_live_*.py`) only read, and skip themselves unless a device is
   configured. CI runs `pytest -m "not live"`.
 - Test tools are pinned in `requirements-test.txt`: `pip install -e . -r requirements-test.txt`.
+- Tests import the installed package, as its users do, never `src.<package>`: a packaging
+  mistake then fails a test before a release.
 - No real IP addresses, hostnames or email addresses in tracked files; real values live in the
   gitignored `mysecrets.py` or in environment variables.
 
