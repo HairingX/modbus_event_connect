@@ -13,7 +13,7 @@ from src.modbus_event_connect._client import Client, Status
 from src.modbus_event_connect._data_type import DataType
 from src.modbus_event_connect._errors import CannotConnectError, InvalidValueError, ReadOnlyError
 from src.modbus_event_connect._key import Key
-from src.modbus_event_connect._model import RepeatedSection, Model, Section
+from src.modbus_event_connect._model import Model, RepeatedSection, Section
 from src.modbus_event_connect._point import Labels, Point, PollRate, Pulse, Refresh, WriteKind
 from src.modbus_event_connect._unit import Unit
 from src.modbus_event_connect._value import DataValue, Quality

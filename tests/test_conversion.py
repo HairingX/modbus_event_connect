@@ -441,7 +441,7 @@ def test_a_state_encodes_to_its_number() -> None:
     assert encode(_state_point(Mode), Mode.AUTO).registers == (2,)
 
 
-@pytest.mark.parametrize("value", [5, True, "AUTO", 2.5])
+@pytest.mark.parametrize("value", [5, True, "AUTO", 2.5, 1.0])
 def test_a_state_write_refuses_anything_but_a_state(value: object) -> None:
     with pytest.raises(InvalidValueError):
         encode(_state_point(Mode), value)

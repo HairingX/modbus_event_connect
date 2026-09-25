@@ -26,7 +26,7 @@ from src.modbus_event_connect._errors import (
     UnsupportedDeviceError,
 )
 from src.modbus_event_connect._key import Key
-from src.modbus_event_connect._model import RepeatedSection, Model, Scan, Section
+from src.modbus_event_connect._model import Model, RepeatedSection, Scan, Section
 from src.modbus_event_connect._point import (
     Change,
     Labels,

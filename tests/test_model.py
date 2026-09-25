@@ -11,9 +11,9 @@ from src.modbus_event_connect._device import Identity
 from src.modbus_event_connect._errors import ModelError
 from src.modbus_event_connect._key import Key
 from src.modbus_event_connect._model import (
-    RepeatedSection,
     Model,
     ModelSelector,
+    RepeatedSection,
     Scan,
     Section,
     problems,

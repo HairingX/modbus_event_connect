@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from .._device import Identity
-from .._model import RepeatedSection, Model, Section, problems, resolve
+from .._model import Model, RepeatedSection, Section, problems, resolve
 from .._point import Point
 
 _ROUND_TRIP_SAMPLES = (-7.5, -1.0, 0.0, 0.5, 1.0, 7.0, 60.0, 100.0, 1000.0)

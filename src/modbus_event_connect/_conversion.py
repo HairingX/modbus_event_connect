@@ -278,6 +278,8 @@ def _numeric_for_key_type(point: Point[Any], value: object) -> int | float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise InvalidValueError(f"point {point.key!r}: expected {value_type.__name__}, got {type(value).__name__}")
     if is_state_type(value_type):
+        if not isinstance(value, int):
+            raise InvalidValueError(f"point {point.key!r}: expected a {value_type.__name__}, got {value!r}")
         try:
             return int(value_type(value))
         except ValueError:
