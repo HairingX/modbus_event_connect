@@ -346,11 +346,13 @@ it will come back.
 
 `has()`, `points` and `subscribe()` consult it, and none of them does I/O: a consumer calls
 `subscribe()` once per entity, and it must stay a local lookup. An unavailable point is not
-polled. A label selector marks a whole instance at once:
+polled. A scan step's label selector marks a whole instance at once:
 
 ```python
-client.set_available(Labels(room=14), False, reason="room not configured")
+scan.set_available(Labels(room=14), False, reason="room not configured")
 ```
+
+Only the scan writes it: a consumer cannot hide a point the unit has.
 
 ### 4.4 Validation and the model walker
 

@@ -5,16 +5,16 @@ from typing import Any
 
 import pytest
 
-from src.modbus_event_connect.data_type import DataType
-from src.modbus_event_connect.device import (
+from src.modbus_event_connect._data_type import DataType
+from src.modbus_event_connect._device import (
     Device,
     EncodedWrite,
     Outcome,
     ProtocolOptions,
     ReadResult,
 )
-from src.modbus_event_connect.micro_nabto.access import DatapointRegister
-from src.modbus_event_connect.modbus.access import (
+from src.modbus_event_connect.micro_nabto._access import DatapointRegister
+from src.modbus_event_connect.modbus._access import (
     BitWrite,
     Coil,
     DiscreteInput,
@@ -26,17 +26,17 @@ from src.modbus_event_connect.modbus.access import (
     modicon,
     plain,
 )
-from src.modbus_event_connect.modbus.connection import (
+from src.modbus_event_connect.modbus._connection import (
     ExceptionCode,
     FunctionCode,
     ModbusTcpConnection,
     Request,
     Response,
 )
-from src.modbus_event_connect.modbus.device import ModbusDevice
-from src.modbus_event_connect.point import Point
-from src.modbus_event_connect.testing.clock import FakeClock
-from src.modbus_event_connect.testing.modbus import (
+from src.modbus_event_connect.modbus._device import ModbusDevice
+from src.modbus_event_connect._point import Point
+from src.modbus_event_connect.testing._clock import FakeClock
+from src.modbus_event_connect.testing._modbus import (
     NO_ANSWER,
     SimulatedModbusDevice,
     SimulatedModbusGateway,

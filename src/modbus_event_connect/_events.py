@@ -5,8 +5,8 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from .point import Point
-from .value import DataValue
+from ._point import Point
+from ._value import DataValue
 
 _LOGGER = logging.getLogger(__name__)
 

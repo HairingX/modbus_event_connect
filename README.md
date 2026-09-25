@@ -35,6 +35,16 @@ Client  joins the two: connect, subscribe, poll, write                          
 A *point* is one value the device has, such as a temperature or a setting. Its *key*, like
 `"temperature"`, is how you name it everywhere.
 
+Everything is imported from four places. The modules inside them are internal, and may change in
+any release.
+
+| Import from | For |
+|---|---|
+| `modbus_event_connect` | the client, values, errors, and what a model is made of |
+| `modbus_event_connect.modbus` | Modbus: the connection, the device, register kinds and numbering |
+| `modbus_event_connect.micro_nabto` | micro_nabto: discovery, the session, the device, register kinds |
+| `modbus_event_connect.testing` | testing a model: simulated devices, a fake clock, the model walker |
+
 ---
 
 # Part 1: Using a device
@@ -195,7 +205,7 @@ rooms. After `connect()`:
 
 | | |
 |---|---|
-| `client.keys` | the keys this unit has |
+| `client.points` | the points this unit has, by key |
 | `client.has(key)`, `client.can_write(key)` | whether it has the key, and whether it can be written |
 | `client.instances("room")` | which rooms, zones or channels are installed, such as `(1, 3)` |
 | `client.unavailable_reasons` | keys the unit does not have, with the reason |
@@ -445,8 +455,8 @@ HEATING = Model(name="Heating", manufacturer="Example",
 ```
 
 Every point `room(n)` returns is labelled `room=n`, so `Labels(room=3)` selects room 3's points.
-After `connect()`, `client.instances("room")` lists the installed rooms, and `client.keys` has
-only their points.
+After `connect()`, `client.instances("room")` lists the installed rooms, and `client.points`
+has only their points.
 
 Scan steps run in order. If one of their reads goes unanswered, `connect()` fails rather than
 guess what is installed.

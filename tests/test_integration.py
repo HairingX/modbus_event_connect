@@ -8,10 +8,10 @@ from typing import TypeVar
 
 import pytest
 
-from src.modbus_event_connect.client import Client, Status
-from src.modbus_event_connect.conversion import InvalidValueError
-from src.modbus_event_connect.data_type import DataType
-from src.modbus_event_connect.errors import CannotConnectError, ReadOnlyError
+from src.modbus_event_connect._client import Client, Status
+from src.modbus_event_connect._errors import InvalidValueError
+from src.modbus_event_connect._data_type import DataType
+from src.modbus_event_connect._errors import CannotConnectError, ReadOnlyError
 from src.modbus_event_connect.modbus import (
     Coil,
     DiscreteInput,
@@ -22,12 +22,12 @@ from src.modbus_event_connect.modbus import (
     ModbusOptions,
     plain,
 )
-from src.modbus_event_connect.model import Instances, Model, Section
-from src.modbus_event_connect.point import Labels, Point, PollRate, Pulse, Refresh, WriteKind
+from src.modbus_event_connect._model import Instances, Model, Section
+from src.modbus_event_connect._point import Labels, Point, PollRate, Pulse, Refresh, WriteKind
 from src.modbus_event_connect.testing import SimulatedModbusDevice, SimulatedModbusGateway
-from src.modbus_event_connect.testing.clock import FakeClock
-from src.modbus_event_connect.unit import Unit
-from src.modbus_event_connect.value import DataValue, Quality
+from src.modbus_event_connect.testing._clock import FakeClock
+from src.modbus_event_connect._unit import Unit
+from src.modbus_event_connect._value import DataValue, Quality
 
 T = TypeVar("T")
 
@@ -207,7 +207,7 @@ def test_an_unknown_fan_state_reads_as_no_data_not_as_a_guess() -> None:
 
 def test_an_absent_room_is_found_once_and_never_asked_for_again() -> None:
     client, gateway, clock, _ = _connected()
-    assert "room_2_temp" not in client.keys
+    assert "room_2_temp" not in client.points
     assert client.instances("room") == (1, 3)
 
     for key in ("room_1_temp", "room_3_temp"):

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from src.modbus_event_connect.data_type import DataType
-from src.modbus_event_connect.device import Identity
-from src.modbus_event_connect.modbus.access import (
+from src.modbus_event_connect._data_type import DataType
+from src.modbus_event_connect._device import Identity
+from src.modbus_event_connect.modbus._access import (
     Coil,
     DiscreteInput,
     HoldingRegister,
@@ -17,18 +17,18 @@ from src.modbus_event_connect.modbus.access import (
     modicon,
     plain,
 )
-from src.modbus_event_connect.model import (
+from src.modbus_event_connect._errors import ModelError
+from src.modbus_event_connect._model import (
     Instances,
     Model,
-    ModelError,
     ModelSelector,
     Scan,
     Section,
     problems,
     resolve,
 )
-from src.modbus_event_connect.point import Labels, Limits, Point, PollRate, Refresh, WriteKind
-from src.modbus_event_connect.unit import Unit
+from src.modbus_event_connect._point import Labels, Limits, Point, PollRate, Refresh, WriteKind
+from src.modbus_event_connect._unit import Unit
 
 # ============================================================================ happy path
 

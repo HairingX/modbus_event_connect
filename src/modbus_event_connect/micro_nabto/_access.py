@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import ClassVar, Hashable
 
-from ..point import Access
+from .._point import Access
 
 
 @dataclass(frozen=True)

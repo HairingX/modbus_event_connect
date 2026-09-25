@@ -10,16 +10,10 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Protocol
 
-from .device import Identity, ProtocolOptions
-from .point import DEFAULT_INTERVALS, Labels, Point, PollRate, Selector
-from .value import DataValue
-
-# ============================================================================== errors
-
-
-class ModelError(ValueError):
-    """A model does not resolve cleanly against an identity; lists every problem found."""
-
+from ._device import Identity, ProtocolOptions
+from ._errors import ModelError
+from ._point import DEFAULT_INTERVALS, Labels, Point, PollRate, Selector
+from ._value import DataValue
 
 # ============================================================================= sections
 

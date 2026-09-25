@@ -1,4 +1,4 @@
-"""The errors the library raises about a device or its own state, rather than about a value."""
+"""Every error the library raises of its own."""
 
 
 class ClientError(Exception):
@@ -23,3 +23,11 @@ class ReadOnlyError(ClientError):
 
 class AuthenticationError(ClientError):
     """The device refused the credentials it was given."""
+
+
+class InvalidValueError(ValueError):
+    """A value a point cannot take, or registers that are not a value of it."""
+
+
+class ModelError(ValueError):
+    """A model does not resolve cleanly against an identity; lists every problem found."""

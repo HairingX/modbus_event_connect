@@ -8,10 +8,10 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from . import wire
-from ..clock import Clock, SystemClock
-from ..device import Identity
-from ..errors import AuthenticationError
+from . import _wire as wire
+from .._clock import Clock, SystemClock
+from .._device import Identity
+from .._errors import AuthenticationError
 
 _LOGGER = logging.getLogger(__name__)
 

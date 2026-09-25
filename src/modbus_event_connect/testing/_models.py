@@ -3,9 +3,9 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from ..device import Identity
-from ..model import Instances, Model, Section, problems, resolve
-from ..point import Point
+from .._device import Identity
+from .._model import Instances, Model, Section, problems, resolve
+from .._point import Point
 
 _ROUND_TRIP_SAMPLES = (-7.5, -1.0, 0.0, 0.5, 1.0, 7.0, 60.0, 100.0, 1000.0)
 """Values a transform must bring back unchanged: both signs, a fraction, and the sizes that

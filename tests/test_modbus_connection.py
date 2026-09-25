@@ -7,7 +7,7 @@ from typing import Any
 import pymodbus.client
 import pytest
 
-from src.modbus_event_connect.modbus.connection import (
+from src.modbus_event_connect.modbus._connection import (
     ExceptionCode,
     FunctionCode,
     ModbusConnection,
@@ -15,7 +15,7 @@ from src.modbus_event_connect.modbus.connection import (
     Request,
     Response,
 )
-from src.modbus_event_connect.testing.clock import FakeClock
+from src.modbus_event_connect.testing._clock import FakeClock
 
 HOST = "modbus.invalid"
 

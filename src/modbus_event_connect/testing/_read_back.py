@@ -5,9 +5,9 @@ import asyncio
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 
-from ..client import Client
-from ..conversion import encode
-from ..value import Quality, Value
+from .._client import Client
+from .._conversion import encode
+from .._value import Quality, Value
 
 
 @dataclass(frozen=True)

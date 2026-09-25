@@ -5,9 +5,9 @@ import logging
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
-from .clock import Clock
-from .point import DEFAULT_INTERVALS, Point, PollRate
-from .value import DataValue, Quality, Value
+from ._clock import Clock
+from ._point import DEFAULT_INTERVALS, Point, PollRate
+from ._value import DataValue, Quality, Value
 
 _LOGGER = logging.getLogger(__name__)
 

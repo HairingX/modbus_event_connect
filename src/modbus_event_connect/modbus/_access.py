@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import ClassVar, Literal
 
-from ..device import ProtocolOptions
-from ..point import Access, Point
+from .._device import ProtocolOptions
+from .._point import Access, Point
 
 MAX_ADDRESS = 0xFFFF
 

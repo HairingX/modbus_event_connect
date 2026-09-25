@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Protocol, runtime_checkable
 
-from .point import Access, Point
+from ._point import Access, Point
 
 Identity = Mapping[str, int | float | str | bool | None]
 """What a device says about itself: from a protocol handshake, or read from identity points."""

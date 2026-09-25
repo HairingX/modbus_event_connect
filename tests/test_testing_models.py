@@ -1,12 +1,12 @@
 """`assert_models_valid`: the check a device repository runs over its models in its tests."""
 import pytest
 
-from src.modbus_event_connect.data_type import DataType
-from src.modbus_event_connect.device import Identity
-from src.modbus_event_connect.modbus.access import HoldingRegister, ModbusOptions, plain
-from src.modbus_event_connect.model import Model, Section, problems, resolve
-from src.modbus_event_connect.point import Point, Transform, Transforms
-from src.modbus_event_connect.testing.models import assert_models_valid
+from src.modbus_event_connect._data_type import DataType
+from src.modbus_event_connect._device import Identity
+from src.modbus_event_connect.modbus._access import HoldingRegister, ModbusOptions, plain
+from src.modbus_event_connect._model import Model, Section, problems, resolve
+from src.modbus_event_connect._point import Point, Transform, Transforms
+from src.modbus_event_connect.testing._models import assert_models_valid
 
 
 def _with_transform(transform: Transform) -> Model:

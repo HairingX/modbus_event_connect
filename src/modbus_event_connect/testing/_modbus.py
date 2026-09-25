@@ -6,7 +6,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterable, Mapping
 
-from ..modbus.connection import ExceptionCode, FunctionCode, Request, Response
+from ..modbus._connection import ExceptionCode, FunctionCode, Request, Response
 
 NO_ANSWER = -1
 """A fault code meaning "the device never answers": the request gets `no_answer`."""

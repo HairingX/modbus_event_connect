@@ -3,24 +3,24 @@ import asyncio
 
 import pytest
 
-from src.modbus_event_connect.client import Client
-from src.modbus_event_connect.data_type import DataType
-from src.modbus_event_connect.device import Device, EncodedWrite, Identity, Outcome
-from src.modbus_event_connect.errors import (
+from src.modbus_event_connect._client import Client
+from src.modbus_event_connect._data_type import DataType
+from src.modbus_event_connect._device import Device, EncodedWrite, Identity, Outcome
+from src.modbus_event_connect._errors import (
     AuthenticationError,
     ReadOnlyError,
     UnsupportedDeviceError,
 )
-from src.modbus_event_connect.micro_nabto.access import DatapointRegister, SetpointRegister
-from src.modbus_event_connect.micro_nabto.connection import MicroNabtoConnection
-from src.modbus_event_connect.micro_nabto.device import MicroNabtoDevice, MicroNabtoOptions
-from src.modbus_event_connect.modbus.access import HoldingRegister, ModbusOptions, plain
-from src.modbus_event_connect.model import Model, Section
-from src.modbus_event_connect.point import Limits, Point
-from src.modbus_event_connect.testing.clock import FakeClock
-from src.modbus_event_connect.testing.micro_nabto import Command, SimulatedMicroNabtoDevice
-from src.modbus_event_connect.unit import Unit
-from src.modbus_event_connect.value import DataValue, Quality
+from src.modbus_event_connect.micro_nabto._access import DatapointRegister, SetpointRegister
+from src.modbus_event_connect.micro_nabto._connection import MicroNabtoConnection
+from src.modbus_event_connect.micro_nabto._device import MicroNabtoDevice, MicroNabtoOptions
+from src.modbus_event_connect.modbus._access import HoldingRegister, ModbusOptions, plain
+from src.modbus_event_connect._model import Model, Section
+from src.modbus_event_connect._point import Limits, Point
+from src.modbus_event_connect.testing._clock import FakeClock
+from src.modbus_event_connect.testing._micro_nabto import Command, SimulatedMicroNabtoDevice
+from src.modbus_event_connect._unit import Unit
+from src.modbus_event_connect._value import DataValue, Quality
 
 EMAIL = "user@example.invalid"
 DATAPOINT_READ, SETPOINT_READ, SETPOINT_WRITE = 0x2D, 0x2A, 0x2B

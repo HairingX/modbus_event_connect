@@ -29,15 +29,15 @@ import pytest
 import pytest_asyncio
 
 from conftest import live_or_skip, live_setting
-from src.modbus_event_connect.client import Client
-from src.modbus_event_connect.data_type import DataType
-from src.modbus_event_connect.device import Outcome
-from src.modbus_event_connect.micro_nabto.access import DatapointRegister, SetpointRegister
-from src.modbus_event_connect.micro_nabto.connection import MicroNabtoConnection, discover
-from src.modbus_event_connect.micro_nabto.device import MicroNabtoDevice, MicroNabtoOptions
-from src.modbus_event_connect.model import Model, Section
-from src.modbus_event_connect.point import Point
-from src.modbus_event_connect.value import DataValue, Quality
+from src.modbus_event_connect._client import Client
+from src.modbus_event_connect._data_type import DataType
+from src.modbus_event_connect._device import Outcome
+from src.modbus_event_connect.micro_nabto._access import DatapointRegister, SetpointRegister
+from src.modbus_event_connect.micro_nabto._connection import MicroNabtoConnection, discover
+from src.modbus_event_connect.micro_nabto._device import MicroNabtoDevice, MicroNabtoOptions
+from src.modbus_event_connect._model import Model, Section
+from src.modbus_event_connect._point import Point
+from src.modbus_event_connect._value import DataValue, Quality
 
 HOST = live_setting("MICRO_NABTO_HOST")
 EMAIL = live_setting("MICRO_NABTO_EMAIL")
@@ -103,7 +103,7 @@ async def live() -> AsyncGenerator[Live, None]:
 # ================================================================================ safety
 
 async def test_nothing_here_can_be_written(live: Live) -> None:
-    assert not any(live.client.can_write(k) for k in live.client.keys)
+    assert not any(live.client.can_write(k) for k in live.client.points)
     with pytest.raises(AssertionError, match="read-only"):
         await live.connection.send(b"")
 
@@ -118,8 +118,8 @@ async def test_the_handshake_identifies_the_device(live: Live) -> None:
 
 
 async def test_every_value_is_good(live: Live) -> None:
-    qualities = Counter(v.quality.name for k in live.client.keys if (v := live.client.value(k)) is not None)
-    print(f"\n  {len(live.client.keys)} keys: {dict(qualities)}")
+    qualities = Counter(v.quality.name for k in live.client.points if (v := live.client.value(k)) is not None)
+    print(f"\n  {len(live.client.points)} keys: {dict(qualities)}")
     assert qualities == Counter({Quality.GOOD.name: len(DATAPOINTS) + len(SETPOINTS)})
 
 
@@ -135,9 +135,9 @@ async def test_every_subscriber_hears_its_value(live: Live) -> None:
 
     def listen(key: str, old: DataValue | None, new: DataValue) -> None:
         heard[key] = new
-    for unsubscribe in [live.client.subscribe(k, listen) for k in live.client.keys]:
+    for unsubscribe in [live.client.subscribe(k, listen) for k in live.client.points]:
         unsubscribe()
-    assert set(heard) == set(live.client.keys)
+    assert set(heard) == set(live.client.points)
 
 
 # ================================================================== what the device does

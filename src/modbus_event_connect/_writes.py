@@ -6,10 +6,10 @@ import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
-from . import conversion
-from .device import Device, EncodedWrite, Outcome
-from .point import Point, WriteKind
-from .value import Value
+from ._conversion import encode
+from ._device import Device, EncodedWrite, Outcome
+from ._point import Point, WriteKind
+from ._value import Value
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -110,7 +110,7 @@ class WriteQueue:
 
     async def _send(self, write: _Write) -> bool:
         point = write.point
-        result = await self._device.write(point, conversion.encode(point, write.value))
+        result = await self._device.write(point, encode(point, write.value))
         self._answered(result.outcome is not Outcome.NO_ANSWER)
         if not result.ok:
             _LOGGER.warning("'%s' was not written: %s %s", point.key, result.outcome.name, result.detail)

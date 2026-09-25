@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import Any, Protocol, runtime_checkable
 
-from ..clock import Clock, SystemClock
+from .._clock import Clock, SystemClock
 
 
 class FunctionCode(IntEnum):

@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from ..device import Identity
+from .._device import Identity
 
 DEVICE_PORT = 5570
 BROADCAST = ("255.255.255.255", DEVICE_PORT)

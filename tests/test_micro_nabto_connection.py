@@ -4,15 +4,15 @@ import logging
 
 import pytest
 
-from src.modbus_event_connect.errors import AuthenticationError
-from src.modbus_event_connect.micro_nabto import wire
-from src.modbus_event_connect.micro_nabto.connection import (
+from src.modbus_event_connect._errors import AuthenticationError
+from src.modbus_event_connect.micro_nabto import _wire as wire
+from src.modbus_event_connect.micro_nabto._connection import (
     DiscoveredDevice,
     MicroNabtoConnection,
     discover,
 )
-from src.modbus_event_connect.testing.clock import FakeClock
-from src.modbus_event_connect.testing.micro_nabto import SimulatedMicroNabtoDevice
+from src.modbus_event_connect.testing._clock import FakeClock
+from src.modbus_event_connect.testing._micro_nabto import SimulatedMicroNabtoDevice
 
 EMAIL = "user@example.invalid"
 IDENTITY = {"device_number": 7, "device_model": 1140, "slave_device_number": 72270, "slave_device_model": 1}

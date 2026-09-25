@@ -7,11 +7,11 @@ from typing import TypeVar
 
 import pytest
 
-from src.modbus_event_connect import client as client_module
-from src.modbus_event_connect.client import Client, Status
-from src.modbus_event_connect.conversion import InvalidValueError
-from src.modbus_event_connect.data_type import DataType
-from src.modbus_event_connect.device import (
+from src.modbus_event_connect import _client as client_module
+from src.modbus_event_connect._client import Client, Status
+from src.modbus_event_connect._errors import InvalidValueError
+from src.modbus_event_connect._data_type import DataType
+from src.modbus_event_connect._device import (
     EncodedWrite,
     Identity,
     Outcome,
@@ -19,21 +19,21 @@ from src.modbus_event_connect.device import (
     ReadResult,
     WriteResult,
 )
-from src.modbus_event_connect.errors import (
+from src.modbus_event_connect._errors import (
     CannotConnectError,
     NotConnectedError,
     ReadOnlyError,
     UnsupportedDeviceError,
 )
-from src.modbus_event_connect.modbus.access import (
+from src.modbus_event_connect.modbus._access import (
     Coil,
     HoldingRegister,
     InputRegister,
     ModbusOptions,
     plain,
 )
-from src.modbus_event_connect.model import Instances, Model, Scan, Section
-from src.modbus_event_connect.point import (
+from src.modbus_event_connect._model import Instances, Model, Scan, Section
+from src.modbus_event_connect._point import (
     Change,
     Labels,
     Limits,
@@ -43,8 +43,8 @@ from src.modbus_event_connect.point import (
     Refresh,
     WriteKind,
 )
-from src.modbus_event_connect.testing.clock import FakeClock
-from src.modbus_event_connect.value import DataValue, Quality
+from src.modbus_event_connect.testing._clock import FakeClock
+from src.modbus_event_connect._value import DataValue, Quality
 
 T = TypeVar("T")
 
@@ -178,6 +178,11 @@ def _client(registers: Mapping[str, tuple[int, ...]] | None = None, *,
     return Client(device, MODEL, clock=clock, read_only=read_only), device, clock
 
 
+def _without(key: str) -> dict[str, tuple[int, ...]]:
+    """The registers, less the one for `key`: the unit does not have it."""
+    return {k: v for k, v in REGISTERS.items() if k != key}
+
+
 def _connected(registers: Mapping[str, tuple[int, ...]] | None = None,
                read_only: bool = False) -> tuple[Client, FakeDevice, FakeClock]:
     client, device, clock = _client(registers, read_only=read_only)
@@ -240,13 +245,13 @@ def test_the_protocol_is_given_the_models_options() -> None:
 def test_identity_points_decide_which_sections_exist() -> None:
     old, _, _ = _connected({**REGISTERS, "hardware": (1,)})
     new, _, _ = _connected({**REGISTERS, "hardware": (2,)})
-    assert "cooling_temp" not in old.keys
-    assert "cooling_temp" in new.keys
+    assert "cooling_temp" not in old.points
+    assert "cooling_temp" in new.points
 
 
 def test_every_point_has_a_value_when_connect_returns() -> None:
     client, _, _ = _connected()
-    for key in client.keys:
+    for key in client.points:
         if client.can_read(key):
             assert client.value(key) is not None, key
     assert client.connected
@@ -264,7 +269,7 @@ def test_connect_reads_the_device_once() -> None:
 def test_a_scan_step_removes_what_the_unit_does_not_have() -> None:
     registers = {k: v for k, v in REGISTERS.items() if k != "room_2_temp"}
     client, _, _ = _connected(registers)
-    assert "room_2_temp" not in client.keys
+    assert "room_2_temp" not in client.points
     assert client.instances("room") == (1, 3)
     assert client.unavailable_reasons["room_2_temp"] == "room not installed"
 
@@ -287,7 +292,7 @@ def test_a_scan_read_neither_stores_nor_notifies() -> None:
 def test_a_register_missing_at_the_first_read_is_recorded_unavailable() -> None:
     registers = {k: v for k, v in REGISTERS.items() if k != "fan_out"}
     client, _, _ = _connected(registers)
-    assert "fan_out" not in client.keys
+    assert "fan_out" not in client.points
     assert not client.has("fan_out")
     assert "fan_out" in client.unavailable_reasons
 
@@ -302,7 +307,7 @@ def test_rescan_forgets_availability_and_keeps_interest() -> None:
 
     asyncio.run(client.rescan())
 
-    assert "fan_out" in client.keys
+    assert "fan_out" in client.points
     fan_out = client.value("fan_out")
     assert fan_out is not None and (fan_out.value, fan_out.quality) == (33, Quality.GOOD)
     assert client._scheduler is not None and client._scheduler.interval("temp") == 30
@@ -316,7 +321,7 @@ def test_nothing_works_before_connect() -> None:
     with pytest.raises(NotConnectedError):
         asyncio.run(client.write("mode", 2))
     with pytest.raises(NotConnectedError):
-        _ = client.keys
+        _ = client.points
 
 
 # ======================================================================== values, quality
@@ -505,8 +510,7 @@ def test_set_read_and_subscribe_are_independent_reasons() -> None:
 
 
 def test_an_unavailable_point_is_never_read_whatever_wants_it() -> None:
-    client, device, clock = _connected()
-    client.set_available(["fan_in"], False, reason="test")
+    client, device, clock = _connected(_without("fan_in"))
     client.subscribe("fan_in", Recorder())
     client.set_polling("fan_in")
     clock.advance(60)
@@ -693,10 +697,10 @@ def test_what_the_scan_read_is_not_read_again() -> None:
 def test_values_holds_only_keys_the_unit_has() -> None:
     registers = {k: v for k, v in REGISTERS.items() if k != "counter"}
     client, _, _ = _connected(registers)
-    assert "counter" not in client.keys and "counter" not in client.values
+    assert "counter" not in client.points and "counter" not in client.values
     missing = client.value("counter")
     assert missing is not None and missing.quality is Quality.MISSING
-    assert set(client.values) <= set(client.keys)
+    assert set(client.values) <= set(client.points)
 
 
 def test_a_point_with_its_own_read_back_delay_is_read_back_after_it() -> None:
@@ -837,17 +841,16 @@ def test_disconnect_cancels_a_pending_pulse() -> None:
 # ===================================================== regression scenarios
 
 def test_two_clients_share_nothing() -> None:
-    first, first_protocol, first_clock = _connected()
+    first, first_protocol, first_clock = _connected(_without("fan_out"))
     second, second_protocol, second_clock = _connected()
     first.subscribe("fan_in", Recorder())
-    first.set_available(["fan_out"], False, reason="test")
     for clock in (first_clock, second_clock):
         clock.advance(60)
     asyncio.run(first.poll())
     asyncio.run(second.poll())
     assert "fan_in" in first_protocol.read_keys()
     assert "fan_in" not in second_protocol.read_keys()
-    assert second.has("fan_out")
+    assert not first.has("fan_out") and second.has("fan_out")
 
 
 def test_overlapping_writes_keep_write_pending_until_the_last_finishes() -> None:
@@ -884,22 +887,22 @@ def test_set_read_before_connect_applies_once_connected() -> None:
 
 def test_an_unavailable_trigger_source_is_not_read_either() -> None:
     """A trigger source is read without anyone asking - unless the unit does not have it."""
-    client, device, clock = _connected()
-    client.set_available(["alarm_summary"], False, reason="test")
+    client, device, clock = _connected(_without("alarm_summary"))
     clock.advance(60)
     asyncio.run(client.poll())
     assert "alarm_summary" not in device.read_keys()
 
 
-def test_a_point_made_available_again_is_read_again() -> None:
-    client, device, clock = _connected()
+def test_a_point_found_by_a_rescan_is_read_again() -> None:
+    client, device, clock = _connected(_without("fan_in"))
     client.subscribe("fan_in", Recorder())
-    client.set_available(["fan_in"], False, reason="peripheral unplugged")
     clock.advance(60)
     asyncio.run(client.poll())
     assert "fan_in" not in device.read_keys()
 
-    client.set_available(["fan_in"], True)
+    device.answers["fan_in"] = ReadResult(Outcome.OK, REGISTERS["fan_in"])
+    asyncio.run(client.rescan())
+    device.reads.clear()
     clock.advance(60)
     asyncio.run(client.poll())
     assert "fan_in" in device.read_keys(), "the subscription was kept while it was unavailable"
@@ -981,7 +984,7 @@ def test_connect_commits_nothing_unless_every_scan_read_is_answered(key: str, ou
     with pytest.raises(CannotConnectError):
         asyncio.run(client.connect())
     with pytest.raises(NotConnectedError):
-        _ = client.keys
+        _ = client.points
     assert device.connected is False, "the connection opened for the scan was left open"
 
 
@@ -996,10 +999,10 @@ def test_a_failed_connect_on_a_silent_device_reports_it_unreachable() -> None:
 def test_rescan_on_a_silent_device_keeps_the_picture() -> None:
     registers = {k: v for k, v in REGISTERS.items() if k != "room_2_temp"}
     client, device, _ = _connected(registers)
-    keys, unavailable = client.keys, client.unavailable_reasons
+    keys, unavailable = tuple(client.points), client.unavailable_reasons
     _silence(device)
     with pytest.raises(CannotConnectError):
         asyncio.run(client.rescan())
-    assert client.keys == keys, "a silent device would have made room 2 appear"
+    assert tuple(client.points) == keys, "a silent device would have made room 2 appear"
     assert client.unavailable_reasons == unavailable
     assert client.connected is False

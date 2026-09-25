@@ -8,8 +8,8 @@ from enum import Enum, auto
 from types import MappingProxyType
 from typing import ClassVar, Hashable
 
-from .data_type import ByteOrder, DataType, DataTypeKind, WordOrder
-from .unit import Unit
+from ._data_type import ByteOrder, DataType, DataTypeKind, WordOrder
+from ._unit import Unit
 
 # ================================================================================== enums
 

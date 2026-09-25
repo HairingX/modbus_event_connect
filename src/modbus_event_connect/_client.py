@@ -7,16 +7,22 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from datetime import datetime
 from enum import StrEnum
 
-from . import conversion
-from .clock import Clock, SystemClock
-from .device import Device, Identity, Outcome, ReadResult
-from .errors import CannotConnectError, NotConnectedError, ReadOnlyError, UnsupportedDeviceError
-from .events import Subscriptions, ValueCallback, tell
-from .model import Model, ModelSelector, ResolvedModel, resolve
-from .point import Change, Labels, Point, PollRate, Selector
-from .scheduler import Scheduler
-from .value import DataValue, Quality, Value
-from .writes import WriteQueue
+from ._conversion import decode, encode
+from ._clock import Clock, SystemClock
+from ._device import Device, Identity, Outcome, ReadResult
+from ._errors import (
+    CannotConnectError,
+    InvalidValueError,
+    NotConnectedError,
+    ReadOnlyError,
+    UnsupportedDeviceError,
+)
+from ._events import Subscriptions, ValueCallback, tell
+from ._model import Model, ModelSelector, ResolvedModel, resolve
+from ._point import Change, Labels, Point, PollRate, Selector
+from ._scheduler import Scheduler
+from ._value import DataValue, Quality, Value
+from ._writes import WriteQueue
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -219,11 +225,6 @@ class Client:
         resolved = self._require_model()
         return {key: point for key, point in resolved.points.items() if self._is_available(key)}
 
-    @property
-    def keys(self) -> tuple[str, ...]:
-        """The keys of `points`."""
-        return tuple(self.points)
-
     def instances(self, label: str) -> tuple[int, ...]:
         """The numbers of the instances of `label` of which this unit has at least one point."""
         resolved = self._require_model()
@@ -320,14 +321,6 @@ class Client:
 
     # ======================================================================== availability
 
-    def set_available(self, targets: Selector | Sequence[str] | str, available: bool, *,
-                      reason: str = "") -> None:
-        """Record whether this unit has the selected points."""
-        points = [self._point(targets)] if isinstance(targets, str) else _select(self._require_model(), targets)
-        _record_availability(self._unavailable, points, available, reason)
-        for point in points:
-            self._update_polling(point.key)
-
     def _is_available(self, key: str) -> bool:
         return key not in self._unavailable
 
@@ -390,8 +383,8 @@ class Client:
         now = self._clock.now()
         if answer.outcome is Outcome.OK:
             try:
-                value, quality = conversion.decode(point, answer.registers)
-            except conversion.InvalidValueError as err:
+                value, quality = decode(point, answer.registers)
+            except InvalidValueError as err:
                 _LOGGER.error("'%s' answered registers that do not fit it: %s", point.key, err)
                 return _stale(previous, now)
             return DataValue(value, quality, now)
@@ -442,7 +435,7 @@ class Client:
             InvalidValueError: the point refuses the value.
         """
         point = self._writable_point(key)
-        conversion.encode(point, value)
+        encode(point, value)
         return await self._writes.write(point, value)
 
     async def write_sequence(self, writes: Sequence[tuple[str, Value]]) -> bool:
@@ -450,7 +443,7 @@ class Client:
         Write several values in order as one operation, stopping at the first refusal.
         Every value is checked before anything is sent. Returns whether all were accepted.
         """
-        encoded = [(point, conversion.encode(point, value))
+        encoded = [(point, encode(point, value))
                    for point, value in ((self._writable_point(key), value) for key, value in writes)]
         return await self._writes.write_sequence(encoded)
 

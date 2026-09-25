@@ -6,12 +6,12 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from . import wire
-from .access import DatapointRegister, SetpointRegister
-from .connection import MicroNabtoConnection
-from ..data_type import DataTypeKind
-from ..device import EncodedWrite, Identity, Outcome, ProtocolOptions, ReadResult, WriteResult
-from ..point import Access, Point
+from . import _wire as wire
+from ._access import DatapointRegister, SetpointRegister
+from ._connection import MicroNabtoConnection
+from .._data_type import DataTypeKind
+from .._device import EncodedWrite, Identity, Outcome, ProtocolOptions, ReadResult, WriteResult
+from .._point import Access, Point
 
 MAX_REGISTERS_PER_READ = 64
 """Registers per read request; a CTS 402 answered 108, so this leaves room."""

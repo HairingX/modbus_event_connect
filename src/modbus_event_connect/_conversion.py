@@ -5,10 +5,11 @@ import math
 import struct
 from collections.abc import Mapping, Sequence
 
-from .data_type import ByteOrder, DataTypeKind, WordOrder
-from .device import EncodedWrite
-from .point import Point
-from .value import Quality, Value
+from ._data_type import ByteOrder, DataTypeKind, WordOrder
+from ._device import EncodedWrite
+from ._errors import InvalidValueError
+from ._point import Point
+from ._value import Quality, Value
 
 _SIGNED_KINDS = frozenset({DataTypeKind.INT16, DataTypeKind.INT32, DataTypeKind.INT64})
 
@@ -24,10 +25,6 @@ _INT_RANGE: Mapping[DataTypeKind, tuple[int, int]] = {
 }
 
 _RELATIVE_TOLERANCE = 1e-9
-
-
-class InvalidValueError(ValueError):
-    """A value a point cannot take, or registers that are not a value of it."""
 
 
 # ================================================================================= public API

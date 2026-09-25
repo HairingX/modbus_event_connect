@@ -1,5 +1,5 @@
 """Modbus: address spaces and model options, the connection, and one device on it."""
-from .access import (
+from ._access import (
     BitWrite,
     Coil,
     DiscreteInput,
@@ -12,7 +12,7 @@ from .access import (
     modicon,
     plain,
 )
-from .connection import (
+from ._connection import (
     ExceptionCode,
     FunctionCode,
     ModbusConnection,
@@ -20,7 +20,7 @@ from .connection import (
     Request,
     Response,
 )
-from .device import ModbusDevice
+from ._device import ModbusDevice
 
 __all__ = [
     "BitWrite",

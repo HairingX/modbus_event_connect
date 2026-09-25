@@ -9,8 +9,8 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from ..clock import Clock, SystemClock
-from ..micro_nabto import wire
+from .._clock import Clock, SystemClock
+from ..micro_nabto import _wire as wire
 
 _DISCOVERY_REQUEST = b"\x00\x00\x00\x01"
 _U_CONNECT, _DATA = 0x83, 0x16

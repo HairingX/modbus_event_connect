@@ -4,9 +4,9 @@ from collections.abc import Mapping, Sequence
 
 import pytest
 
-from src.modbus_event_connect.client import Client
-from src.modbus_event_connect.conversion import InvalidValueError
-from src.modbus_event_connect.device import (
+from src.modbus_event_connect._client import Client
+from src.modbus_event_connect._errors import InvalidValueError
+from src.modbus_event_connect._device import (
     EncodedWrite,
     Identity,
     Outcome,
@@ -14,12 +14,12 @@ from src.modbus_event_connect.device import (
     ReadResult,
     WriteResult,
 )
-from src.modbus_event_connect.errors import ReadOnlyError
-from src.modbus_event_connect.modbus.access import HoldingRegister, InputRegister
-from src.modbus_event_connect.model import Model, Section
-from src.modbus_event_connect.point import Limits, Point
-from src.modbus_event_connect.testing.clock import FakeClock
-from src.modbus_event_connect.testing.read_back import (
+from src.modbus_event_connect._errors import ReadOnlyError
+from src.modbus_event_connect.modbus._access import HoldingRegister, InputRegister
+from src.modbus_event_connect._model import Model, Section
+from src.modbus_event_connect._point import Limits, Point
+from src.modbus_event_connect.testing._clock import FakeClock
+from src.modbus_event_connect.testing._read_back import (
     ReadBackMeasurement,
     ReadBackTrial,
     measure_read_back,

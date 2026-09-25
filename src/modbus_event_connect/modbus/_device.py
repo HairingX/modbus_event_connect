@@ -8,7 +8,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from .access import (
+from ._access import (
     MAX_REGISTERS_PER_WRITE,
     BitWrite,
     Coil,
@@ -18,7 +18,7 @@ from .access import (
     ModbusOptions,
     SingleWrite,
 )
-from .connection import (
+from ._connection import (
     ExceptionCode,
     FunctionCode,
     ModbusConnection,
@@ -26,9 +26,9 @@ from .connection import (
     Request,
     Response,
 )
-from ..clock import Clock, SystemClock
-from ..device import EncodedWrite, Identity, Outcome, ProtocolOptions, ReadResult, WriteResult
-from ..point import Access, Point
+from .._clock import Clock, SystemClock
+from .._device import EncodedWrite, Identity, Outcome, ProtocolOptions, ReadResult, WriteResult
+from .._point import Access, Point
 
 _READ_FUNCTION: Mapping[type[Access], FunctionCode] = {
     Coil: FunctionCode.READ_COILS,

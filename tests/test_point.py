@@ -4,12 +4,12 @@ from typing import Any, Callable
 
 import pytest
 
-from src.modbus_event_connect import unit as unit_module
-from src.modbus_event_connect.clock import Clock, SystemClock
-from src.modbus_event_connect.data_type import DataType, DataTypeKind
-from src.modbus_event_connect.device import EncodedWrite, Outcome, ReadResult, WriteResult
-from src.modbus_event_connect.micro_nabto.access import DatapointRegister, SetpointRegister
-from src.modbus_event_connect.modbus.access import (
+from src.modbus_event_connect import _unit as unit_module
+from src.modbus_event_connect._clock import Clock, SystemClock
+from src.modbus_event_connect._data_type import DataType, DataTypeKind
+from src.modbus_event_connect._device import EncodedWrite, Outcome, ReadResult, WriteResult
+from src.modbus_event_connect.micro_nabto._access import DatapointRegister, SetpointRegister
+from src.modbus_event_connect.modbus._access import (
     Coil,
     DiscreteInput,
     HoldingRegister,
@@ -20,7 +20,7 @@ from src.modbus_event_connect.modbus.access import (
     modicon,
     plain,
 )
-from src.modbus_event_connect.point import (
+from src.modbus_event_connect._point import (
     DEFAULT_INTERVALS,
     Access,
     Change,
@@ -34,9 +34,9 @@ from src.modbus_event_connect.point import (
     Transforms,
     WriteKind,
 )
-from src.modbus_event_connect.testing.clock import FakeClock
-from src.modbus_event_connect.unit import Unit
-from src.modbus_event_connect.value import DataValue, Quality
+from src.modbus_event_connect.testing._clock import FakeClock
+from src.modbus_event_connect._unit import Unit
+from src.modbus_event_connect._value import DataValue, Quality
 
 
 def _refused(match: str, **fields: Any) -> None:

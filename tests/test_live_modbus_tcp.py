@@ -23,20 +23,20 @@ import pytest
 import pytest_asyncio
 
 from conftest import live_or_skip, live_setting
-from src.modbus_event_connect.client import Client
-from src.modbus_event_connect.data_type import DataType
-from src.modbus_event_connect.device import Outcome
-from src.modbus_event_connect.modbus.access import (
+from src.modbus_event_connect._client import Client
+from src.modbus_event_connect._data_type import DataType
+from src.modbus_event_connect._device import Outcome
+from src.modbus_event_connect.modbus._access import (
     HoldingRegister,
     InputRegister,
     ModbusOptions,
     plain,
 )
-from src.modbus_event_connect.modbus.connection import ModbusTcpConnection, Request, Response
-from src.modbus_event_connect.modbus.device import ModbusDevice
-from src.modbus_event_connect.model import Model, Section
-from src.modbus_event_connect.point import Point
-from src.modbus_event_connect.value import Quality
+from src.modbus_event_connect.modbus._connection import ModbusTcpConnection, Request, Response
+from src.modbus_event_connect.modbus._device import ModbusDevice
+from src.modbus_event_connect._model import Model, Section
+from src.modbus_event_connect._point import Point
+from src.modbus_event_connect._value import Quality
 
 HOST = live_setting("MODBUS_TCP_HOST")
 PORT = int(live_setting("MODBUS_TCP_PORT") or "502")
@@ -92,7 +92,7 @@ def _good(client: Client, key: str) -> object:
 
 
 async def test_nothing_here_can_be_written(live: Live) -> None:
-    assert not any(live.client.can_write(k) for k in live.client.keys)
+    assert not any(live.client.can_write(k) for k in live.client.points)
 
 
 async def test_a_register_reads_as_an_integer(live: Live) -> None:
