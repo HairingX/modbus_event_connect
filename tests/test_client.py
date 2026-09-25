@@ -200,9 +200,9 @@ class Recorder:
     """A subscriber that keeps what it is told."""
 
     def __init__(self) -> None:
-        self.events: list[tuple[str, DataValue | None, DataValue]] = []
+        self.events: list[tuple[str | Status, DataValue | None, DataValue]] = []
 
-    def __call__(self, key: str, old: DataValue | None, new: DataValue) -> None:
+    def __call__(self, key: str | Status, old: DataValue | None, new: DataValue) -> None:
         self.events.append((key, old, new))
 
     @property
@@ -216,7 +216,7 @@ def test_an_unreachable_device_raises_cannot_connect() -> None:
     client = Client(FakeDevice(REGISTERS, reachable=False), MODEL, clock=FakeClock())
     with pytest.raises(CannotConnectError):
         asyncio.run(client.connect())
-    assert client.connected is False
+    assert client.status(Status.CONNECTED).value is False
 
 
 def test_a_device_no_model_matches_raises_unsupported() -> None:
@@ -254,7 +254,7 @@ def test_every_point_has_a_value_when_connect_returns() -> None:
     for key in client.points:
         if client.can_read(key):
             assert client.value(key) is not None, key
-    assert client.connected
+    assert client.status(Status.CONNECTED).value
 
 
 def test_connect_reads_the_device_once() -> None:
@@ -466,13 +466,25 @@ def test_subscribing_to_an_unknown_key_after_connect_raises() -> None:
         client.subscribe("no_such_point", Recorder())
 
 
-def test_status_is_subscribable_like_a_point() -> None:
+def test_a_status_is_subscribed_to_on_its_own() -> None:
     client, _, _ = _client()
-    recorder = Recorder()
-    client.subscribe(Status.CONNECTED, recorder)
+    seen: list[tuple[Status, object]] = []
+    client.subscribe_status(Status.CONNECTED, lambda status, old, new: seen.append((status, new.value)))
     asyncio.run(client.connect())
-    assert recorder.values == [False, True]
-    assert client.has(Status.CONNECTED)
+    assert seen == [(Status.CONNECTED, False), (Status.CONNECTED, True)]
+    assert client.status(Status.CONNECTED).value is True
+
+
+def test_a_point_named_like_a_status_is_an_ordinary_point() -> None:
+    """A model's keys are its own: none is reserved for the client's status."""
+    model = Model(name="TEST", manufacturer="TEST",
+                  sections=[Section([Point("status:connected", read=InputRegister(1))])],
+                  options=OPTIONS, read_back_after=1.0)
+    client = Client(FakeDevice({"status:connected": (7,)}), model, clock=FakeClock())
+    asyncio.run(client.connect())
+    current = client.value("status:connected")
+    assert current is not None and current.value == 7
+    assert client.can_read("status:connected")
 
 
 # ============================================================================= scheduling
@@ -618,11 +630,11 @@ def test_after_an_outage_everything_wanted_is_read_once_again() -> None:
     for key in ("temp", "fan_in", "serial"):
         client.subscribe(key, Recorder())
     status = Recorder()
-    client.subscribe(Status.CONNECTED, status)
+    client.subscribe_status(Status.CONNECTED, status)
     _silence(device)
     clock.advance(60)
     asyncio.run(client.poll())
-    assert client.connected is False
+    assert client.status(Status.CONNECTED).value is False
 
     for key, registers in REGISTERS.items():
         device.answer(key, *registers)
@@ -632,7 +644,7 @@ def test_after_an_outage_everything_wanted_is_read_once_again() -> None:
     recovery = device.read_keys()
     device.reads.clear()
     asyncio.run(client.poll())
-    assert client.connected is True
+    assert client.status(Status.CONNECTED).value is True
     assert status.values == [True, False, True]
     assert {"temp", "fan_in"} <= recovery
     assert device.read_keys() == {"serial"}, "a static value was not re-read, or a fresh one was read twice"
@@ -778,7 +790,7 @@ def test_a_write_that_raises_reaches_every_caller_it_stood_in_for() -> None:
                                          return_exceptions=True))
     results = within(2, taps())
     assert all(isinstance(r, RuntimeError) for r in results), results
-    assert client.write_pending is False, "a failed write left the user interface disabled"
+    assert client.status(Status.WRITE_PENDING).value is False, "a failed write left the user interface disabled"
 
 
 def test_every_command_is_sent_in_order() -> None:
@@ -795,7 +807,7 @@ def test_write_pending_brackets_the_whole_operation() -> None:
     client, device, _ = _connected()
     device.delay = 0.01
     recorder = Recorder()
-    client.subscribe(Status.WRITE_PENDING, recorder)
+    client.subscribe_status(Status.WRITE_PENDING, recorder)
     asyncio.run(client.write("mode", 2))
     assert recorder.values == [False, True, False]
 
@@ -835,7 +847,7 @@ def test_disconnect_cancels_a_pending_pulse() -> None:
         await asyncio.sleep(0.05)
     asyncio.run(press_and_leave())
     assert [value.registers for _, value in device.writes] == [(1,)]
-    assert client.connected is False
+    assert client.status(Status.CONNECTED).value is False
 
 
 # ===================================================== regression scenarios
@@ -857,7 +869,7 @@ def test_overlapping_writes_keep_write_pending_until_the_last_finishes() -> None
     client, device, _ = _connected()
     device.delay = 0.01
     recorder = Recorder()
-    client.subscribe(Status.WRITE_PENDING, recorder)
+    client.subscribe_status(Status.WRITE_PENDING, recorder)
 
     async def two_writes() -> None:
         await asyncio.gather(client.write("mode", 2), client.write("relay", True))
@@ -946,7 +958,7 @@ def test_reachability_follows_the_answers_not_the_socket() -> None:
     assert device.connected is True
     clock.advance(60)
     asyncio.run(client.poll())
-    assert client.connected is False
+    assert client.status(Status.CONNECTED).value is False
 
 
 def test_an_outage_and_its_recovery_are_logged_once_each() -> None:
@@ -968,10 +980,10 @@ def test_a_write_left_unanswered_marks_the_device_unreachable_and_an_answered_on
     client, device, _ = _connected()
     device.write_outcomes["mode"] = Outcome.NO_ANSWER
     asyncio.run(client.write("mode", 2))
-    assert client.connected is False
+    assert client.status(Status.CONNECTED).value is False
     device.write_outcomes["mode"] = Outcome.OK
     asyncio.run(client.write("mode", 2))
-    assert client.connected is True
+    assert client.status(Status.CONNECTED).value is True
 
 
 @pytest.mark.parametrize("outcome", [Outcome.NO_ANSWER, Outcome.BUSY])
@@ -993,7 +1005,7 @@ def test_a_failed_connect_on_a_silent_device_reports_it_unreachable() -> None:
     _silence(device)
     with pytest.raises(CannotConnectError):
         asyncio.run(client.connect())
-    assert client.connected is False
+    assert client.status(Status.CONNECTED).value is False
 
 
 def test_rescan_on_a_silent_device_keeps_the_picture() -> None:
@@ -1005,4 +1017,4 @@ def test_rescan_on_a_silent_device_keeps_the_picture() -> None:
         asyncio.run(client.rescan())
     assert tuple(client.points) == keys, "a silent device would have made room 2 appear"
     assert client.unavailable_reasons == unavailable
-    assert client.connected is False
+    assert client.status(Status.CONNECTED).value is False

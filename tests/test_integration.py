@@ -239,7 +239,7 @@ def test_a_device_the_gateway_cannot_reach_does_not_connect() -> None:
     client, gateway, _, _ = _stack(unit_id=7)
     with pytest.raises(CannotConnectError):
         asyncio.run(client.connect())
-    assert client.connected is False
+    assert client.status(Status.CONNECTED).value is False
     assert gateway.requests, "the gateway was never asked"
 
 
@@ -252,14 +252,14 @@ def test_a_half_open_link_is_noticed_and_recovered_from() -> None:
         clock.advance(60)
         asyncio.run(client.poll())
     assert gateway.connected is True, "test premise: the link still reports itself connected"
-    assert client.connected is False
+    assert client.status(Status.CONNECTED).value is False
     assert _value(client, "temp").quality is Quality.STALE
     assert device.diagnostics()["backing_off"] is True
 
     gateway.half_open = False
     clock.advance(30)
     asyncio.run(client.poll())                       # the first answer: reachable again
-    assert client.connected is True
+    assert client.status(Status.CONNECTED).value is True
     asyncio.run(client.poll())                       # and everything is due
     assert _value(client, "temp").quality is Quality.GOOD
 
@@ -286,7 +286,7 @@ def test_a_pulled_cable_goes_stale_backs_off_and_recovers() -> None:
         asyncio.run(client.poll())
     stale = _value(client, "temp")
     assert (stale.value, stale.quality, stale.timestamp) == (good.value, Quality.STALE, good.timestamp)
-    assert client.connected is False
+    assert client.status(Status.CONNECTED).value is False
     diagnostics = device.diagnostics()
     assert diagnostics["backing_off"] is True
     assert isinstance(diagnostics["refused_while_backing_off"], int) and diagnostics["refused_while_backing_off"] > 0
@@ -298,7 +298,7 @@ def test_a_pulled_cable_goes_stale_backs_off_and_recovers() -> None:
     asyncio.run(client.poll())
     temp = _value(client, "temp")
     assert (temp.value, temp.quality) == (23.0, Quality.GOOD)
-    assert client.connected is True
+    assert client.status(Status.CONNECTED).value is True
 
 
 # ================================================================================= writes
@@ -395,7 +395,7 @@ def test_a_refused_write_is_reported_and_leaves_the_device_unchanged() -> None:
     gateway.units[1].faults[(FunctionCode.WRITE_SINGLE_REGISTER, 10)] = 0x04
     assert asyncio.run(client.write("fan_speed", "high")) is False
     assert gateway.units[1].holding_registers[10] == 1
-    assert client.write_pending is False
+    assert client.status(Status.WRITE_PENDING).value is False
 
 
 # ======================================================================= shared gateway
@@ -446,7 +446,7 @@ def test_an_alarm_summary_brings_the_alarms_in() -> None:
 def test_status_follows_the_connection() -> None:
     client, gateway, clock, _ = _stack()
     seen: list[object] = []
-    client.subscribe(Status.CONNECTED, lambda k, o, n: seen.append(n.value))
+    client.subscribe_status(Status.CONNECTED, lambda k, o, n: seen.append(n.value))
     asyncio.run(client.connect())
     client.subscribe("temp", _nothing)
     gateway.link_down = True

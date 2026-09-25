@@ -3,7 +3,7 @@ import asyncio
 
 import pytest
 
-from src.modbus_event_connect._client import Client
+from src.modbus_event_connect._client import Client, Status
 from src.modbus_event_connect._data_type import DataType
 from src.modbus_event_connect._device import Device, EncodedWrite, Identity, Outcome
 from src.modbus_event_connect._errors import (
@@ -330,14 +330,14 @@ async def test_a_silent_device_makes_the_client_unavailable_until_it_answers_aga
         clock.advance(60)
         await client.poll()
         stale = client.value("temp_outside")
-        assert client.connected is False and stale is not None and stale.quality is Quality.STALE
+        assert client.status(Status.CONNECTED).value is False and stale is not None and stale.quality is Quality.STALE
 
         simulated.silent = False
         clock.advance(60)
         await client.poll()
         await client.poll()
         good = client.value("temp_outside")
-        assert client.connected is True and good is not None and good.quality is Quality.GOOD
+        assert client.status(Status.CONNECTED).value is True and good is not None and good.quality is Quality.GOOD
 
 
 async def test_a_restarted_device_goes_unnoticed_by_the_client() -> None:
@@ -350,4 +350,4 @@ async def test_a_restarted_device_goes_unnoticed_by_the_client() -> None:
         clock.advance(60)
         await client.poll()
         temp = client.value("temp_outside")
-        assert client.connected is True and temp is not None and temp.quality is Quality.GOOD
+        assert client.status(Status.CONNECTED).value is True and temp is not None and temp.quality is Quality.GOOD

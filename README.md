@@ -183,7 +183,7 @@ checked against the point's limits, and `InvalidValueError` says why it was refu
 - After a write, the point is read back, so subscribers see what the device really did.
 - `await client.write_sequence([("mode", 2), ("target", 21.5)])` checks every value first,
   then writes them in order and stops at the first refusal.
-- `client.write_pending` is `True` while writes are waiting or being sent.
+- `client.status(Status.WRITE_PENDING).value` is `True` while writes are waiting or being sent.
 
 `Client(device, model, read_only=True)` refuses every write with `ReadOnlyError` before it
 reaches the device. Use it while developing against a real installation.
@@ -193,8 +193,9 @@ reaches the device. Use it while developing against a real installation.
 After `connect()`, the client follows whether the device answers. You do not need to connect
 again after an outage.
 
-- `client.connected` is `False` while the device does not answer.
-- `client.subscribe(Status.CONNECTED, callback)` tells you when that changes.
+- `client.status(Status.CONNECTED).value` is `False` while the device does not answer.
+- `client.subscribe_status(Status.CONNECTED, callback)` tells you when that changes. A status is
+  not a point, so a model's keys never collide with it.
 - When the device answers again, every polled point is read at once.
 - `await client.disconnect()` lets go of the device.
 

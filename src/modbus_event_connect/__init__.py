@@ -1,5 +1,5 @@
 """Declarative device models over Modbus and micro_nabto, read and written through one client."""
-from ._client import Client, Status
+from ._client import Client, Status, StatusCallback
 from ._clock import Clock
 from ._data_type import ByteOrder, DataType, DataTypeKind, WordOrder
 from ._device import Identity
@@ -70,6 +70,7 @@ __all__ = [
     "Section",
     "Selector",
     "Status",
+    "StatusCallback",
     "Transform",
     "Transforms",
     "Unit",

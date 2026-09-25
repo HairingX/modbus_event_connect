@@ -5,7 +5,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from datetime import datetime
-from enum import StrEnum
+from enum import Enum, auto
 
 from ._conversion import decode, encode
 from ._clock import Clock, SystemClock
@@ -26,15 +26,17 @@ from ._writes import WriteQueue
 
 _LOGGER = logging.getLogger(__name__)
 
-class Status(StrEnum):
-    """Values the client produces itself. They can be subscribed to like point keys."""
-    CONNECTED = "status:connected"
+class Status(Enum):
+    """What the client itself knows about its device, apart from the device's points."""
+    CONNECTED = auto()
     """True while the device answers."""
-    WRITE_PENDING = "status:write_pending"
+    WRITE_PENDING = auto()
     """True from the first queued write until the last one has finished."""
 
 
-_STATUS_KEYS: frozenset[str] = frozenset(status.value for status in Status)
+StatusCallback = Callable[[Status, DataValue | None, DataValue], None]
+"""Called with the status, its previous value (None the first time) and the new value."""
+
 _UNANSWERED = frozenset({Outcome.NO_ANSWER, Outcome.BUSY})
 
 
@@ -86,6 +88,7 @@ class Client:
         self._reported_offline = False
         self._status: dict[Status, DataValue] = {
             status: DataValue(False, Quality.GOOD, self._clock.now()) for status in Status}
+        self._status_callbacks: dict[Status, list[StatusCallback]] = {status: [] for status in Status}
 
         self._poll_lock = asyncio.Lock()
         self._writes = WriteQueue(device, answered=self._update_reachability, written=self._read_back,
@@ -207,7 +210,7 @@ class Client:
             del self._values[key]
             self._subscriptions.forget(key)
         for key in self._subscriptions.keys():
-            if key not in _STATUS_KEYS and key not in resolved.points:
+            if key not in resolved.points:
                 _LOGGER.warning("'%s' is subscribed to, but the %s model does not have it", key, model.name)
         for key in resolved.points:
             self._update_polling(key)
@@ -237,8 +240,6 @@ class Client:
 
     def has(self, key: str) -> bool:
         """Whether this unit has `key`."""
-        if key in _STATUS_KEYS:
-            return True
         return self._resolved is not None and key in self._resolved.points and self._is_available(key)
 
     def can_read(self, key: str) -> bool:
@@ -256,8 +257,6 @@ class Client:
 
     def value(self, key: str) -> DataValue | None:
         """The current value of `key`, or None if it was never read."""
-        if key in _STATUS_KEYS:
-            return self._status[Status(key)]
         return self._values.get(key)
 
     @property
@@ -265,14 +264,9 @@ class Client:
         """The current value of each key this unit has, among those read."""
         return {key: value for key, value in self._values.items() if self._is_available(key)}
 
-    @property
-    def connected(self) -> bool:
-        """Whether the device answered the most recent exchange."""
-        return bool(self._status[Status.CONNECTED].value)
-
-    @property
-    def write_pending(self) -> bool:
-        return bool(self._status[Status.WRITE_PENDING].value)
+    def status(self, status: Status) -> DataValue:
+        """The current value of `status`: True or False, from the moment the client exists."""
+        return self._status[status]
 
     def consecutive_failures(self, key: str) -> int:
         """Consecutive failed reads of `key`."""
@@ -288,7 +282,7 @@ class Client:
         Raises:
             KeyError: after the scan, the model has no such key.
         """
-        if self._resolved is not None and key not in self._resolved.points and key not in _STATUS_KEYS:
+        if self._resolved is not None and key not in self._resolved.points:
             raise KeyError(f"the {self._resolved.model.name} model has no point {key!r}")
         subscriber = self._subscriptions.add(key, callback, polls=poll)
         self._update_polling(key)
@@ -299,6 +293,20 @@ class Client:
         def unsubscribe() -> None:
             self._subscriptions.remove(key, subscriber)
             self._update_polling(key)
+        return unsubscribe
+
+    def subscribe_status(self, status: Status, callback: StatusCallback) -> Callable[[], None]:
+        """Call `callback` on every change of `status`, starting with its current value.
+
+        Returns the unsubscriber.
+        """
+        callbacks = self._status_callbacks[status]
+        callbacks.append(callback)
+        _tell_status(callback, status, None, self._status[status])
+
+        def unsubscribe() -> None:
+            if callback in callbacks:
+                callbacks.remove(callback)
         return unsubscribe
 
     def set_polling(self, key: str, enabled: bool = True) -> None:
@@ -406,7 +414,7 @@ class Client:
 
     def _update_reachability(self, answered: bool) -> None:
         """Update reachability from whether the device answered, logging each change once."""
-        if answered == self.connected:
+        if answered == self._status[Status.CONNECTED].value:
             return
         self._set_status(Status.CONNECTED, answered)
         name = self._resolved.model.name if self._resolved is not None else "The device"
@@ -508,7 +516,8 @@ class Client:
             return
         data = DataValue(value, Quality.GOOD, self._clock.now())
         self._status[status] = data
-        self._subscriptions.tell(status, current, data)
+        for callback in list(self._status_callbacks[status]):
+            _tell_status(callback, status, current, data)
 
 
 class _ScanContext:
@@ -570,3 +579,11 @@ def _changed(old: DataValue, new: DataValue, when: Change) -> bool:
     if not isinstance(before, (int, float)) or not isinstance(after, (int, float)):
         return False
     return after > before if when is Change.RISING else after < before
+
+
+def _tell_status(callback: StatusCallback, status: Status, old: DataValue | None, new: DataValue) -> None:
+    """Call one status subscriber; its error is logged and kept from the others."""
+    try:
+        callback(status, old, new)
+    except Exception:
+        _LOGGER.exception("a subscriber to %s raised", status)
