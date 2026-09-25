@@ -3,7 +3,28 @@ requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "live: talks to real hardware; skipped unless a device is configured. Exclude with -m \"not live\".",
+]
 log_cli = true
 log_cli_level = "DEBUG"
 log_cli_format = "%(asctime)s [%(levelname)8s] %(message)s (%(filename)s:%(lineno)s)"
 log_cli_date_format = "%Y-%m-%d %H:%M:%S"
+
+[tool.pyright]
+# The standard belongs to the repository, not to a personal editor setting: an IDE and a CI
+# run must agree on what counts as an error.
+include = ["src", "tests"]
+exclude = ["**/__pycache__", "**/.venv"]
+typeCheckingMode = "strict"
+reportMissingTypeStubs = "none"   # pymodbus ships no stubs
+
+[[tool.pyright.executionEnvironments]]
+# Tests substitute transports and inspect internals on purpose; that is what a test double is.
+root = "tests"
+# Tests import the installed package, as its users do (pip install -e .), and each other as
+# `conftest`, as pytest resolves them from the tests directory.
+extraPaths = ["tests"]
+reportPrivateUsage = "none"
