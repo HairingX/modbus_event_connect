@@ -66,9 +66,11 @@ wheel and checks that `__version__` and the metadata say the version, and only t
 version commit and the tag together - a fast-forward of `main` from the tested commit, refused
 if `main` moved. Then PyPI, then the GitHub release, marked as a pre-release where it is one.
 
-GitHub writes the release's notes from the pull requests merged since the previous release
-candidate or final release - for a final release, since the previous final release - grouped by
-label as `.github/release.yml` says.
+A release candidate's notes are written by GitHub from the pull requests merged since the
+previous release candidate or final release, grouped by label as `.github/release.yml` says. A
+final release's notes are the draft's: edit the draft - it lists what was merged since the last
+final release - and run Release before anything else is merged, as a merge rewrites the draft.
+Without a draft, GitHub writes them from the pull requests since the previous final release.
 
 PyPI trusted publishing is bound to this repository, the file `release.yml` and the `pypi`
 environment: renaming either breaks the upload. Actions are referred to by their major version;

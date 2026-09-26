@@ -228,21 +228,28 @@ jobs:
           name: dist
           path: dist/
 
-      - name: Publish, with notes of the pull requests merged since the previous release
+      - name: Publish
         run: |
-          # GitHub writes the notes from the pull requests, grouped by label.
-          flags=(--generate-notes)
-          if [[ -n "$PREVIOUS_TAG" ]]; then
-            flags+=(--notes-start-tag "$PREVIOUS_TAG")
+          draft=$(gh api "repos/$GITHUB_REPOSITORY/releases" \
+            --jq '[.[] | select(.draft)] | sort_by(.created_at) | reverse | .[0] // empty')
+          flags=()
+          if [[ "$PRERELEASE" == "false" && -n "$draft" ]]; then
+            # A final release carries the draft's notes, as edited before running this.
+            jq -r '.body // ""' <<< "$draft" > notes.md
+            flags+=(--notes-file notes.md)
+          else
+            # GitHub writes the notes from the pull requests since the previous release.
+            flags+=(--generate-notes)
+            if [[ -n "$PREVIOUS_TAG" ]]; then
+              flags+=(--notes-start-tag "$PREVIOUS_TAG")
+            fi
           fi
           if [[ "$PRERELEASE" == "true" ]]; then
             flags+=(--prerelease --latest=false)
           fi
           gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag \
             --title "$TAG" "${flags[@]}"
-          # The draft only proposed this version; Release Drafter drafts the next one.
-          draft_id=$(gh api "repos/$GITHUB_REPOSITORY/releases" \
-            --jq '[.[] | select(.draft)] | sort_by(.created_at) | reverse | .[0].id // empty')
-          if [[ -n "$draft_id" ]]; then
-            gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$draft_id"
+          # The draft only proposed this release; Release Drafter drafts the next one.
+          if [[ -n "$draft" ]]; then
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$(jq -r .id <<< "$draft")"
           fi
