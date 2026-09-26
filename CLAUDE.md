@@ -32,6 +32,7 @@ obvious from the name - one or two lines, no narrative.
 ## Other conventions
 
 - pyright strict must report 0 errors (`pyright`); the configuration is in `pyproject.toml`.
+  The release scripts are a project of their own: `pyright -p .github/scripts`.
 - Every problem found gets a test that fails without the fix.
 - Test support - simulators, fake clocks, checks that sample behaviour - lives in `testing/`,
   never in the modules that run in production.
@@ -51,14 +52,17 @@ draft creates the tag at whatever `main` points to, before the version is set; e
 
 1. Merge pull requests into `main`. Release Drafter keeps a draft release with their notes and
    the next version, from the labels `major`, `minor` or `patch` (no label: patch).
-2. Run the **Release** workflow from the Actions tab, on `main`. Leave the version empty to take
-   the draft's, or type one: canonical PEP 440, `MAJOR.MINOR.PATCH` with an optional
-   pre-release, such as `0.2.0rc1`.
+2. Run the **Release** workflow from the Actions tab, on `main`, and choose **release
+   candidate** or **final release**. It works out the version: the next release candidate of the
+   open series (`0.2.0rc1` -> `0.2.0rc2`), or the final release that ends it (`0.2.0`); a draft
+   naming a higher version starts a new series. Type a version only to override one worked out
+   wrongly: canonical PEP 440, of the kind chosen.
 
-Release refuses a version already tagged or on PyPI, runs the tests on the commit it releases,
-sets `__version__`, builds, installs the wheel and checks that `__version__` and the metadata
-say the version, and only then pushes the version commit and the tag together - a fast-forward
-of `main` from the tested commit, refused if `main` moved. Then PyPI, then the GitHub release,
+Release refuses any version not higher than every version tagged or on PyPI, yanked ones
+included. It runs the tests on the commit it releases, sets `__version__`, builds, installs the
+wheel and checks that `__version__` and the metadata say the version, and only then pushes the
+version commit and the tag together - a fast-forward of `main` from the tested commit, refused
+if `main` moved. Then PyPI, then the GitHub release,
 marked as a pre-release where it is one.
 
 PyPI trusted publishing is bound to this repository, the file `release.yml` and the `pypi`

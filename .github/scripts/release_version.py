@@ -1,6 +1,12 @@
-"""The release version: check it is PEP 440 in canonical form, and write it into the package.
+"""The release version: work it out, and write it into the package.
 
-    release_version.py check VERSION        prints version=, tag= and prerelease= lines
+    release_version.py next KIND DRAFT OVERRIDE KNOWN
+                                            prints version=, tag= and prerelease= lines for the
+                                            next KIND ("release candidate" or "final release");
+                                            DRAFT is the draft release's version, OVERRIDE a
+                                            version to take instead, either may be empty; KNOWN
+                                            is a file of every version tagged or published, one
+                                            per line, a leading v allowed
     release_version.py write VERSION FILE   sets the one `__version__ = "..."` line in FILE
 """
 import re
@@ -10,6 +16,9 @@ from pathlib import Path
 from packaging.version import InvalidVersion, Version
 
 _LINE = re.compile(r'^__version__ = "[^"\n]*"$', re.MULTILINE)
+
+RELEASE_CANDIDATE = "release candidate"
+FINAL_RELEASE = "final release"
 
 
 def _canonical(text: str) -> Version:
@@ -29,8 +38,62 @@ def _canonical(text: str) -> Version:
     return version
 
 
-def check(text: str) -> None:
-    version = _canonical(text)
+def known_versions(lines: list[str]) -> list[Version]:
+    """The versions `lines` name, skipping tags that name none."""
+    versions: list[Version] = []
+    for line in lines:
+        try:
+            versions.append(Version(line.strip().removeprefix("v")))
+        except InvalidVersion:
+            continue
+    return versions
+
+
+def next_version(kind: str, draft: str, override: str, known: list[Version]) -> tuple[Version, str]:
+    """The version to release as `kind`, and how it was found.
+
+    Without an override, an open release-candidate series - the highest known version being a
+    pre-release - is continued, or ended by a final release, unless the draft names a higher
+    version; that starts a new series. The result must be higher than every known version,
+    as pip installs the highest and PyPI never takes a version twice.
+    """
+    if kind not in (RELEASE_CANDIDATE, FINAL_RELEASE):
+        sys.exit(f"::error::{kind!r} is neither {RELEASE_CANDIDATE!r} nor {FINAL_RELEASE!r}")
+    top = max(known, default=None)
+    if override:
+        version = _canonical(override)
+        if version.is_prerelease != (kind == RELEASE_CANDIDATE):
+            sys.exit(f"::error::{version} is {'a pre-release' if version.is_prerelease else 'a final release'}, "
+                     f"not a {kind}")
+        how = "given as the override"
+    else:
+        series = Version(top.base_version) if top is not None and top.is_prerelease else None
+        base = series
+        if draft:
+            proposed = _canonical(draft.removeprefix("v"))
+            if proposed.is_prerelease:
+                sys.exit(f"::error::the draft release names {proposed}, a pre-release, not the next version")
+            if base is None or proposed > base:
+                base = proposed
+        if base is None:
+            sys.exit("::error::no draft release names the next version, and no release-candidate "
+                     "series is open; give the version as the override")
+        if kind == FINAL_RELEASE:
+            version = base
+            how = "ends the release-candidate series" if base == series else "the draft release's version"
+        elif base == series and top is not None and top.pre is not None and top.pre[0] == "rc":
+            version = Version(f"{base}rc{top.pre[1] + 1}")
+            how = f"the release candidate after {top}"
+        else:
+            version = Version(f"{base}rc1")
+            how = f"the first release candidate of {base}"
+    if top is not None and version <= top:
+        sys.exit(f"::error::{version} is not higher than {top}, the highest version already tagged "
+                 f"or published")
+    return version, how
+
+
+def _print(version: Version) -> None:
     print(f"version={version}")
     print(f"tag=v{version}")
     print(f"prerelease={'true' if version.is_prerelease else 'false'}")
@@ -47,8 +110,11 @@ def write(text: str, path: Path) -> None:
 
 if __name__ == "__main__":
     match sys.argv[1:]:
-        case ["check", text]:
-            check(text)
+        case ["next", kind, draft, override, known]:
+            found, how = next_version(kind, draft, override,
+                                      known_versions(Path(known).read_text(encoding="utf-8").splitlines()))
+            print(f"{found}: {how}", file=sys.stderr)
+            _print(found)
         case ["write", text, path]:
             write(text, Path(path))
         case _:
