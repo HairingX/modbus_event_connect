@@ -18,7 +18,7 @@ A device is described once, as a *model*. The library then takes care of the res
 |---|---|
 | Building an application for a device that already has a model | [Part 1: Using a device](#part-1-using-a-device) |
 | Describing a new device: its registers, units and settings | [Part 2: Describing a device](#part-2-describing-a-device) |
-| Working on the library itself | [docs/design.md](docs/design.md) |
+| Working on the library itself | [docs/design.md](https://github.com/HairingX/modbus_event_connect/blob/main/docs/design.md) |
 
 ```bash
 pip install modbus-event-connect
@@ -555,4 +555,4 @@ your devices.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](https://github.com/HairingX/modbus_event_connect/blob/main/LICENSE).
