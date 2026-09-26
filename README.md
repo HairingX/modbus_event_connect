@@ -174,6 +174,11 @@ To read now, call `await client.refresh([TEMPERATURE])`. `refresh(PollRate.SLOW)
 whole poll rate, and `refresh()` reads everything. `subscribe(key, callback, poll=False)` is
 told about changes without asking for the point to be read on a timer.
 
+`client.set_scheduled_polling(False)` stops reading on the schedule - every poll rate, and the
+checks for whether the unit has changed. `poll()` then reads only what `refresh()` and writes ask
+for, and a read that finds a point gone still has its part of the unit checked.
+`set_scheduled_polling(True)` reads at once what has become due meanwhile.
+
 ## Writing
 
 ```python

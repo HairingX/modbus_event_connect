@@ -287,6 +287,15 @@ def test_an_instance_removed_is_found_at_the_next_read_of_its_points() -> None:
     assert client.instances("zone") == (2,)
 
 
+def test_without_scheduled_polling_a_read_that_finds_an_instance_gone_still_checks_it() -> None:
+    client, device, _, _ = _connected()
+    client.subscribe(zone_temp(1), lambda key, old, new: None)
+    client.set_scheduled_polling(False)
+    device.remove("zone_1_type", "zone_1_temp", "zone_1_setting")
+    asyncio.run(client.refresh([zone_temp(1)]))
+    assert "zone_1_setting" not in client.points and client.instances("zone") == (2,)
+
+
 def test_one_register_gone_while_its_instance_stays_removes_only_that_register() -> None:
     client, device, clock, seen = _connected()
     client.subscribe(zone_temp(1), lambda key, old, new: None)

@@ -114,6 +114,9 @@ class Client:
         self._scanned_labels: frozenset[str] = frozenset()
         self._points_callbacks: list[PointsCallback] = []
         self._interval_overrides: dict[PollRate | str, float | None] = {}
+        self._scheduled_polling = True
+        self._checks_requested: float | None = None
+        """When `refresh(PollRate.SCAN)` asked for the checks, which runs them without the schedule."""
         self._consecutive_failures: dict[str, int] = {}
         self._reported_offline = False
         self._status: dict[Status, DataValue[bool]] = {
@@ -285,6 +288,7 @@ class Client:
         for target, seconds in self._interval_overrides.items():
             if isinstance(target, PollRate) or target in resolved.points:
                 scheduler.set_poll_interval(target, seconds)
+        scheduler.set_scheduled(self._scheduled_polling)
 
         self._resolved, self._scheduler = resolved, scheduler
         self._missing_by_scan, self._missing_by_read = marks, {}
@@ -433,6 +437,13 @@ class Client:
             self._polled_keys.discard(key)
         self._update_polling(key)
 
+    def set_scheduled_polling(self, enabled: bool) -> None:
+        """Whether `poll()` reads on the schedule: every poll rate, and the checks for whether the
+        unit has changed. Off, it reads only what `refresh()` and writes ask for."""
+        self._scheduled_polling = enabled
+        if self._scheduler is not None:
+            self._scheduler.set_scheduled(enabled)
+
     def set_poll_interval(self, target: PollRate | str, seconds: float | None) -> float | None:
         """
         Override how often a poll rate or a key is read; None restores the model's interval.
@@ -507,7 +518,12 @@ class Client:
                 if keys:
                     resolved = self._require_model()
                     await self._read_and_publish([resolved.points[k] for k in keys])
-                await self._run_checks()
+                requested = self._checks_requested
+                if requested is not None and requested <= self._clock.monotonic():
+                    self._checks_requested = None
+                    await self._run_checks()
+                elif self._scheduled_polling:
+                    await self._run_checks()
             finally:
                 self._tell_points(before)
 
@@ -540,7 +556,10 @@ class Client:
 
     def seconds_until_next_poll(self) -> float | None:
         """Seconds until `poll()` has something to do, 0 if it has now; None if it never will."""
-        candidates = [check.due for check in self._checks.values() if math.isfinite(check.due)]
+        candidates = ([check.due for check in self._checks.values() if math.isfinite(check.due)]
+                      if self._scheduled_polling else [])
+        if self._checks_requested is not None:
+            candidates.append(self._checks_requested)
         due = self._require_scheduler().next_due()
         if due is not None:
             candidates.append(due)
@@ -558,6 +577,7 @@ class Client:
             due = self._clock.monotonic() + after
             for check in self._checks.values():
                 check.due = min(check.due, due)
+            self._checks_requested = due if self._checks_requested is None else min(self._checks_requested, due)
             if after == 0:
                 await self.poll()
             return
@@ -594,7 +614,10 @@ class Client:
                 self._update_polling(point.key)
                 check = self._checks.get(self._scope_of(point))
                 if not scanning and check is not None:
-                    check.due = min(check.due, self._clock.monotonic())
+                    now = self._clock.monotonic()
+                    check.due = min(check.due, now)
+                    # The read asked for it, so it runs without scheduled polling too.
+                    self._checks_requested = now if self._checks_requested is None else min(self._checks_requested, now)
             success = answer.outcome is Outcome.OK and data.quality is not Quality.STALE
             self._consecutive_failures[point.key] = 0 if success else self.consecutive_failures(point.key) + 1
             scheduler.record(point.key, data, success=success)
