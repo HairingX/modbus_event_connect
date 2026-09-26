@@ -65,11 +65,11 @@ A **device** is a model plus where to reach it: a connection and, for Modbus, a 
   Nobody writes the result, so nobody can overwrite anybody.
 - **One failing register never costs another.** A request refused because of one address is
   split, so only that address is reported.
-- **When `connect()` returns, the picture is final.** Nothing appears or disappears later
-  without an explicit call.
-- **The library owns no schedule.** The host calls `poll()` and `rescan()` when it chooses. The
-  only waiting the library does on its own finishes what a call started: a pulse's return to
-  idle.
+- **What the unit has changes only through its scans.** `connect()` runs them all; after that,
+  a scan runs again only where what it read has changed, and consumers are told.
+- **The library owns no schedule.** The host calls `poll()` when it chooses; the checks of what
+  the unit has run within it. The only waiting the library does on its own finishes what a call
+  started: a pulse's return to idle.
 
 ---
 
@@ -343,22 +343,30 @@ unconfigured rooms - as present. If a read goes unanswered, `connect()` raises
 There is no address-level bootstrap: a model is chosen from the handshake or from its
 identity points, and every step after that speaks in keys, so the register map is stated once.
 
-**Scan steps** are declared by the model and run in its order. Each gets a `Scan`: the
-identity, `read()` — which asks the device for what this scan has not read yet, and notifies
-no one until the scan is committed, so a rescan cannot cause a storm of events — and
-`set_available()`. What the steps read is kept for the scan: a later step gets it without a
-request, and the first read (5) skips it. A step marks what this unit lacks; it never treats
-an unanswered read as a missing register, since silence is not an answer.
+**Scans** are declared by the model: its `scan_steps` for the whole unit, run first and in
+order, and a repeated section's `scan(scan, n)` for each of its instances. Each gets a `Scan`:
+the identity, `read()` — which asks the device for what this scan has not read yet, and
+notifies no one until the scan is committed, so scanning cannot cause a storm of events — and
+`set_available()`. What the scans read is kept for the scan: a later one gets it without a
+request, and the first read (5) skips it. A scan marks what this unit lacks; it never treats an
+unanswered read as a missing register, since silence is not an answer. An instance's scan may
+mark only its own points, so that it can run again by itself.
 
-`rescan()` runs 2–5 again on the open connection: availability is found afresh, the connection
-and the subscriptions are left alone. If a read goes unanswered it raises, and the current
-picture stays as it was. The host calls it — on reload, or on its own schedule.
+**Finding changes.** What each scan read, and what it answered, is its check: read again at
+`PollRate.SCAN` from within `poll()`, the scans spread evenly over that interval. A check that
+reads the same answers ends there; one that reads another runs that scan again — one instance,
+or for the whole unit's steps everything from 2 on, the model chosen afresh — and reads what it
+now has. A register a read finds missing makes its instance's check due at once. A check with
+an unanswered read changes nothing and waits for the next. `subscribe_points` tells consumers
+the keys gained and lost; a lost key's subscribers are told `MISSING`. Because the checks read
+only what the scans read, a scan reads only what decides what the unit has.
 
 ### 4.3 Availability
 
 Availability is the client's memory of what this unit does not have: a record keyed by point
 key, with a reason that is for diagnostics only. Keeping it on the client, not on the points,
-means a rescan replaces one record and a model is never rebuilt around it.
+means a scan run again replaces its own part of the record and a model is never rebuilt around
+it.
 
 It is written at three moments: by scan steps, which catch structural facts cheaply (room 14
 does not exist); by the first read, which records every `MISSING` the steps did not ask about;
@@ -520,8 +528,8 @@ fits a change counter, a "configuration changed" timestamp, or an alarm count.
 falling. Its `after` defaults to 0 — a trigger reads at once.
 
 Anything the declarative form cannot say, a plugin does in code: it subscribes to the point and
-calls `refresh(...)` or `rescan()`. The declarative form compiles to those same calls, so there
-is one mechanism, not two.
+calls `refresh(...)`. The declarative form compiles to those same calls, so there is one
+mechanism, not two.
 
 ### 5.7 Time
 
@@ -727,7 +735,7 @@ A library that gets these wrong is worse than none.
 
 | Subtlety | How it is handled |
 |---|---|
-| `0x02`: the register is absent | `MISSING`, recorded as unavailable, not polled again until a rescan |
+| `0x02`: the register is absent | `MISSING`, recorded as unavailable and not polled again; its instance's scan is checked at once |
 | `0x01`: the function is unsupported | `UNSUPPORTED`, recorded like a missing register |
 | `0x04`: what is behind the register is not answering | `OFFLINE`; the point stays polled |
 | `0x06`: busy | retried four times, the wait doubling from 0.2 s, then `BUSY` |
@@ -753,7 +761,8 @@ A library that gets these wrong is worse than none.
   library offers labels to select by.
 - **Capability tables.** Which peripheral has humidity, which unit has a heat pump — model
   knowledge, changing on a different clock than the library.
-- **Timers.** No polling loop, no scheduled rescan, no background thread.
+- **Timers.** No polling loop and no background thread; the checks of what the unit has run
+  within `poll()`.
 - **Entity shape.** Which value becomes a sensor, a climate entity or a diagnostic is the
   integration's call.
 
@@ -787,5 +796,3 @@ A library that gets these wrong is worse than none.
 5. **Confirming a micro_nabto write.** The device sends a receipt ahead of every answer to a
    read. If it sends one for a write too, a write could be sent again until confirmed instead of
    relying on the read-back. Finding out takes one write to a live device.
-6. **Telling a consumer that a rescan changed the key list.** Nothing signals it today; a
-   consumer that adds and removes entities has to compare `keys` before and after.

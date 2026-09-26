@@ -132,7 +132,10 @@ class Scheduler:
         self._require(key)
         if key in self._key_overrides:
             return self._key_overrides[key]
-        poll_rate = self._points[key].poll_rate
+        return self.rate_interval(self._points[key].poll_rate)
+
+    def rate_interval(self, poll_rate: PollRate) -> float | None:
+        """The effective interval of a poll rate: its override, else the model default."""
         if poll_rate in self._rate_overrides:
             return self._rate_overrides[poll_rate]
         return self._model_intervals[poll_rate]

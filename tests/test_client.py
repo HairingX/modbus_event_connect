@@ -317,23 +317,6 @@ def test_a_register_missing_at_the_first_read_is_recorded_unavailable() -> None:
     assert "fan_out" in client.unavailable_reasons
 
 
-def test_rescan_forgets_availability_and_keeps_interest() -> None:
-    registers = {k: v for k, v in REGISTERS.items() if k != "fan_out"}
-    client, device, _ = _connected(registers)
-    recorder = Recorder()
-    client.subscribe(TEMP, recorder)
-    client.set_poll_interval(PollRate.SLOW, 30)
-    device.answer("fan_out", 33)                            # the peripheral was plugged in
-
-    asyncio.run(client.rescan())
-
-    assert "fan_out" in client.points
-    fan_out = client.value(FAN_OUT)
-    assert fan_out is not None and (fan_out.value, fan_out.quality) == (33, Quality.GOOD)
-    assert client._scheduler is not None and client._scheduler.interval("temp") == 30
-    assert recorder.events, "the subscription survived"
-
-
 def test_nothing_works_before_connect() -> None:
     client, _, _ = _client()
     with pytest.raises(NotConnectedError):
@@ -952,21 +935,6 @@ def test_an_unavailable_trigger_source_is_not_read_either() -> None:
     assert "alarm_summary" not in device.read_keys()
 
 
-def test_a_point_found_by_a_rescan_is_read_again() -> None:
-    client, device, clock = _connected(_without("fan_in"))
-    client.subscribe(FAN_IN, Recorder())
-    clock.advance(60)
-    asyncio.run(client.poll())
-    assert "fan_in" not in device.read_keys()
-
-    device.answers["fan_in"] = ReadResult(Outcome.OK, REGISTERS["fan_in"])
-    asyncio.run(client.rescan())
-    device.reads.clear()
-    clock.advance(60)
-    asyncio.run(client.poll())
-    assert "fan_in" in device.read_keys(), "the subscription was kept while it was unavailable"
-
-
 # ======================================================================== reachability
 
 def _silence(device: FakeDevice, outcome: Outcome = Outcome.NO_ANSWER) -> None:
@@ -1055,13 +1023,3 @@ def test_a_failed_connect_on_a_silent_device_reports_it_unreachable() -> None:
     assert client.status(Status.CONNECTED).value is False
 
 
-def test_rescan_on_a_silent_device_keeps_the_picture() -> None:
-    registers = {k: v for k, v in REGISTERS.items() if k != "room_2_temp"}
-    client, device, _ = _connected(registers)
-    keys, unavailable = tuple(client.points), client.unavailable_reasons
-    _silence(device)
-    with pytest.raises(CannotConnectError):
-        asyncio.run(client.rescan())
-    assert tuple(client.points) == keys, "a silent device would have made room 2 appear"
-    assert client.unavailable_reasons == unavailable
-    assert client.status(Status.CONNECTED).value is False
