@@ -1,12 +1,12 @@
 """The release version: work it out, and write it into the package.
 
-    release_version.py next KIND DRAFT OVERRIDE KNOWN
-                                            prints version=, tag= and prerelease= lines for the
-                                            next KIND ("release candidate" or "final release");
-                                            DRAFT is the draft release's version, OVERRIDE a
-                                            version to take instead, either may be empty; KNOWN
-                                            is a file of every version tagged or published, one
-                                            per line, a leading v allowed
+    release_version.py next KIND DRAFT OVERRIDE TAGS [PUBLISHED]
+                                            prints version=, tag=, prerelease= and previous_tag=
+                                            lines for the next KIND ("release candidate" or
+                                            "final release"); DRAFT is the draft release's
+                                            version, OVERRIDE a version to take instead, either
+                                            may be empty; TAGS is a file of every tag, PUBLISHED
+                                            one of every version published, one per line
     release_version.py write VERSION FILE   sets the one `__version__ = "..."` line in FILE
 """
 import re
@@ -96,6 +96,31 @@ def next_version(kind: str, draft: str, override: str, known: list[Version]) -> 
     return version, how
 
 
+def previous_tag(version: Version, tags: list[str]) -> str | None:
+    """The tag the notes of `version` start from, None to start from the beginning.
+
+    That is the release candidate or final release before it; before a final release, the final
+    release before it, so that its notes hold every change its release candidates had. Other
+    pre-releases, such as test builds, are skipped.
+    """
+    found: list[tuple[Version, str]] = []
+    for tag in tags:
+        try:
+            earlier = Version(tag.strip().removeprefix("v"))
+        except InvalidVersion:
+            continue
+        if earlier >= version or earlier.dev is not None:
+            continue
+        if earlier.pre is not None and (earlier.pre[0] != "rc" or not version.is_prerelease):
+            continue
+        found.append((earlier, tag.strip()))
+    return max(found)[1] if found else None
+
+
+def _lines(path: str) -> list[str]:
+    return Path(path).read_text(encoding="utf-8").splitlines()
+
+
 def _print(version: Version) -> None:
     print(f"version={version}")
     print(f"tag=v{version}")
@@ -113,11 +138,12 @@ def write(text: str, path: Path) -> None:
 
 if __name__ == "__main__":
     match sys.argv[1:]:
-        case ["next", kind, draft, override, known]:
+        case ["next", kind, draft, override, tags, *published] if len(published) <= 1:
             found, how = next_version(kind, draft, override,
-                                      known_versions(Path(known).read_text(encoding="utf-8").splitlines()))
+                                      known_versions(_lines(tags) + [v for f in published for v in _lines(f)]))
             print(f"{found}: {how}", file=sys.stderr)
             _print(found)
+            print(f"previous_tag={previous_tag(found, _lines(tags)) or ''}")
         case ["write", text, path]:
             write(text, Path(path))
         case _:

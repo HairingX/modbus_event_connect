@@ -52,6 +52,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
       prerelease: ${{ steps.version.outputs.prerelease }}
+      previous_tag: ${{ steps.version.outputs.previous_tag }}
       sha: ${{ steps.main.outputs.sha }}
     steps:
       - name: Refuse to run from anything but main
@@ -85,16 +86,17 @@ jobs:
           draft=$(gh api "repos/$GITHUB_REPOSITORY/releases" \
             --jq '[.[] | select(.draft)] | sort_by(.created_at) | reverse | .[0].tag_name // empty')
           git ls-remote --tags --refs "https://github.com/$GITHUB_REPOSITORY.git" \
-            | cut -f2 | sed 's#^refs/tags/##' > "$RUNNER_TEMP/known"
+            | cut -f2 | sed 's#^refs/tags/##' > "$RUNNER_TEMP/tags"
           # Every version PyPI has ever taken, yanked ones too: it never takes one twice.
+          : > "$RUNNER_TEMP/published"
           status=$(curl -sS -o "$RUNNER_TEMP/pypi.json" -w "%{http_code}" "https://pypi.org/pypi/$PACKAGE/json")
           case "$status" in
-            200) jq -r '.releases | keys[]' "$RUNNER_TEMP/pypi.json" >> "$RUNNER_TEMP/known" ;;
+            200) jq -r '.releases | keys[]' "$RUNNER_TEMP/pypi.json" > "$RUNNER_TEMP/published" ;;
             404) echo "$PACKAGE is not on PyPI yet" ;;
             *) echo "::error::PyPI answered $status for $PACKAGE"; exit 1 ;;
           esac
-          python .github/scripts/release_version.py next "$RELEASE" "$draft" "$OVERRIDE" "$RUNNER_TEMP/known" \
-            | tee -a "$GITHUB_OUTPUT"
+          python .github/scripts/release_version.py next "$RELEASE" "$draft" "$OVERRIDE" \
+            "$RUNNER_TEMP/tags" "$RUNNER_TEMP/published" | tee -a "$GITHUB_OUTPUT"
 
       - name: Record the commit to release
         id: main
@@ -218,6 +220,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ needs.prepare.outputs.tag }}
       PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+      PREVIOUS_TAG: ${{ needs.prepare.outputs.previous_tag }}
     steps:
       - name: Fetch the distributions
         uses: actions/download-artifact@v8
@@ -225,22 +228,21 @@ jobs:
           name: dist
           path: dist/
 
-      - name: Take the notes from the newest draft, and publish
+      - name: Publish, with notes of the pull requests merged since the previous release
         run: |
-          draft_id=$(gh api "repos/$GITHUB_REPOSITORY/releases" \
-            --jq '[.[] | select(.draft)] | sort_by(.created_at) | reverse | .[0].id // empty')
-          if [[ -n "$draft_id" ]]; then
-            gh api "repos/$GITHUB_REPOSITORY/releases/$draft_id" --jq '.body' > notes.md
-          else
-            echo "No draft release; publishing without notes."
-            : > notes.md
+          # GitHub writes the notes from the pull requests, grouped by label.
+          flags=(--generate-notes)
+          if [[ -n "$PREVIOUS_TAG" ]]; then
+            flags+=(--notes-start-tag "$PREVIOUS_TAG")
           fi
-          flags=()
           if [[ "$PRERELEASE" == "true" ]]; then
             flags+=(--prerelease --latest=false)
           fi
           gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag \
-            --title "$TAG" --notes-file notes.md "${flags[@]}"
+            --title "$TAG" "${flags[@]}"
+          # The draft only proposed this version; Release Drafter drafts the next one.
+          draft_id=$(gh api "repos/$GITHUB_REPOSITORY/releases" \
+            --jq '[.[] | select(.draft)] | sort_by(.created_at) | reverse | .[0].id // empty')
           if [[ -n "$draft_id" ]]; then
             gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$draft_id"
           fi

@@ -50,8 +50,8 @@ obvious from the name - one or two lines, no narrative.
 draft creates the tag at whatever `main` points to, before the version is set; every tag of
 `modbus_event_connect` up to `v0.1.8` carries the previous version for that reason.
 
-1. Merge pull requests into `main`. Release Drafter keeps a draft release with their notes and
-   the next version: a minor bump for the label `breaking-change` or `minor`, a patch otherwise.
+1. Merge pull requests into `main`. Release Drafter keeps a draft release proposing the next
+   version: a minor bump for the label `breaking-change` or `minor`, a patch otherwise.
    **A new major version is never worked out**, as a label placed wrongly must not release one;
    type it into Release as the override.
 2. Run the **Release** workflow from the Actions tab, on `main`, and choose **release
@@ -64,8 +64,11 @@ Release refuses any version not higher than every version tagged or on PyPI, yan
 included. It runs the tests on the commit it releases, sets `__version__`, builds, installs the
 wheel and checks that `__version__` and the metadata say the version, and only then pushes the
 version commit and the tag together - a fast-forward of `main` from the tested commit, refused
-if `main` moved. Then PyPI, then the GitHub release,
-marked as a pre-release where it is one.
+if `main` moved. Then PyPI, then the GitHub release, marked as a pre-release where it is one.
+
+GitHub writes the release's notes from the pull requests merged since the previous release
+candidate or final release - for a final release, since the previous final release - grouped by
+label as `.github/release.yml` says.
 
 PyPI trusted publishing is bound to this repository, the file `release.yml` and the `pypi`
 environment: renaming either breaks the upload. Actions are referred to by their major version;

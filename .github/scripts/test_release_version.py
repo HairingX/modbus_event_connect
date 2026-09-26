@@ -2,7 +2,7 @@
 import pytest
 from packaging.version import Version
 
-from release_version import FINAL_RELEASE, RELEASE_CANDIDATE, known_versions, next_version
+from release_version import FINAL_RELEASE, RELEASE_CANDIDATE, known_versions, next_version, previous_tag
 
 
 def _next(kind: str, draft: str, known: list[str], override: str = "") -> str:
@@ -93,3 +93,24 @@ def test_an_unknown_kind_is_refused() -> None:
 
 def test_tags_that_name_no_version_are_skipped() -> None:
     assert known_versions(["v0.1.0", "latest", "", "0.2.0rc1"]) == [Version("0.1.0"), Version("0.2.0rc1")]
+
+
+def test_the_notes_of_a_release_candidate_start_at_the_one_before() -> None:
+    assert previous_tag(Version("0.2.0rc2"), ["v0.1.9", "v0.2.0rc1", "v0.2.0rc2"]) == "v0.2.0rc1"
+
+
+def test_the_notes_of_a_final_release_start_at_the_final_release_before() -> None:
+    assert previous_tag(Version("0.2.0"), ["v0.1.9", "v0.2.0rc1", "v0.2.0rc2"]) == "v0.1.9"
+
+
+def test_the_notes_of_a_new_series_start_at_the_final_release_before() -> None:
+    assert previous_tag(Version("0.3.0rc1"), ["v0.2.0rc2", "v0.2.0", "latest"]) == "v0.2.0"
+
+
+def test_the_notes_skip_test_builds() -> None:
+    assert previous_tag(Version("0.2.0rc1"), ["v0.1.0", "v0.2.0b3"]) == "v0.1.0"
+
+
+def test_the_first_release_notes_start_from_the_beginning() -> None:
+    assert previous_tag(Version("0.1.0"), []) is None
+    assert previous_tag(Version("0.2.0"), ["v0.2.0rc1", "v0.2.0rc2"]) is None

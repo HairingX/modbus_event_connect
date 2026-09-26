@@ -3,35 +3,6 @@ tag-template: 'v$RESOLVED_VERSION'
 change-template: '- #$NUMBER $TITLE @$AUTHOR'
 sort-direction: ascending
 categories:
-  - type: 'pre-exclude'
-    when:
-      label: 'skip-changelog'
-
-  - title: '🛠 Breaking Changes'
-    when:
-      label: 'breaking-change'
-
-  - title: '🚀 Features'
-    when:
-      labels:
-        - 'feature request'
-        - 'enhancement'
-
-  - title: '🐛 Bug Fixes'
-    when:
-      labels:
-        - 'fix'
-        - 'bugfix'
-        - 'bug'
-
-  - title: '🧰 Maintenance'
-    when:
-      label: 'chore'
-
-  - title: ':package: Dependencies'
-    when:
-      label: 'dependencies'
-
   # The next version: a minor bump for a breaking change or by label, a patch otherwise. A major
   # is never taken from a label, as one placed wrongly must not release a new major version.
   - type: 'version-resolver'

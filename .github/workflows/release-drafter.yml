@@ -1,7 +1,7 @@
 name: Release Drafter
 
-# Keeps a draft release with the notes of every pull request merged since the last release.
-# The draft is never published by hand: the Release workflow takes its notes and publishes.
+# Keeps a draft release proposing the next version, from the labels of the pull requests merged
+# since the last final release. The draft is never published by hand.
 on:
   push:
     branches:
