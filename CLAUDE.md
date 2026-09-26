@@ -78,9 +78,10 @@ Dependabot proposes a new major, and updates to the test tools, as pull requests
 
 ## Branches and pull requests
 
-- Process changes - CI, the release, the release draft, these conventions - go straight to
-  `main`. A change to the library itself - its code, tests or documentation - goes through a
-  branch and a pull request.
+- Process changes - CI, tests and test tools, the release, the release draft, these
+  conventions - go straight to `main`: they change nothing a user of the library gets. A change
+  to what a user gets - the library's code or documentation - goes through a branch and a pull
+  request, with its tests.
 - Name every branch by the kind of change, as the release draft's labels follow the name:
   `feature/<what>` is labelled `feature request`, `fix/<what>` is labelled `bug`, and
   `chore/<what>` - CI, tooling, documentation - is labelled `chore`.
