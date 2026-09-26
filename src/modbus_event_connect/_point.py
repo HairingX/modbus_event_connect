@@ -23,6 +23,11 @@ class PollRate(Enum):
     RARE = auto()
     STATIC = auto()
     """Read by the scan, when triggered or on request - never on a timer."""
+    SCAN = auto()
+    """How often what each scan read is read again, to find out whether the unit has changed.
+
+    No point is polled at it.
+    """
 
 
 DEFAULT_INTERVALS: Mapping[PollRate, float | None] = MappingProxyType({
@@ -31,6 +36,7 @@ DEFAULT_INTERVALS: Mapping[PollRate, float | None] = MappingProxyType({
     PollRate.SLOW: 60.0,
     PollRate.RARE: 900.0,
     PollRate.STATIC: None,
+    PollRate.SCAN: 900.0,
 })
 """Seconds between reads per poll rate, used when a model does not set its own."""
 
@@ -383,6 +389,8 @@ def _valid_raw_problems(point: Point[Any]) -> list[str]:
 
 def _read_problems(point: Point[Any]) -> list[str]:
     found: list[str] = []
+    if point.poll_rate is PollRate.SCAN:
+        found.append("PollRate.SCAN is how often a scan is checked, not a poll rate a point can have")
     if point.deadband is not None:
         if point.deadband < 0:
             found.append(f"deadband cannot be negative, got {point.deadband}")

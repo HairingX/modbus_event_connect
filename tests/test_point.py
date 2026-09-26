@@ -288,6 +288,11 @@ def test_poll_always_needs_a_read_side() -> None:
     _refused("poll_always=True asks for reads", write=HoldingRegister(1), poll_always=True)
 
 
+def test_no_point_is_polled_at_the_scan_rate() -> None:
+    """PollRate.SCAN is how often a scan is checked again, which is no point's rate."""
+    _refused("PollRate.SCAN", read=InputRegister(1), poll_rate=PollRate.SCAN)
+
+
 def test_a_command_needs_a_write_side() -> None:
     _refused("COMMAND is written", read=InputRegister(1), write_kind=WriteKind.COMMAND)
 
@@ -710,7 +715,7 @@ def test_a_month_is_not_written_as_the_symbol_for_a_metre() -> None:
 
 def test_the_poll_rates_climb_from_seconds_to_a_quarter_of_an_hour() -> None:
     assert dict(DEFAULT_INTERVALS) == {PollRate.FAST: 10.0, PollRate.MEDIUM: 30.0, PollRate.SLOW: 60.0,
-                                       PollRate.RARE: 900.0, PollRate.STATIC: None}
+                                       PollRate.RARE: 900.0, PollRate.STATIC: None, PollRate.SCAN: 900.0}
 
 
 def test_a_point_is_polled_at_the_medium_rate_unless_it_says_otherwise() -> None:

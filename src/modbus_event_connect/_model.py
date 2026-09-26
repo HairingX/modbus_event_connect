@@ -31,25 +31,35 @@ class Section:
 
 @dataclass(frozen=True)
 class RepeatedSection:
-    """A section repeated once per number: `factory(n)` gives its points, each labelled `{label: n}`."""
+    """A section repeated once per number: `factory(n)` gives its points, each labelled `{label: n}`.
+
+    `scan(scan, n)` finds what instance `n` has, and may mark only instance `n`'s points. It runs
+    for every instance at connect, and again for one instance when what it read has changed.
+    """
     factory: Callable[[int], Sequence[Point[Any]]]
     numbers: tuple[int, ...]
     label: str
     when: Callable[[Identity], bool] | None = None
+    scan: InstanceScanStep | None = None
 
     def __init__(self, factory: Callable[[int], Sequence[Point[Any]]], numbers: Iterable[int], label: str,
-                 when: Callable[[Identity], bool] | None = None) -> None:
+                 when: Callable[[Identity], bool] | None = None, scan: InstanceScanStep | None = None) -> None:
         object.__setattr__(self, "factory", factory)
         object.__setattr__(self, "numbers", tuple(numbers))
         object.__setattr__(self, "label", label)
         object.__setattr__(self, "when", when)
+        object.__setattr__(self, "scan", scan)
 
 
 # ================================================================================== scan
 
 
 class Scan(Protocol):
-    """What a scan step may do: read to find out what is there, and mark parts unavailable."""
+    """What a scan step may do: read to find out what is there, and mark parts unavailable.
+
+    What a scan reads is read again at `PollRate.SCAN` to find out whether the unit has changed,
+    so a scan reads only what decides what the unit has.
+    """
 
     @property
     def identity(self) -> Identity: ...
@@ -61,7 +71,13 @@ class Scan(Protocol):
 
 
 ScanStep = Callable[[Scan], Awaitable[None]]
-"""One step of the scan, run in the model's own order."""
+"""One step of the scan of the whole unit, run in the model's own order.
+
+When what the steps read has changed, the whole unit is scanned again and its model chosen afresh.
+"""
+
+InstanceScanStep = Callable[[Scan, int], Awaitable[None]]
+"""The scan of one instance of a repeated section, given its number."""
 
 
 # =============================================================================== model
@@ -225,6 +241,8 @@ def _resolve(model: Model, identity: Identity) -> _Resolution:
         if isinstance(section, RepeatedSection):
             produced, numbers = _expand_repeated(section, label, problems)
             all_points.extend(produced)
+            if section.label in instances:
+                problems.append(f"{label}: another repeated section already has the label {section.label!r}")
             if section.label:
                 instances[section.label] = numbers
         else:

@@ -200,6 +200,22 @@ def test_instance_label_must_not_be_empty() -> None:
     assert any("label must not be empty" in msg for msg in found)
 
 
+def test_two_repeated_sections_may_not_share_a_label() -> None:
+    """A label names the instances each instance's scan covers."""
+    def first(n: int) -> list[Point[Any]]:
+        return [Point(Key(f"a_{n}", int), read=InputRegister(n), data_type=DataType.UINT16)]
+
+    def second(n: int) -> list[Point[Any]]:
+        return [Point(Key(f"b_{n}", int), read=InputRegister(10 + n), data_type=DataType.UINT16)]
+
+    model = Model(name="X", manufacturer="Y",
+                  sections=[RepeatedSection(first, [1, 2], label="unit"),
+                            RepeatedSection(second, [1, 2], label="unit")],
+                  options=ModbusOptions(numbering=plain(first_address=1)), read_back_after=1.0)
+    found = problems(model, {})
+    assert any("already has the label 'unit'" in msg for msg in found)
+
+
 def test_duplicate_keys_across_instances_are_reported() -> None:
     model = Model(name="X", manufacturer="Y",
                   sections=[RepeatedSection(lambda n: [Point(Key("shared_key", int), read=InputRegister(n), data_type=DataType.UINT16)],

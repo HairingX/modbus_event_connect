@@ -157,6 +157,7 @@ someone subscribes to it:
 | `SLOW` | 60 s |
 | `RARE` | 15 min |
 | `STATIC` | once, when connecting |
+| `SCAN` | what each scan read, read again to find changes (see [When the unit changes](#when-the-unit-changes)) |
 
 These are the library's defaults; a model may set its own. You can change them:
 
@@ -216,7 +217,7 @@ rooms. After `connect()`:
 | `client.has(key)`, `client.can_write(key)` | whether it has the key, and whether it can be written |
 | `client.instances("room")` | which rooms, zones or channels are installed, such as `(1, 3)` |
 | `client.unavailable_reasons` | keys the unit does not have, with the reason |
-| `await client.rescan()` | find out again, for example after a room was added |
+| `client.subscribe_points(callback)` | told when the unit gains or loses points, such as a room set up later |
 
 ## In a larger application
 
@@ -233,9 +234,9 @@ rooms. After `connect()`:
 
 | Error | Raised by | When |
 |---|---|---|
-| `CannotConnectError` | `connect()`, `rescan()` | The device could not be reached, or left a read unanswered. |
+| `CannotConnectError` | `connect()` | The device could not be reached, or left a read unanswered. |
 | `AuthenticationError` | `connect()` | A micro_nabto device refused the email. |
-| `UnsupportedDeviceError` | `connect()` | No model matches the device. |
+| `UnsupportedDeviceError` | `connect()`, `poll()` | No model matches the device, or no longer does after it changed. |
 | `NotConnectedError` | most methods | Used before `connect()` succeeded. |
 | `InvalidValueError` | `write()` | The point cannot take the value. |
 | `ReadOnlyError` | `write()` | The client is read-only. |
@@ -471,8 +472,8 @@ picks one from the identity, as shown in [Connecting](#connecting).
 
 ## Repeated parts, and what is installed
 
-A device with rooms, zones or channels describes one of them once. A scan step, run when
-connecting, finds out which ones this installation has:
+A device with rooms, zones or channels describes one of them once, and a scan finds out what
+each one has:
 
 ```python
 from modbus_event_connect import RepeatedSection, Labels, Scan
@@ -483,24 +484,40 @@ def room(n):
             Point(Key(f"room_{n}_temperature", float), read=InputRegister(101 + 10 * n),
                   data_type=DataType.INT16, scale=0.1, unit=Unit.CELSIUS)]
 
-async def skip_empty_rooms(scan: Scan):
-    for n in range(1, 9):
-        installed = await scan.read([f"room_{n}_installed"])
-        if installed[f"room_{n}_installed"].value == 0:
-            scan.set_available(Labels(room=n), False, reason="no room")
+async def scan_room(scan: Scan, n: int):
+    installed = await scan.read([f"room_{n}_installed"])
+    if installed[f"room_{n}_installed"].value == 0:
+        scan.set_available(Labels(room=n), False, reason="no room")
 
 HEATING = Model(name="Heating", manufacturer="Example",
                 options=ModbusOptions(numbering=plain(first_address=1)), read_back_after=2.0,
-                sections=[RepeatedSection(room, range(1, 9), label="room")],
-                scan_steps=[skip_empty_rooms])
+                sections=[RepeatedSection(room, range(1, 9), label="room", scan=scan_room)])
 ```
 
 Every point `room(n)` returns is labelled `room=n`, so `Labels(room=3)` selects room 3's points.
 After `connect()`, `client.instances("room")` lists the installed rooms, and `client.points`
 has only their points.
 
-Scan steps run in order. If one of their reads goes unanswered, `connect()` fails rather than
-guess what is installed.
+A repeated section's `scan(scan, n)` decides what instance `n` has, from any points it reads -
+several, or one whose value rules out others - and may mark only instance `n`'s points. What
+decides for the whole unit, such as a firmware version, goes in the model's `scan_steps`, which
+run first. If a scan's read goes unanswered, `connect()` fails rather than guess what is
+installed.
+
+### When the unit changes
+
+A room set up later, or one taken away, is found while polling; nobody needs to connect again.
+
+- What each scan read is read again at `PollRate.SCAN`, the scans spread evenly over it. A
+  scan reads only what decides what the unit has, so that is all that is read.
+- Where that has changed, only that scan runs again: one room's. A change to what the whole
+  unit's `scan_steps` read scans everything again, choosing the model afresh.
+- A register a read finds missing is no longer read, and its room is checked at once.
+- An unanswered read never changes anything; the check is tried again later.
+- `client.subscribe_points(callback)` is told the keys gained and lost. A lost key's
+  subscribers are told `MISSING`.
+- `await client.refresh(PollRate.SCAN)` checks now; `set_poll_interval(PollRate.SCAN, ...)`
+  sets how often. To find out everything afresh, `disconnect()` and `connect()`.
 
 ## Testing a model
 

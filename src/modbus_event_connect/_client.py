@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum, auto
 from typing import Any
@@ -14,16 +16,17 @@ from ._device import Device, Identity, Outcome, ReadResult
 from ._errors import (
     CannotConnectError,
     InvalidValueError,
+    ModelError,
     NotConnectedError,
     ReadOnlyError,
     UnsupportedDeviceError,
 )
 from ._events import Subscriptions, ValueCallback, tell
 from ._key import Key, is_key
-from ._model import Model, ModelSelector, ResolvedModel, resolve
+from ._model import InstanceScanStep, Model, ModelSelector, RepeatedSection, ResolvedModel, resolve
 from ._point import Change, Labels, Point, PollRate, Selector
 from ._scheduler import Scheduler
-from ._value import DataValue, Quality
+from ._value import DataValue, Quality, Value
 from ._writes import Write, WriteQueue
 
 _LOGGER = logging.getLogger(__name__)
@@ -39,7 +42,25 @@ class Status(Enum):
 StatusCallback = Callable[[Status, DataValue[bool] | None, DataValue[bool]], None]
 """Called with the status, its previous value (None the first time) and the new value."""
 
+PointsCallback = Callable[[frozenset[Key[Any]], frozenset[Key[Any]]], None]
+"""Called with the keys the unit has gained and the keys it has lost, once its points changed."""
+
 _UNANSWERED = frozenset({Outcome.NO_ANSWER, Outcome.BUSY})
+
+_DEFINITIVE = frozenset({Outcome.OK, Outcome.MISSING, Outcome.UNSUPPORTED, Outcome.OFFLINE})
+"""Answers that say what the unit has. Any other leaves a check's outcome unknown."""
+
+type _Scope = tuple[str, int] | None
+"""What one scan covers: an instance of a repeated section, as its label and number, or the whole
+unit, as None."""
+
+
+@dataclass
+class _Check:
+    """What one scan read, as it read it, and when to read it again."""
+    read: dict[str, tuple[Quality, Value]]
+    due: float
+    """Monotonic time; infinite when checks are switched off."""
 
 
 class _ScanAnswers:
@@ -84,7 +105,14 @@ class Client:
         self._values: dict[str, DataValue[Any]] = {}
         self._subscriptions = Subscriptions()
         self._polled_keys: set[str] = set()
+        # Missing keys with their reason, kept apart by who found them, so that scanning one
+        # instance again replaces what its own scan found and nothing else.
+        self._missing_by_scan: dict[_Scope, dict[str, str]] = {}
+        self._missing_by_read: dict[str, str] = {}
         self._unavailable: dict[str, str] = {}
+        self._checks: dict[_Scope, _Check] = {}
+        self._scanned_labels: frozenset[str] = frozenset()
+        self._points_callbacks: list[PointsCallback] = []
         self._interval_overrides: dict[PollRate | str, float | None] = {}
         self._consecutive_failures: dict[str, int] = {}
         self._reported_offline = False
@@ -117,16 +145,6 @@ class Client:
             await self._device.disconnect()
             raise
 
-    async def rescan(self) -> None:
-        """
-        Find again what this unit has, on the open connection, and read every value once.
-
-        Raises:
-            NotConnectedError: the device has not been scanned.
-            CannotConnectError: a read went unanswered; nothing was changed.
-        """
-        await self._scan(dict(self._require_model().identity))
-
     async def disconnect(self) -> None:
         """Cancel pending pulses and let go of the device."""
         self._writes.cancel_pulses()
@@ -136,8 +154,9 @@ class Client:
 
     async def _scan(self, handshake: Identity) -> None:
         """
-        Build the model, availability and first values; commit only if every read was answered.
-        An unanswered read never reports a register missing, so it cannot be trusted.
+        Choose the model, run the scan of the whole unit and of each instance, and read every
+        value once; commit only if every read was answered. An unanswered read never reports a
+        register missing, so it cannot be trusted.
         """
         model = self._select_model(handshake)
         if model is None:
@@ -147,7 +166,11 @@ class Client:
         try:
             resolved = resolve(model, await self._identify(model, handshake, answers))
             scanned: dict[str, ReadResult] = {}
-            unavailable = await self._run_scan_steps(model, resolved, answers, scanned)
+            marks: dict[_Scope, dict[str, str]] = {}
+            reads: dict[_Scope, set[str]] = {}
+            for scope in _scopes(resolved):
+                marks[scope], reads[scope] = await self._run_scan(resolved, scope, answers, scanned)
+            unavailable = _union(marks.values())
             readable = [p for p in resolved.points.values() if p.readable and p.key not in unavailable]
             unread = [p for p in readable if p.key not in scanned]
             first_answers: Mapping[str, ReadResult] = await self._device.read(unread) if unread else {}
@@ -156,8 +179,38 @@ class Client:
         except CannotConnectError:
             self._update_reachability(answers.any_answered)
             raise
-        self._commit(model, resolved, unavailable)
-        self._publish(readable, {**scanned, **first_answers})
+        self._commit(model, resolved, marks,
+                     {scope: self._states([resolved.points[k] for k in keys], scanned)
+                      for scope, keys in reads.items()})
+        self._publish(readable, {**scanned, **first_answers}, scanning=True)
+
+    async def _rescan(self, scope: tuple[str, int]) -> None:
+        """Scan one instance again, and read what it now has.
+
+        Raises:
+            CannotConnectError: a read went unanswered; nothing was changed.
+        """
+        resolved = self._require_model()
+        label, number = scope
+        answers = _ScanAnswers()
+        scanned: dict[str, ReadResult] = {}
+        marked, read_keys = await self._run_scan(resolved, scope, answers, scanned)
+        instance = resolved.select(Labels(**{label: number}))
+        self._missing_by_scan[scope] = marked
+        for point in instance:
+            self._missing_by_read.pop(point.key, None)       # tried again with the instance
+        self._recompute_unavailable()
+        due = self._checks[scope].due
+        if read_keys:
+            self._checks[scope] = _Check(self._states([resolved.points[k] for k in read_keys], scanned), due)
+        else:
+            del self._checks[scope]
+        readable = [p for p in instance if p.readable and self._is_available(p.key)]
+        unread = [p for p in readable if p.key not in scanned]
+        first_answers: Mapping[str, ReadResult] = await self._device.read(unread) if unread else {}
+        for point in instance:
+            self._update_polling(point.key)
+        self._publish(readable, {**scanned, **first_answers}, scanning=True)
 
     async def _identify(self, model: Model, handshake: Identity, answers: _ScanAnswers) -> Identity:
         """The handshake's identity, with what the model's identity points read added to it."""
@@ -172,16 +225,22 @@ class Client:
                     identity[point.key] = data.value
         return identity
 
-    async def _run_scan_steps(self, model: Model, resolved: ResolvedModel, answers: _ScanAnswers,
-                              scanned: dict[str, ReadResult]) -> dict[str, str]:
-        """What the model's scan steps find missing, key by key with the reason.
+    async def _run_scan(self, resolved: ResolvedModel, scope: _Scope, answers: _ScanAnswers,
+                        scanned: dict[str, ReadResult]) -> tuple[dict[str, str], set[str]]:
+        """What one scan finds missing, key by key with the reason, and every key it read.
 
-        Every answer they get is kept in `scanned`, and a point is read at most once.
+        Every answer it gets is kept in `scanned`, and a point is read at most once per `scanned`.
+
+        Raises:
+            CannotConnectError: a read went unanswered.
+            ModelError: the scan of an instance marked a point of another.
         """
-        unavailable: dict[str, str] = {}
+        marked: dict[str, str] = {}
+        read_keys: set[str] = set()
 
         async def read(targets: Selector | Sequence[str]) -> Mapping[str, DataValue[Any]]:
             points = [p for p in _select(resolved, targets) if p.readable]
+            read_keys.update(p.key for p in points)
             unread = [p for p in points if p.key not in scanned]
             raw: Mapping[str, ReadResult] = {}
             if unread:
@@ -192,22 +251,52 @@ class Client:
                     for p in points}
 
         def mark(targets: Selector | Sequence[str], available: bool, reason: str) -> None:
-            _record_availability(unavailable, _select(resolved, targets), available, reason)
+            points = _select(resolved, targets)
+            if scope is not None:
+                label, number = scope
+                foreign = [p.key for p in points if p.labels.get(label) != number]
+                if foreign:
+                    # Scanned again by itself, an instance could otherwise undo what another found.
+                    raise ModelError(f"the scan of {label} {number} marked {foreign[0]!r}, which is not its own")
+            _record_availability(marked, points, available, reason)
 
         scan = _ScanContext(resolved.identity, read, mark)
-        for step in model.scan_steps:
-            await step(scan)
+        if scope is None:
+            for step in resolved.model.scan_steps:
+                await step(scan)
+        else:
+            await _instance_scan(resolved.model, scope[0])(scan, scope[1])
         answers.require_all_answered()
-        return unavailable
+        return marked, read_keys
 
-    def _commit(self, model: Model, resolved: ResolvedModel, unavailable: dict[str, str]) -> None:
+    def _states(self, points: Iterable[Point[Any]],
+                answers: Mapping[str, ReadResult]) -> dict[str, tuple[Quality, Value]]:
+        """What each point's answer says, as a check compares it."""
+        found: dict[str, tuple[Quality, Value]] = {}
+        for point in points:
+            data = self._data_value(point, answers[point.key], previous=None)
+            found[point.key] = (data.quality, data.value)
+        return found
+
+    def _commit(self, model: Model, resolved: ResolvedModel, marks: dict[_Scope, dict[str, str]],
+                reads: dict[_Scope, dict[str, tuple[Quality, Value]]]) -> None:
         scheduler = Scheduler(self._clock, model.poll_intervals, min_poll_interval=model.min_poll_interval)
         scheduler.set_points(resolved.points.values())
         for target, seconds in self._interval_overrides.items():
             if isinstance(target, PollRate) or target in resolved.points:
                 scheduler.set_poll_interval(target, seconds)
 
-        self._resolved, self._scheduler, self._unavailable = resolved, scheduler, unavailable
+        self._resolved, self._scheduler = resolved, scheduler
+        self._missing_by_scan, self._missing_by_read = marks, {}
+        self._recompute_unavailable()
+        self._scanned_labels = frozenset(scope[0] for scope in marks if scope is not None)
+        # Spread evenly over the interval, so that each poll checks a little rather than all at once.
+        checked = [scope for scope in marks if reads[scope]]
+        interval = scheduler.rate_interval(PollRate.SCAN)
+        now = self._clock.monotonic()
+        self._checks = {scope: _Check(reads[scope],
+                                      now + interval * (index + 1) / len(checked) if interval else math.inf)
+                        for index, scope in enumerate(checked)}
         for key in [k for k in self._values if k not in resolved.points]:
             del self._values[key]
             self._subscriptions.forget(key)
@@ -323,6 +412,19 @@ class Client:
                 callbacks.remove(callback)
         return unsubscribe
 
+    def subscribe_points(self, callback: PointsCallback) -> Callable[[], None]:
+        """Call `callback` whenever the points this unit has change, with the keys gained and lost.
+
+        A scan checked at `PollRate.SCAN`, or a register a read finds missing, can change them;
+        a key lost is also told to its subscribers as `MISSING`. Returns the unsubscriber.
+        """
+        self._points_callbacks.append(callback)
+
+        def unsubscribe() -> None:
+            if callback in self._points_callbacks:
+                self._points_callbacks.remove(callback)
+        return unsubscribe
+
     def set_polling(self, key: str, enabled: bool = True) -> None:
         """Poll `key` on its schedule even without a subscriber; False stops that."""
         if enabled:
@@ -335,6 +437,9 @@ class Client:
         """
         Override how often a poll rate or a key is read; None restores the model's interval.
         Returns the interval in effect, which is never below the model's floor.
+
+        `PollRate.SCAN` sets how often what each scan read is read again; it applies from each
+        scan's next check.
         """
         self._interval_overrides[target] = seconds
         if self._scheduler is None:
@@ -346,29 +451,116 @@ class Client:
     def _is_available(self, key: str) -> bool:
         return key not in self._unavailable
 
+    def _recompute_unavailable(self) -> None:
+        self._unavailable = {**_union(self._missing_by_scan.values()), **self._missing_by_read}
+
+    def _available_points(self) -> dict[str, Key[Any]]:
+        if self._resolved is None:
+            return {}
+        return {key: point.key for key, point in self._resolved.points.items() if self._is_available(key)}
+
+    def _tell_points(self, before: Mapping[str, Key[Any]]) -> None:
+        """Tell what the unit gained and lost since `before`; a lost key's subscribers see MISSING."""
+        after = self._available_points()
+        added = frozenset(after[key] for key in after.keys() - before.keys())
+        removed = frozenset(before[key] for key in before.keys() - after.keys())
+        if not added and not removed:
+            return
+        resolved = self._require_model()
+        now = self._clock.now()
+        for key in removed:
+            current = self._values.get(key)
+            if key in resolved.points and (current is None or current.quality is not Quality.MISSING):
+                self._store(resolved.points[key], DataValue(None, Quality.MISSING, now), current)
+        for callback in list(self._points_callbacks):
+            try:
+                callback(added, removed)
+            except Exception:
+                _LOGGER.exception("A points callback failed")
+
+    def _scope_of(self, point: Point[Any]) -> _Scope:
+        """The scan that decides whether this unit has `point`."""
+        for label in self._scanned_labels:
+            number = point.labels.get(label)
+            if isinstance(number, int):
+                return (label, number)
+        return None
+
     # ============================================================================= reading
 
     async def poll(self) -> None:
-        """Read whatever is due. A call made during a pass waits for it instead of starting another."""
+        """
+        Read whatever is due, and read again what each scan read when that is due, to find out
+        whether the unit has changed. A call made during a pass waits for it instead of starting
+        another.
+
+        Raises:
+            UnsupportedDeviceError: the unit changed, and no model matches it any more.
+        """
         if self._poll_lock.locked():
             async with self._poll_lock:
                 return
         async with self._poll_lock:
-            keys = self._require_scheduler().due()
-            if keys:
-                resolved = self._require_model()
-                await self._read_and_publish([resolved.points[k] for k in keys])
+            before = self._available_points()
+            try:
+                keys = self._require_scheduler().due()
+                if keys:
+                    resolved = self._require_model()
+                    await self._read_and_publish([resolved.points[k] for k in keys])
+                await self._run_checks()
+            finally:
+                self._tell_points(before)
+
+    async def _run_checks(self) -> None:
+        """Read again what each due scan read, and scan again where that has changed."""
+        now = self._clock.monotonic()
+        interval = self._require_scheduler().rate_interval(PollRate.SCAN)
+        for scope in [scope for scope, check in self._checks.items() if check.due <= now]:
+            check = self._checks.get(scope)
+            if check is None:
+                continue                                   # a scan of the whole unit replaced it
+            check.due = now + interval if interval is not None else math.inf
+            resolved = self._require_model()
+            points = [resolved.points[key] for key in check.read]
+            answers = await self._device.read(points)
+            self._update_reachability(any(a.outcome is not Outcome.NO_ANSWER for a in answers.values()))
+            if any(answers[point.key].outcome not in _DEFINITIVE for point in points):
+                continue                                   # unknown: what the scan found stands
+            if self._states(points, answers) == check.read:
+                continue
+            try:
+                if scope is None:
+                    _LOGGER.info("%s has changed; scanning all of it again", resolved.model.name)
+                    await self._scan(dict(resolved.identity))
+                    return
+                _LOGGER.info("%s %s %d has changed; scanning it again", resolved.model.name, *scope)
+                await self._rescan(scope)
+            except CannotConnectError as err:
+                _LOGGER.info("Scanning again went unanswered; checked again later: %s", err)
 
     def seconds_until_next_poll(self) -> float | None:
-        """Seconds until `poll()` has something to read, 0 if it has now; None if it never will."""
+        """Seconds until `poll()` has something to do, 0 if it has now; None if it never will."""
+        candidates = [check.due for check in self._checks.values() if math.isfinite(check.due)]
         due = self._require_scheduler().next_due()
-        return None if due is None else max(0.0, due - self._clock.monotonic())
+        if due is not None:
+            candidates.append(due)
+        return max(0.0, min(candidates) - self._clock.monotonic()) if candidates else None
 
     async def refresh(self, targets: PollRate | Selector | Sequence[str] | None = None, *,
                       after: float = 0.0) -> None:
-        """Read a poll rate's points, a selection, or everything - now, or `after` seconds from now."""
+        """
+        Read a poll rate's points, a selection, or everything - now, or `after` seconds from now.
+        `PollRate.SCAN` checks again whether the unit has changed.
+        """
         scheduler = self._require_scheduler()
         resolved = self._require_model()
+        if targets is PollRate.SCAN:
+            due = self._clock.monotonic() + after
+            for check in self._checks.values():
+                check.due = min(check.due, due)
+            if after == 0:
+                await self.poll()
+            return
         if isinstance(targets, PollRate):
             points = [p for p in resolved.points.values() if p.poll_rate is targets]
         elif targets is None:
@@ -387,15 +579,22 @@ class Client:
         self._update_reachability(any(a.outcome is not Outcome.NO_ANSWER for a in answers.values()))
         self._publish(points, answers)
 
-    def _publish(self, points: Sequence[Point[Any]], answers: Mapping[str, ReadResult]) -> None:
+    def _publish(self, points: Sequence[Point[Any]], answers: Mapping[str, ReadResult], *,
+                 scanning: bool = False) -> None:
+        """Store and tell what was read. A register found missing is no longer read; outside a scan,
+        what decides whether the unit has it is checked at once."""
         scheduler = self._require_scheduler()
         for point in points:
             answer = answers[point.key]
             previous = self._values.get(point.key)
             data = self._data_value(point, answer, previous)
             if data.quality is Quality.MISSING:
-                self._unavailable[point.key] = answer.detail or answer.outcome.name.lower()
+                reason = answer.detail or answer.outcome.name.lower()
+                self._missing_by_read[point.key] = self._unavailable[point.key] = reason
                 self._update_polling(point.key)
+                check = self._checks.get(self._scope_of(point))
+                if not scanning and check is not None:
+                    check.due = min(check.due, self._clock.monotonic())
             success = answer.outcome is Outcome.OK and data.quality is not Quality.STALE
             self._consecutive_failures[point.key] = 0 if success else self.consecutive_failures(point.key) + 1
             scheduler.record(point.key, data, success=success)
@@ -585,6 +784,32 @@ def _record_availability(record: dict[str, str], points: Iterable[Point[Any]], a
             record.pop(point.key, None)
         else:
             record[point.key] = reason
+
+
+def _scopes(resolved: ResolvedModel) -> list[_Scope]:
+    """Every scan of this unit, in the order they run: the whole unit's, then each instance's."""
+    scopes: list[_Scope] = [None]
+    for section in resolved.model.sections:
+        if isinstance(section, RepeatedSection) and section.scan is not None:
+            scopes.extend((section.label, number) for number in resolved.instances.get(section.label, ()))
+    return scopes
+
+
+def _instance_scan(model: Model, label: str) -> InstanceScanStep:
+    """The scan of the repeated section labelled `label`."""
+    for section in model.sections:
+        if isinstance(section, RepeatedSection) and section.label == label and section.scan is not None:
+            return section.scan
+    raise KeyError(f"no repeated section labelled {label!r} has a scan")
+
+
+def _union(marks: Iterable[Mapping[str, str]]) -> dict[str, str]:
+    """Every key in any of `marks`, with the reason the first gives."""
+    found: dict[str, str] = {}
+    for marked in marks:
+        for key, reason in marked.items():
+            found.setdefault(key, reason)
+    return found
 
 
 def _stale(previous: DataValue[Any] | None, now: datetime) -> DataValue[Any]:
