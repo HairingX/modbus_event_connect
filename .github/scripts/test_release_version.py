@@ -18,8 +18,18 @@ def test_a_final_release_ends_the_open_series() -> None:
 
 
 def test_a_draft_above_the_open_series_starts_a_new_one() -> None:
-    assert _next(RELEASE_CANDIDATE, "v1.0.0", ["v0.2.0rc2"]) == "1.0.0rc1"
-    assert _next(FINAL_RELEASE, "v1.0.0", ["v0.2.0rc2"]) == "1.0.0"
+    assert _next(RELEASE_CANDIDATE, "v0.3.0", ["v0.2.0rc2"]) == "0.3.0rc1"
+    assert _next(FINAL_RELEASE, "v0.3.0", ["v0.2.0rc2"]) == "0.3.0"
+
+
+@pytest.mark.parametrize("kind", [RELEASE_CANDIDATE, FINAL_RELEASE])
+def test_a_new_major_version_is_never_worked_out(kind: str) -> None:
+    with pytest.raises(SystemExit, match="1.0.0(rc1)? is a new major version"):
+        _next(kind, "v1.0.0", ["v0.2.0rc2"])
+
+
+def test_a_new_major_version_is_taken_as_an_override() -> None:
+    assert _next(RELEASE_CANDIDATE, "v0.2.1", ["v0.2.0"], override="1.0.0rc1") == "1.0.0rc1"
 
 
 def test_without_an_open_series_the_draft_names_the_version() -> None:

@@ -25,9 +25,9 @@ on:
         default: release candidate
       version:
         description: >-
-          Override, only when the version worked out is wrong: canonical PEP 440 without a v,
-          such as 1.2.3 or 1.2.3rc1, of the kind chosen above. It must still be higher than
-          every version tagged or on PyPI.
+          Override, only for a new major version, which is never worked out, or when the version
+          worked out is wrong: canonical PEP 440 without a v, such as 2.0.0 or 2.0.0rc1, of the
+          kind chosen above. It must still be higher than every version tagged or on PyPI.
         required: false
         type: string
 

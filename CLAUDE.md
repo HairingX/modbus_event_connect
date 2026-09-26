@@ -51,12 +51,14 @@ draft creates the tag at whatever `main` points to, before the version is set; e
 `modbus_event_connect` up to `v0.1.8` carries the previous version for that reason.
 
 1. Merge pull requests into `main`. Release Drafter keeps a draft release with their notes and
-   the next version, from the labels `major`, `minor` or `patch` (no label: patch).
+   the next version: a minor bump for the label `breaking-change` or `minor`, a patch otherwise.
+   **A new major version is never worked out**, as a label placed wrongly must not release one;
+   type it into Release as the override.
 2. Run the **Release** workflow from the Actions tab, on `main`, and choose **release
    candidate** or **final release**. It works out the version: the next release candidate of the
    open series (`0.2.0rc1` -> `0.2.0rc2`), or the final release that ends it (`0.2.0`); a draft
-   naming a higher version starts a new series. Type a version only to override one worked out
-   wrongly: canonical PEP 440, of the kind chosen.
+   naming a higher version starts a new series. Type a version only for a new major, or to
+   override one worked out wrongly: canonical PEP 440, of the kind chosen.
 
 Release refuses any version not higher than every version tagged or on PyPI, yanked ones
 included. It runs the tests on the commit it releases, sets `__version__`, builds, installs the
@@ -79,4 +81,5 @@ Dependabot proposes a new major, and updates to the test tools, as pull requests
   `chore/<what>` - CI, tooling, documentation - is labelled `chore`.
 - A pull request's text describes only its own change: what it does and how it was tested. Never
   releases to come, merge order, or other repositories.
-- Put `major` or `minor` on a pull request that needs that bump; a patch is the default.
+- Put `breaking-change` on a pull request that breaks the API, and `minor` on one that needs a
+  minor bump; both give a minor bump, and a patch is the default. No label gives a major.

@@ -32,15 +32,14 @@ categories:
     when:
       label: 'dependencies'
 
-  # The next version: a major or minor bump by label, a patch otherwise.
-  - type: 'version-resolver'
-    semver-increment: 'major'
-    when:
-      label: 'major'
+  # The next version: a minor bump for a breaking change or by label, a patch otherwise. A major
+  # is never taken from a label, as one placed wrongly must not release a new major version.
   - type: 'version-resolver'
     semver-increment: 'minor'
     when:
-      label: 'minor'
+      labels:
+        - 'breaking-change'
+        - 'minor'
   - type: 'version-resolver'
     semver-increment: 'patch'
 template: |

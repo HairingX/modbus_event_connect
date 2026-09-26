@@ -54,7 +54,8 @@ def next_version(kind: str, draft: str, override: str, known: list[Version]) -> 
 
     Without an override, an open release-candidate series - the highest known version being a
     pre-release - is continued, or ended by a final release, unless the draft names a higher
-    version; that starts a new series. The result must be higher than every known version,
+    version; that starts a new series. A new major version is taken only as an override, so that
+    a label placed wrongly cannot release one. The result must be higher than every known version,
     as pip installs the highest and PyPI never takes a version twice.
     """
     if kind not in (RELEASE_CANDIDATE, FINAL_RELEASE):
@@ -87,6 +88,8 @@ def next_version(kind: str, draft: str, override: str, known: list[Version]) -> 
         else:
             version = Version(f"{base}rc1")
             how = f"the first release candidate of {base}"
+        if top is not None and version.major > top.major:
+            sys.exit(f"::error::{version} is a new major version; type it as the override")
     if top is not None and version <= top:
         sys.exit(f"::error::{version} is not higher than {top}, the highest version already tagged "
                  f"or published")
