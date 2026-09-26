@@ -718,6 +718,73 @@ def test_a_write_is_read_back_after_its_delay() -> None:
     assert relay is not None and relay.value is True
 
 
+def test_without_scheduled_polling_nothing_is_read_when_its_interval_passes() -> None:
+    client, device, clock = _connected()
+    client.subscribe(TEMP, Recorder())
+    client.set_scheduled_polling(False)
+    clock.advance(3600)
+    asyncio.run(client.poll())
+    assert device.reads == []
+    assert client.seconds_until_next_poll() is None
+
+
+def test_without_scheduled_polling_a_refresh_reads_only_what_it_asks_for() -> None:
+    client, device, clock = _connected()
+    client.subscribe(TEMP, Recorder())
+    client.subscribe(FAN_IN, Recorder())
+    client.set_scheduled_polling(False)
+    clock.advance(3600)
+    device.answer("temp", 230)
+    asyncio.run(client.refresh([TEMP]))
+    assert device.read_keys() == {"temp"}
+    temp = client.value(TEMP)
+    assert temp is not None and temp.value == 23.0
+
+
+def test_without_scheduled_polling_a_write_is_still_read_back() -> None:
+    client, device, clock = _connected()
+    client.subscribe(RELAY, Recorder())
+    client.set_scheduled_polling(False)
+    assert asyncio.run(client.write(RELAY, True)) is True
+    assert client.seconds_until_next_poll() == MODEL.read_back_after
+    clock.advance(MODEL.read_back_after)
+    asyncio.run(client.poll())
+    assert device.read_keys() == {"relay"}
+
+
+def test_without_scheduled_polling_the_unit_is_checked_only_when_asked() -> None:
+    client, device, clock = _connected()
+    client.set_scheduled_polling(False)
+    clock.advance(3600)
+    asyncio.run(client.poll())
+    assert device.reads == []
+    asyncio.run(client.refresh(PollRate.SCAN))
+    assert device.reads != []
+
+
+def test_scheduled_polling_switched_on_again_reads_what_is_overdue() -> None:
+    client, device, clock = _connected()
+    client.subscribe(TEMP, Recorder())
+    client.set_scheduled_polling(False)
+    clock.advance(3600)
+    client.set_scheduled_polling(True)
+    assert client.seconds_until_next_poll() == 0
+    asyncio.run(client.poll())
+    assert "temp" in device.read_keys()
+
+
+def test_scheduled_polling_stays_off_after_the_unit_is_scanned_again() -> None:
+    client, device, clock = _connected()
+    client.subscribe(TEMP, Recorder())
+    client.set_scheduled_polling(False)
+    asyncio.run(client.disconnect())
+    asyncio.run(client.connect())
+    device.reads.clear()
+    clock.advance(3600)
+    asyncio.run(client.poll())
+    assert device.reads == []
+
+
 def test_what_the_scan_read_is_not_read_again() -> None:
     async def first(scan: Scan) -> None:
         await scan.read(["a", "gone"])

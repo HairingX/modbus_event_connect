@@ -61,6 +61,7 @@ class Scheduler:
         self._key_overrides: dict[str, float] = {}
         self._warned: set[PollRate | str] = set()
 
+        self._scheduled = True
         self._points: dict[str, Point[Any]] = {}
         self._polled: dict[str, bool] = {}
         self._last_attempt: dict[str, float] = {}
@@ -97,6 +98,10 @@ class Scheduler:
     def is_polled(self, key: str) -> bool:
         self._require(key)
         return self._polled[key]
+
+    def set_scheduled(self, enabled: bool) -> None:
+        """Whether polled keys are read on their intervals; a refresh is read either way."""
+        self._scheduled = enabled
 
     # ----------------------------------------------------------------------------- intervals
 
@@ -220,6 +225,8 @@ class Scheduler:
 
         ready = sorted((key for key, pending in self._pending.items() if pending.not_before <= now),
                        key=lambda key: (self._pending[key].not_before, order[key]))
+        if not self._scheduled:
+            return ready
         seen = set(ready)
 
         never: list[str] = []
@@ -245,7 +252,7 @@ class Scheduler:
         now = self._clock.monotonic()
         candidates: list[float] = [pending.not_before for pending in self._pending.values()]
         for key, polled in self._polled.items():
-            if not polled:
+            if not polled or not self._scheduled:
                 continue
             last = self._last_attempt.get(key)
             if last is None:
