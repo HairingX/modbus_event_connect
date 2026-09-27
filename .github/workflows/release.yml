@@ -53,6 +53,8 @@ jobs:
     permissions:
       # Draft releases are listed only to those who can push.
       contents: write
+      # The pull requests merged since the previous release.
+      pull-requests: read
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
@@ -102,6 +104,21 @@ jobs:
           esac
           python .github/scripts/release_version.py next "$RELEASE" "$draft" "$OVERRIDE" \
             "$RUNNER_TEMP/tags" "$RUNNER_TEMP/published" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Refuse a release without changes
+        if: steps.version.outputs.previous_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SINCE: ${{ steps.version.outputs.previous_tag }}
+        run: |
+          gh api --paginate "repos/$GITHUB_REPOSITORY/compare/$SINCE...$(git rev-parse HEAD)" \
+            --jq '.commits[].sha' > "$RUNNER_TEMP/commits"
+          : > "$RUNNER_TEMP/merged"
+          while read -r sha; do
+            gh api "repos/$GITHUB_REPOSITORY/commits/$sha/pulls" \
+              --jq '.[] | select(.merged_at != null) | .number' >> "$RUNNER_TEMP/merged"
+          done < "$RUNNER_TEMP/commits"
+          python .github/scripts/release_version.py changes "$SINCE" "$RUNNER_TEMP/merged"
 
       - name: Record the commit to release
         id: main

@@ -60,6 +60,10 @@ draft creates the tag at whatever `main` points to, before the version is set; e
    naming a higher version starts a new series. Type a version only for a new major, or to
    override one worked out wrongly: canonical PEP 440, of the kind chosen.
 
+Release refuses a version with no pull request merged since the release before it - for a
+final release, the final release before it: a change pushed straight to `main` is nothing
+to release.
+
 Release refuses any version not higher than every version tagged or on PyPI, yanked ones
 included. It runs the tests on the commit it releases, sets `__version__`, builds, installs the
 wheel and checks that `__version__` and the metadata say the version, and only then pushes the

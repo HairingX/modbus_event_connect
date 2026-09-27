@@ -2,7 +2,7 @@
 import pytest
 from packaging.version import Version
 
-from release_version import FINAL_RELEASE, RELEASE_CANDIDATE, known_versions, next_version, previous_tag
+from release_version import FINAL_RELEASE, RELEASE_CANDIDATE, known_versions, next_version, previous_tag, require_changes
 
 
 def _next(kind: str, draft: str, known: list[str], override: str = "") -> str:
@@ -114,3 +114,12 @@ def test_the_notes_skip_test_builds() -> None:
 def test_the_first_release_notes_start_from_the_beginning() -> None:
     assert previous_tag(Version("0.1.0"), []) is None
     assert previous_tag(Version("0.2.0"), ["v0.2.0rc1", "v0.2.0rc2"]) is None
+
+
+def test_a_release_without_a_merged_pull_request_is_refused() -> None:
+    with pytest.raises(SystemExit, match="no pull request has been merged since v0.3.0"):
+        require_changes("v0.3.0", ["", "  "])
+
+
+def test_a_release_with_a_merged_pull_request_goes_ahead() -> None:
+    require_changes("v0.3.0", ["10"])
