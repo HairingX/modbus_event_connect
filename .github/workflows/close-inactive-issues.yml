@@ -7,6 +7,11 @@ on:
 
 permissions: {}
 
+# The shell given explicitly, so GitHub runs every step with pipefail.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   close-issues:
     runs-on: ubuntu-latest

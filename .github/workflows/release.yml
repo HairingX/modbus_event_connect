@@ -41,6 +41,11 @@ env:
   PACKAGE: modbus_event_connect
   VERSION_FILE: src/modbus_event_connect/__init__.py
 
+# The shell given explicitly, so GitHub runs every step with pipefail.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   prepare:
     name: Resolve the version

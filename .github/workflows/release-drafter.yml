@@ -11,6 +11,11 @@ on:
 
 permissions: {}
 
+# The shell given explicitly, so GitHub runs every step with pipefail.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   update_release_draft:
     name: Update the release draft

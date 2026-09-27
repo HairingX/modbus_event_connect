@@ -19,6 +19,11 @@ concurrency:
   group: tests-${{ github.workflow }}-${{ github.event_name }}-${{ inputs.ref || github.ref }}
   cancel-in-progress: true
 
+# The shell given explicitly, so GitHub runs every step with pipefail.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   test:
     name: Python ${{ matrix.python-version }}
