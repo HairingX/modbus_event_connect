@@ -150,7 +150,7 @@ class Transform:
 class Transforms:
     """Transforms most devices need."""
     INVERT_BOOL = Transform(read=lambda v: 1 - v, write=lambda v: 1 - v, name="invert_bool")
-    """The device says 0 for on."""
+    """The device says 0 for on. Also for a BOOL or a bit."""
     SECONDS_AS_MINUTES = Transform(read=lambda s: s / 60, write=lambda m: m * 60, name="seconds_as_minutes")
     MINUTES_AS_HOURS = Transform(read=lambda m: m / 60, write=lambda h: h * 60, name="minutes_as_hours")
     HOURS_AS_DAYS = Transform(read=lambda h: h / 24, write=lambda d: d * 24, name="hours_as_days")
@@ -359,13 +359,22 @@ def _value_problems(point: Point[Any]) -> list[str]:
     if not data_type.is_numeric:
         if point.scale != 1 or point.offset != 0:
             found.append(f"scale and offset apply to numbers, not to {data_type!r}")
-        if point.transform is not None:
-            found.append(f"a transform applies to numbers, not to {data_type!r}")
+        if point.transform is not None and not data_type.is_boolean:
+            found.append(f"a transform applies to numbers, a BOOL or a bit, not to {data_type!r}")
+        if point.transform is not None and data_type.is_boolean and not _keeps_bits(point.transform):
+            found.append(f"a transform on {data_type!r} must turn 0 and 1 into 0 and 1, both ways")
         if point.deadband is not None:
             found.append(f"a deadband applies to numbers, not to {data_type!r}")
         if point.limits is not None:
             found.append(f"limits apply to numbers, not to {data_type!r}")
     return found
+
+
+def _keeps_bits(transform: Transform) -> bool:
+    try:
+        return all(transform.read(b) in (0, 1) and transform.write(b) in (0, 1) for b in (0, 1))
+    except ArithmeticError:
+        return False
 
 
 def _valid_raw_problems(point: Point[Any]) -> list[str]:

@@ -38,10 +38,10 @@ def decode(point: Point[Any], registers: Sequence[int]) -> tuple[Value, Quality]
     if kind is DataTypeKind.BOOL:
         if not _is_reading(point, registers[0]):
             return (None, Quality.NO_DATA)
-        return (registers[0] != 0, Quality.GOOD)
+        return (_bit_read(point, registers[0] != 0), Quality.GOOD)
     if kind is DataTypeKind.BIT:
         assert data_type.bit_index is not None
-        return (bool((registers[0] >> data_type.bit_index) & 1), Quality.GOOD)
+        return (_bit_read(point, bool((registers[0] >> data_type.bit_index) & 1)), Quality.GOOD)
     if kind is DataTypeKind.STRING:
         return _decode_string(point, registers)
     if data_type.is_float:
@@ -57,14 +57,14 @@ def encode(point: Point[Any], value: object) -> EncodedWrite:
     data_type = point.data_type
     kind = data_type.kind
     if kind is DataTypeKind.BOOL:
-        raw = 1 if _as_bit_value(point, value) else 0
+        raw = 1 if _bit_written(point, _as_bit_value(point, value)) else 0
         if not _is_reading(point, raw):
             raise InvalidValueError(f"point {point.key!r}: {value!r} encodes to {raw}, which is not one of "
                                     f"its valid_raw values")
         return EncodedWrite(registers=(raw,))
     if kind is DataTypeKind.BIT:
         assert data_type.bit_index is not None
-        return EncodedWrite(bit_index=data_type.bit_index, bit_value=_as_bit_value(point, value))
+        return EncodedWrite(bit_index=data_type.bit_index, bit_value=_bit_written(point, _as_bit_value(point, value)))
     if kind is DataTypeKind.STRING:
         return _encode_string(point, value)
     return _encode_numeric(point, _numeric_for_key_type(point, value))
@@ -273,6 +273,16 @@ def _numeric_for_key_type(point: Point[Any], value: object) -> int | float:
     if value_type is int and not isinstance(value, int):
         raise InvalidValueError(f"point {point.key!r}: expected int, got float {value!r}")
     return value
+
+
+def _bit_read(point: Point[Any], bit: bool) -> bool:
+    """A BOOL or bit as read, through the point's transform: 0 or 1 in, 0 or 1 out."""
+    return bool(point.transform.read(int(bit))) if point.transform is not None else bit
+
+
+def _bit_written(point: Point[Any], bit: bool) -> bool:
+    """A BOOL or bit to write, through the point's transform."""
+    return bool(point.transform.write(int(bit))) if point.transform is not None else bit
 
 
 def _as_bit_value(point: Point[Any], value: object) -> bool:

@@ -199,6 +199,9 @@ write:  value → limits check → transform.write → inverse scale, offset →
 
   The model walker (4.4) samples the round trip `write(read(x)) == x`, which
   also catches lossy rounding such as `round(value / 60)`.
+- **A BOOL or a bit takes a transform too**, applied to its 0 or 1 after the register is
+  read as one; it must turn 0 and 1 into 0 and 1. `INVERT_BOOL` is the one a device that says
+  0 for on needs, and its key stays a `bool`.
 
 ### 3.6 Write kind
 
