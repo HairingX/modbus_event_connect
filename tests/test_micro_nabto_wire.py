@@ -53,8 +53,21 @@ def test_a_connect_reply_without_the_accepted_status_is_a_refusal() -> None:
     assert isinstance(answer, wire.ConnectReply) and not answer.accepted
 
 
-def test_the_receipt_sent_ahead_of_an_answer_is_not_taken_for_it() -> None:
-    assert wire.reply(RECEIPT, CLIENT) is None
+def test_the_receipt_sent_ahead_of_an_answer_says_the_device_has_the_request() -> None:
+    """uNabto's NOTIFY payload with NOTIFY_MICRO_ACK: "the Micro has received the request, but the
+    answer isn't ready yet"."""
+    assert wire.reply(RECEIPT, CLIENT) == wire.Received(2)
+
+
+def test_another_notification_is_no_receipt() -> None:
+    attach_close = RECEIPT[:-1] + b"\x02"
+    assert wire.reply(attach_close, CLIENT) is None
+
+
+@pytest.mark.parametrize(("payload", "status"), [(b"\x00", 0), (b"\x63", 0x63), (b"\x85", 0x85), (b"", None)])
+def test_a_writes_answer_starts_with_its_status(payload: bytes, status: int | None) -> None:
+    """Answers a CTS 402 gave: 00 for a write it took, 63 and 85 for writes it did not."""
+    assert wire.write_status(payload) == status
 
 
 def test_a_reply_to_another_client_is_ignored() -> None:

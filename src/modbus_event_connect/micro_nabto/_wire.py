@@ -12,6 +12,9 @@ BROADCAST = ("255.255.255.255", DEVICE_PORT)
 HEADER_LENGTH = 16
 DISCOVERY_REPLY = b"\x00\x80\x00\x01"
 CRYPT_PAYLOAD = 0x36
+NOTIFY_PAYLOAD = 0x34
+NOTIFY_MICRO_ACK = 3
+"""uNabto's notification that the device has the request and answers when it is ready."""
 ACCEPTED = b"\x00\x00\x00\x01"
 PONG = b"pong"
 _DEVICE_ID_AT = 19
@@ -27,6 +30,12 @@ class ConnectReply:
     sequence: int
     accepted: bool
     server_id: bytes
+
+
+@dataclass(frozen=True)
+class Received:
+    """The device has the request; its answer follows when it is ready."""
+    sequence: int
 
 
 @dataclass(frozen=True)
@@ -107,11 +116,11 @@ def discovery_reply(datagram: bytes) -> str | None:
     return device_id or None
 
 
-def reply(datagram: bytes, client_id: bytes) -> ConnectReply | DataReply | None:
+def reply(datagram: bytes, client_id: bytes) -> ConnectReply | DataReply | Received | None:
     """The reply `datagram` carries for `client_id`, or None if it carries none for it.
 
-    A DATA packet without a crypt payload carries no answer; a Nilan CTS 402 sends one ahead of
-    every answer. The checksum (a 16-bit sum of every byte before it) and the padding (to an
+    A DATA packet with uNabto's NOTIFY_MICRO_ACK notification says the device has the request; a
+    Nilan CTS 402 sends one ahead of every answer. The checksum (a 16-bit sum of every byte before it) and the padding (to an
     even length, each pad byte holding the pad's length) are uNabto's own; a packet that breaks
     them was damaged on the way, and is dropped.
     """
@@ -123,6 +132,9 @@ def reply(datagram: bytes, client_id: bytes) -> ConnectReply | DataReply | None:
         if len(datagram) < 28:
             return None
         return ConnectReply(sequence, datagram[20:24] == ACCEPTED, datagram[24:28])
+    if (kind == _DATA and len(datagram) >= 24 and datagram[16] == NOTIFY_PAYLOAD
+            and int.from_bytes(datagram[20:24], "big") == NOTIFY_MICRO_ACK):
+        return Received(sequence)
     if kind == _DATA and len(datagram) > 24 and datagram[16] == CRYPT_PAYLOAD:
         if (int.from_bytes(datagram[18:20], "big") != len(datagram) - HEADER_LENGTH
                 or int.from_bytes(datagram[-2:], "big") != sum(datagram[:-2]) & 0xFFFF):
@@ -145,6 +157,12 @@ def identity(payload: bytes) -> Identity | None:
         "slave_device_number": int.from_bytes(payload[16:20], "big"),
         "slave_device_model": int.from_bytes(payload[20:24], "big"),
     }
+
+
+def write_status(payload: bytes) -> int | None:
+    """The status a setpoint write's answer starts with - 0 when the device took the write - or
+    None for an empty answer."""
+    return payload[0] if payload else None
 
 
 def datapoint_values(payload: bytes) -> list[int] | None:

@@ -23,7 +23,7 @@ import asyncio
 from collections import Counter
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import Any, NoReturn
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -36,6 +36,7 @@ from modbus_event_connect._key import Key
 from modbus_event_connect._model import Model, Section
 from modbus_event_connect._point import Point
 from modbus_event_connect._value import DataValue, Quality
+from modbus_event_connect.micro_nabto import _wire as wire
 from modbus_event_connect.micro_nabto._access import DatapointRegister, SetpointRegister
 from modbus_event_connect.micro_nabto._connection import MicroNabtoConnection, discover
 from modbus_event_connect.micro_nabto._device import MicroNabtoDevice, MicroNabtoOptions
@@ -64,6 +65,9 @@ LIVE_MODEL = Model(
     options=MicroNabtoOptions(), read_back_after=1.0)
 
 
+SETPOINT_WRITE = 0x2B
+
+
 @dataclass
 class Live:
     client: Client
@@ -86,9 +90,13 @@ async def live() -> AsyncGenerator[Live, None]:
     assert HOST is not None and EMAIL is not None   # guarded by the skip above
     connection = MicroNabtoConnection(EMAIL, host=HOST, port=PORT, device_id=DEVICE_ID)
 
-    async def refuse(command: bytes) -> NoReturn:
-        raise AssertionError("a write was attempted; these tests are read-only")
-    setattr(connection, "send", refuse)
+    read = connection.request
+
+    async def refuse_writes(command: bytes) -> bytes | None:
+        if command[3] == SETPOINT_WRITE:
+            raise AssertionError("a write was attempted; these tests are read-only")
+        return await read(command)
+    setattr(connection, "request", refuse_writes)
     device = MicroNabtoDevice(connection, owns_connection=True)
     client = Client(device, LIVE_MODEL, read_only=True)
     try:
@@ -106,7 +114,7 @@ async def live() -> AsyncGenerator[Live, None]:
 async def test_nothing_here_can_be_written(live: Live) -> None:
     assert not any(live.client.can_write(k) for k in live.client.points)
     with pytest.raises(AssertionError, match="read-only"):
-        await live.connection.send(b"")
+        await live.connection.request(wire.setpoint_write([(0, 1, 0)]))
 
 
 # ============================================================================ the picture

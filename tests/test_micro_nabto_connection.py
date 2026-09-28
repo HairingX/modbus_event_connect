@@ -194,6 +194,32 @@ async def test_after_a_failed_handshake_requests_fail_at_once_until_retry_after(
         assert await _read(connection, 1) == [1001]
 
 
+async def test_a_request_the_device_has_received_is_not_sent_again_while_it_answers() -> None:
+    async with _device() as device:
+        device.answer_delay = 0.2      # four times the connection's timeout
+        connection = _connection(device)
+        await connection.open()
+        sent = device.datagrams
+        assert await _read(connection, 1) == [1001]
+        assert device.datagrams == sent + 1
+        assert connection.diagnostics()["resends"] == 0
+        received = connection.diagnostics()["received"]
+        assert isinstance(received, int) and received >= 1
+
+
+async def test_an_answer_that_never_comes_after_the_receipt_is_none() -> None:
+    async with _device() as device:
+        connection = _connection(device)
+        await connection.open()
+        device.answer_delay = 10.0
+        assert await _read(connection, 1) is None
+
+
+def test_the_wait_for_an_answer_cannot_be_shorter_than_the_timeout() -> None:
+    with pytest.raises(ValueError):
+        MicroNabtoConnection(EMAIL, host="192.0.2.1", timeout=1.0, answer_wait=0.5)
+
+
 async def test_a_duplicated_answer_is_not_taken_for_the_next() -> None:
     async with _device() as device:
         connection = _connection(device)

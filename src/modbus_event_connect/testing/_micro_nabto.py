@@ -62,6 +62,11 @@ class SimulatedMicroNabtoDevice:
         """Send every answer twice."""
         self.cut_short = False
         """Send read answers that stop before their last value."""
+        self.write_statuses: list[int] = []
+        """Statuses to answer the next writes with, in order; a write answered with anything but 0
+        is not applied. Once empty, every write is answered 0 and applied."""
+        self.answer_delay = 0.0
+        """Seconds between the receipt of a request and its answer."""
 
         self.datagrams = 0
         """Datagrams that reached the device, answered or not."""
@@ -193,7 +198,10 @@ class SimulatedMicroNabtoDevice:
                   + answer + bytes([padding]) * padding)
         packet += (sum(packet) & 0xFFFF).to_bytes(2, "big")
         for _ in range(2 if self.duplicate else 1):
-            self._send(packet, addr)
+            if self.answer_delay > 0:
+                asyncio.get_running_loop().call_later(self.answer_delay, self._send, packet, addr)
+            else:
+                self._send(packet, addr)
 
     def _answer(self, command: bytes, session: _Session) -> bytes | None:
         code = command[3]
@@ -221,10 +229,12 @@ class SimulatedMicroNabtoDevice:
             writes = [(body[i], int.from_bytes(body[i + 1:i + 5], "big"), int.from_bytes(body[i + 5:i + 7], "big"))
                       for i in range(0, 7 * count, 7)]
             self.commands.append(Command(code, tuple(writes)))
-            for obj, address, value in writes:
-                if (obj, address) in self.setpoint_registers:
-                    self.setpoint_registers[(obj, address)] = value
-            return None
+            status = self.write_statuses.pop(0) if self.write_statuses else 0
+            if status == 0:
+                for obj, address, value in writes:
+                    if (obj, address) in self.setpoint_registers:
+                        self.setpoint_registers[(obj, address)] = value
+            return bytes([status])
         return None
 
     def _cut(self, values: list[int] | None) -> list[int] | None:
