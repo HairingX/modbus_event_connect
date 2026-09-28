@@ -638,8 +638,15 @@ await client.write(ROOM_3_TEMP_TARGET, 21.5)          # Key("room_3_temp_target"
 | several coils | `0x0F` | — |
 | one bit inside a holding register | `0x16` Mask Write: atomic on the device | read-modify-write, serialised per register, for devices without 0x16 |
 
-**Coalescing** applies to `WriteKind.STATE` only (3.6). Writes to one device are sent in order;
-a write rejected as busy is retried before later writes, not after them.
+**Coalescing** applies to `WriteKind.STATE` only (3.6). Writes to one device are sent in order.
+A write the device answers `BUSY` is sent again, before later writes, until `write_retry_for`
+seconds have passed since it was first sent, `write_retry_pause` apart; 0, the default, sends
+it once. A setting overtaken by a newer one meanwhile is not sent again: the newer one goes
+instead, and both callers get its outcome.
+
+**While a point is written** it is not read, and what a read begun before the write answered
+for it is dropped: it may be the value from before. Once the device takes a setting, the point
+holds the value written, as the device will read it, until the read-back.
 
 **Sequences:** some devices need unlock → write → save. `client.write_sequence([Write(key, value),
 ...])` sends an ordered list as one operation and stops at the first refusal; each `Write` is
@@ -710,7 +717,7 @@ CTS 402 — which other devices may not share.
 - **A setpoint write waits for its answer**, which starts with a status: 0 when the device took
   the write. A CTS 402 answered 0x63 and 0x85 to writes it did not take - they are not uNabto's
   codes, which it sends as exceptions - and took the same write on a later try; so a write
-  answered otherwise is sent again, three times in all, and then fails naming the status.
+  answered otherwise is `BUSY`, naming the status, and the client may send it again.
 
 ---
 
@@ -744,7 +751,7 @@ A library that gets these wrong is worse than none.
 | `0x02`: the register is absent | `MISSING`, recorded as unavailable and not polled again; its instance's scan is checked at once |
 | `0x01`: the function is unsupported | `UNSUPPORTED`, recorded like a missing register |
 | `0x04`: what is behind the register is not answering | `OFFLINE`; the point stays polled |
-| `0x06`: busy | retried four times, the wait doubling from 0.2 s, then `BUSY` |
+| `0x06`: busy | a read is retried four times, the wait doubling from 0.2 s, then `BUSY`; a write is `BUSY` at once, for the client to send again |
 | `0x0B`: the gateway's device did not answer | `NO_ANSWER`, counted towards backoff |
 | No answer at all | `NO_ANSWER`; the value goes `STALE`; reachability follows answers, never the socket |
 | One bad address refuses a whole request | the request is halved until the refusal is pinned down: a few absent addresses among many cost few requests, though a request where every address is absent costs about twice as many as reading each alone |

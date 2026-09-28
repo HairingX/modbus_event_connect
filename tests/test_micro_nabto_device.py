@@ -54,7 +54,7 @@ def _device(simulated: SimulatedMicroNabtoDevice, *, clock: FakeClock | None = N
     host, port = simulated.address
     device = MicroNabtoDevice(MicroNabtoConnection(email, host=host, port=port, timeout=0.05, retries=1,
                                                    answer_wait=0.5, clock=clock),
-                              owns_connection=True, write_pause=0.01)
+                              owns_connection=True)
     device.configure(MicroNabtoOptions())
     return device
 
@@ -203,26 +203,26 @@ async def test_a_setpoint_write_names_object_address_and_register() -> None:
         assert simulated.setpoint_registers[(0, 30)] == 5
 
 
-async def test_a_write_the_device_refuses_is_sent_again_until_it_takes_it() -> None:
-    """A CTS 402 answered 63 or 85 to writes it did not take, and took the same write later."""
+@pytest.mark.parametrize("status", [0x63, 0x85])
+async def test_a_write_the_device_did_not_take_is_busy_naming_its_status_and_sent_once(status: int) -> None:
+    """A CTS 402 answered 63 and 85 to writes it did not take, and took the same write later."""
     async with _simulated() as simulated:
         device = await _connected(simulated)
-        simulated.write_statuses = [0x63, 0x85]
+        simulated.write_statuses = [status]
         result = await device.write(_sp(30), EncodedWrite((5,)))
-        assert result.outcome is Outcome.OK
-        assert len(simulated.received(SETPOINT_WRITE)) == 3
-        assert simulated.setpoint_registers[(0, 30)] == 5
+        assert (result.outcome, result.exception_code) == (Outcome.BUSY, status)
+        assert f"0x{status:02x}" in result.detail
+        assert len(simulated.received(SETPOINT_WRITE)) == 1
+        assert simulated.setpoint_registers[(0, 30)] == 130
 
 
-async def test_a_write_the_device_keeps_refusing_is_an_error_naming_its_status() -> None:
+async def test_a_write_answered_without_a_status_is_an_error() -> None:
     async with _simulated() as simulated:
         device = await _connected(simulated)
-        simulated.write_statuses = [0x63, 0x63, 0x63]
+        simulated.write_statuses = [None]
         result = await device.write(_sp(30), EncodedWrite((5,)))
         assert result.outcome is Outcome.ERROR
-        assert "0x63" in result.detail
-        assert len(simulated.received(SETPOINT_WRITE)) == 3
-        assert simulated.setpoint_registers[(0, 30)] == 130
+        assert len(simulated.received(SETPOINT_WRITE)) == 1
 
 
 async def test_a_write_answered_late_is_waited_for_and_not_sent_again() -> None:
@@ -232,13 +232,6 @@ async def test_a_write_answered_late_is_waited_for_and_not_sent_again() -> None:
         result = await device.write(_sp(30), EncodedWrite((5,)))
         assert result.outcome is Outcome.OK
         assert len(simulated.received(SETPOINT_WRITE)) == 1
-
-
-@pytest.mark.parametrize(("attempts", "pause"), [(0, 0.5), (1, -0.1)])
-def test_a_write_is_tried_at_least_once_with_no_negative_pause(attempts: int, pause: float) -> None:
-    with pytest.raises(ValueError):
-        MicroNabtoDevice(MicroNabtoConnection(EMAIL, host="192.0.2.1"), write_attempts=attempts,
-                         write_pause=pause)
 
 
 async def test_a_two_register_write_names_consecutive_addresses() -> None:
@@ -325,7 +318,8 @@ def _select(identity: Identity) -> Model | None:
 
 def _client(simulated: SimulatedMicroNabtoDevice, *, clock: FakeClock | None = None, read_only: bool = False,
             email: str = EMAIL) -> Client:
-    return Client(_device(simulated, clock=clock, email=email), _select, clock=clock, read_only=read_only)
+    return Client(_device(simulated, clock=clock, email=email), _select, clock=clock, read_only=read_only,
+                  write_retry_for=15.0, write_retry_pause=0.01)
 
 
 async def test_a_client_picks_its_model_from_the_handshake_and_reads_negative_values() -> None:
@@ -350,14 +344,16 @@ async def test_a_refused_email_fails_the_connect() -> None:
             await _client(simulated).connect()
 
 
-async def test_a_client_reports_a_write_the_device_did_not_take(caplog: pytest.LogCaptureFixture) -> None:
+async def test_a_client_sends_a_write_again_until_the_device_takes_it(caplog: pytest.LogCaptureFixture) -> None:
     async with _simulated() as simulated:
         client = _client(simulated)
         await client.connect()
-        simulated.write_statuses = [0x85, 0x85, 0x85]
-        with caplog.at_level("WARNING"):
-            assert await client.write(FAN.key, 5) is False
-        assert "fan_level" in caplog.text and "0x85" in caplog.text
+        simulated.write_statuses = [0x85, 0x63, 0x85]
+        with caplog.at_level("DEBUG"):
+            assert await client.write(FAN.key, 5) is True
+        assert len(simulated.received(SETPOINT_WRITE)) == 4
+        assert simulated.setpoint_registers[(0, 30)] == 5
+        assert "fan_level" in caplog.text and "0x63" in caplog.text
         await client.disconnect()
 
 

@@ -34,8 +34,8 @@ class DataValue[T]:
     timestamp: datetime
     """When the device answered - timezone-aware UTC. For STALE, when it last answered."""
     raw: tuple[int, ...] = ()
-    """What the device answered, in wire order: registers, or 0 and 1 for bits. Empty when it
-    did not answer. Kept for NO_DATA too, so a state no enum names can still be told."""
+    """What the device answered, or took in a write, in wire order: registers, or 0 and 1 for
+    bits. Empty when it did not answer. Kept for NO_DATA too, so a state no enum names can still be told."""
 
     @property
     def is_good(self) -> bool:

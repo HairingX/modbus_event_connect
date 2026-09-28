@@ -116,18 +116,19 @@ async def _no_wait(seconds: float) -> None:
     return None
 
 
-def _stack(units: dict[int, SimulatedModbusDevice] | None = None, *, unit_id: int = 1,
-           read_only: bool = False, delay: float = 0.0) -> tuple[Client, SimulatedModbusGateway, FakeClock, ModbusDevice]:
+def _stack(units: dict[int, SimulatedModbusDevice] | None = None, *, unit_id: int = 1, read_only: bool = False,
+           delay: float = 0.0, write_retry_for: float = 0.0) -> tuple[Client, SimulatedModbusGateway, FakeClock, ModbusDevice]:
     gateway = SimulatedModbusGateway(units if units is not None else {1: _unit()}, delay=delay)
     clock = FakeClock()
     device = ModbusDevice(gateway, unit_id=unit_id, clock=clock, sleep=_no_wait,
                           backoff_after=2, backoff_for=30.0)
-    return Client(device, MODEL, clock=clock, read_only=read_only), gateway, clock, device
+    client = Client(device, MODEL, clock=clock, read_only=read_only, sleep=_no_wait, write_retry_for=write_retry_for)
+    return client, gateway, clock, device
 
 
-def _connected(units: dict[int, SimulatedModbusDevice] | None = None, *, unit_id: int = 1,
-               read_only: bool = False) -> tuple[Client, SimulatedModbusGateway, FakeClock, ModbusDevice]:
-    stack = _stack(units, unit_id=unit_id, read_only=read_only)
+def _connected(units: dict[int, SimulatedModbusDevice] | None = None, *, unit_id: int = 1, read_only: bool = False,
+               write_retry_for: float = 0.0) -> tuple[Client, SimulatedModbusGateway, FakeClock, ModbusDevice]:
+    stack = _stack(units, unit_id=unit_id, read_only=read_only, write_retry_for=write_retry_for)
     asyncio.run(stack[0].connect())
     return stack
 
@@ -506,7 +507,7 @@ def test_a_slow_device_does_not_block_the_event_loop() -> None:
 
 def test_writes_land_in_order_even_when_the_device_is_busy() -> None:
     """A write refused as busy is retried before later writes go out, never after them."""
-    client, gateway, _, _ = _connected()
+    client, gateway, _, _ = _connected(write_retry_for=10.0)
     gateway.units[1].busy_for = 3
 
     async def presses() -> None:

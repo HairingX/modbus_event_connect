@@ -25,7 +25,8 @@ class Outcome(Enum):
     The device itself is reachable.
     """
     BUSY = auto()
-    """Still busy after the protocol's own retries (Modbus 0x06)."""
+    """Not taken now; the device may take it later (Modbus 0x06, a micro_nabto write's status other
+    than 0)."""
     NO_ANSWER = auto()
     """No answer at all: timeout, connection down, or gateway relay failure.
 
