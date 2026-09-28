@@ -62,9 +62,10 @@ class SimulatedMicroNabtoDevice:
         """Send every answer twice."""
         self.cut_short = False
         """Send read answers that stop before their last value."""
-        self.write_statuses: list[int] = []
-        """Statuses to answer the next writes with, in order; a write answered with anything but 0
-        is not applied. Once empty, every write is answered 0 and applied."""
+        self.write_statuses: list[int | None] = []
+        """Statuses to answer the next writes with, in order - None for an answer without one; a
+        write answered with anything but 0 is not applied. Once empty, every write is answered 0
+        and applied."""
         self.answer_delay = 0.0
         """Seconds between the receipt of a request and its answer."""
 
@@ -230,6 +231,8 @@ class SimulatedMicroNabtoDevice:
                       for i in range(0, 7 * count, 7)]
             self.commands.append(Command(code, tuple(writes)))
             status = self.write_statuses.pop(0) if self.write_statuses else 0
+            if status is None:
+                return b""
             if status == 0:
                 for obj, address, value in writes:
                     if (obj, address) in self.setpoint_registers:

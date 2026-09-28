@@ -1,6 +1,7 @@
 """The client: the scan, values with quality, events, scheduling and writes - driven through a
 fake device, so these tests are never about Modbus itself."""
 import asyncio
+import gc
 import logging
 from collections.abc import Awaitable, Mapping, Sequence
 from typing import Any, TypeVar
@@ -63,6 +64,8 @@ class FakeDevice:
         self.reads: list[tuple[str, ...]] = []
         self.writes: list[tuple[str, EncodedWrite]] = []
         self.write_outcomes: dict[str, Outcome] = {}
+        self.busy_writes: dict[str, int] = {}
+        """How many of the next writes to a key are answered BUSY."""
         self.write_raises: set[str] = set()
         self.configured: list[ProtocolOptions | None] = []
         self.connected = False
@@ -93,6 +96,9 @@ class FakeDevice:
         self.writes.append((point.key, value))
         if point.key in self.write_raises:
             raise RuntimeError("the transport broke")
+        if self.busy_writes.get(point.key, 0) > 0:
+            self.busy_writes[point.key] -= 1
+            return WriteResult(Outcome.BUSY)
         outcome = self.write_outcomes.get(point.key, Outcome.OK)
         if outcome is Outcome.OK and value.registers:
             self.answers[point.key] = ReadResult(Outcome.OK, value.registers)
@@ -190,11 +196,16 @@ MODEL = Model(
 )
 
 
-def _client(registers: Mapping[str, tuple[int, ...]] | None = None, *,
-            read_only: bool = False) -> tuple[Client, FakeDevice, FakeClock]:
+def _client(registers: Mapping[str, tuple[int, ...]] | None = None, *, read_only: bool = False,
+            write_retry_for: float = 0.0) -> tuple[Client, FakeDevice, FakeClock]:
     device = FakeDevice(REGISTERS if registers is None else registers)
     clock = FakeClock()
-    return Client(device, MODEL, clock=clock, read_only=read_only), device, clock
+
+    async def sleep(seconds: float) -> None:
+        clock.advance(seconds)
+        await asyncio.sleep(0)
+    return (Client(device, MODEL, clock=clock, read_only=read_only, sleep=sleep, write_retry_for=write_retry_for),
+            device, clock)
 
 
 def _without(key: str) -> dict[str, tuple[int, ...]]:
@@ -202,9 +213,9 @@ def _without(key: str) -> dict[str, tuple[int, ...]]:
     return {k: v for k, v in REGISTERS.items() if k != key}
 
 
-def _connected(registers: Mapping[str, tuple[int, ...]] | None = None,
-               read_only: bool = False) -> tuple[Client, FakeDevice, FakeClock]:
-    client, device, clock = _client(registers, read_only=read_only)
+def _connected(registers: Mapping[str, tuple[int, ...]] | None = None, read_only: bool = False,
+               write_retry_for: float = 0.0) -> tuple[Client, FakeDevice, FakeClock]:
+    client, device, clock = _client(registers, read_only=read_only, write_retry_for=write_retry_for)
     asyncio.run(client.connect())
     device.reads.clear()
     return client, device, clock
@@ -854,6 +865,98 @@ def test_a_refused_write_returns_false() -> None:
     assert asyncio.run(client.write(MODE, 2)) is False
 
 
+def test_without_write_retry_for_a_busy_write_is_sent_once() -> None:
+    client, device, _ = _connected()
+    device.busy_writes["mode"] = 1
+    assert asyncio.run(client.write(MODE, 2)) is False
+    assert len(device.writes) == 1
+
+
+def test_a_busy_write_is_sent_again_until_the_device_takes_it() -> None:
+    client, device, _ = _connected(write_retry_for=10.0)
+    device.busy_writes["mode"] = 3
+    assert asyncio.run(client.write(MODE, 2)) is True
+    assert [value.registers for _, value in device.writes] == [(2,)] * 4
+
+
+def test_a_busy_write_is_given_up_write_retry_for_seconds_after_it_was_first_sent() -> None:
+    client, device, clock = _connected(write_retry_for=10.0)
+    device.busy_writes["mode"] = 1000
+    started = clock.monotonic()
+    assert asyncio.run(client.write(MODE, 2)) is False
+    assert clock.monotonic() - started == 10.0
+    assert len(device.writes) == 21, "sent every 0.5 s from 0 s to 10 s"
+
+
+def test_a_newer_setting_overtakes_a_write_the_device_keeps_refusing() -> None:
+    client, device, _ = _connected(write_retry_for=10.0)
+    device.busy_writes["mode"] = 2
+
+    async def taps() -> list[bool]:
+        return list(await asyncio.gather(client.write(MODE, 1), client.write(MODE, 3)))
+    assert within(2, taps()) == [True, True]
+    assert [value.registers for _, value in device.writes] == [(1,), (3,), (3,)], "1 was not sent again"
+
+
+def test_a_setting_the_device_took_is_its_value_until_it_is_read_back() -> None:
+    client, device, _ = _connected()
+    recorder = Recorder()
+    client.subscribe(MODE, recorder)
+    device.answer("mode", 1)
+    assert asyncio.run(client.write(MODE, 3)) is True
+    assert device.reads == []
+    assert recorder.values == [1, 3]
+
+
+def test_a_setting_the_device_did_not_take_leaves_the_value_as_it_was() -> None:
+    client, device, _ = _connected()
+    recorder = Recorder()
+    client.subscribe(MODE, recorder)
+    device.write_outcomes["mode"] = Outcome.ERROR
+    assert asyncio.run(client.write(MODE, 3)) is False
+    assert recorder.values == [1]
+
+
+def test_a_point_is_not_read_while_it_is_being_written() -> None:
+    client, device, clock = _connected(write_retry_for=10.0)
+    client.subscribe(MODE, Recorder())
+    client.subscribe(TEMP, Recorder())
+    device.busy_writes["mode"] = 2
+    clock.advance(3600)
+
+    async def write_and_poll() -> None:
+        writing = asyncio.create_task(client.write(MODE, 3))
+        await asyncio.sleep(0)
+        await client.poll()
+        assert "temp" in device.read_keys() and "mode" not in device.read_keys()
+        assert await writing is True
+    within(2, write_and_poll())
+
+
+def test_a_read_begun_before_a_write_does_not_undo_the_written_value() -> None:
+    client, device, clock = _connected()
+    client.subscribe(MODE, Recorder())
+    clock.advance(3600)
+    read = device.read
+    written = asyncio.Event()
+
+    async def read_answered_before_the_write(points: Sequence[Point[Any]]) -> Mapping[str, ReadResult]:
+        answers = await read(points)
+        await written.wait()
+        return answers
+    setattr(device, "read", read_answered_before_the_write)
+
+    async def poll_and_write() -> None:
+        polling = asyncio.create_task(client.poll())
+        await asyncio.sleep(0)
+        assert await client.write(MODE, 3) is True
+        written.set()
+        await polling
+    within(2, poll_and_write())
+    value = client.value(MODE)
+    assert value is not None and value.value == 3
+
+
 def test_settings_asked_for_quickly_collapse_to_the_newest() -> None:
     """Four taps while the first is on the wire: only the first and the last are actually sent."""
     client, device, _ = _connected()
@@ -888,6 +991,21 @@ def test_a_write_that_raises_reaches_every_caller_it_stood_in_for() -> None:
     results = within(2, taps())
     assert all(isinstance(r, RuntimeError) for r in results), results
     assert client.status(Status.WRITE_PENDING).value is False, "a failed write left the user interface disabled"
+
+
+def test_a_write_that_raises_while_overtaken_leaves_no_failure_unread() -> None:
+    client, device, _ = _connected()
+    device.delay = 0.01
+    device.write_raises.add("mode")
+
+    unread: list[str] = []
+
+    async def taps() -> None:
+        asyncio.get_running_loop().set_exception_handler(lambda _, context: unread.append(context["message"]))
+        await asyncio.gather(*(client.write(MODE, v) for v in (1, 2, 3)), return_exceptions=True)
+    within(2, taps())
+    gc.collect()
+    assert unread == []
 
 
 def test_every_command_is_sent_in_order() -> None:

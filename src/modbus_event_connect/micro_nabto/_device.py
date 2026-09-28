@@ -1,8 +1,6 @@
 """One micro_nabto device implementing `Device`: points in, `ReadResult` / `WriteResult` out."""
 from __future__ import annotations
 
-import asyncio
-import logging
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -14,8 +12,6 @@ from ._connection import MicroNabtoConnection
 from .._data_type import DataTypeKind
 from .._device import EncodedWrite, Identity, Outcome, ProtocolOptions, ReadResult, WriteResult
 from .._point import Access, Point
-
-_LOGGER = logging.getLogger(__name__)
 
 MAX_REGISTERS_PER_READ = 64
 """Registers per read request; a CTS 402 answered 108, so this leaves room."""
@@ -81,19 +77,12 @@ class _Batch:
 class MicroNabtoDevice:
     """A micro_nabto device; datapoints and setpoints are read in batches, setpoints written."""
 
-    def __init__(self, connection: MicroNabtoConnection, *, owns_connection: bool = False,
-                 write_attempts: int = 3, write_pause: float = 0.5) -> None:
+    def __init__(self, connection: MicroNabtoConnection, *, owns_connection: bool = False) -> None:
         """Args:
             owns_connection: whether `disconnect()` also closes the connection.
-            write_attempts: how often a write the device answers with a failure is sent in all.
-            write_pause: seconds between those attempts.
         """
-        if write_attempts < 1 or write_pause < 0:
-            raise ValueError("write_attempts must be at least 1, and write_pause cannot be negative")
         self._connection = connection
         self._owns_connection = owns_connection
-        self._write_attempts = write_attempts
-        self._write_pause = write_pause
         self._options: MicroNabtoOptions | None = None
         self._outcomes: Counter[Outcome] = Counter()
         self._isolated = 0
@@ -145,32 +134,25 @@ class MicroNabtoDevice:
         return result
 
     async def write(self, point: Point[Any], value: EncodedWrite) -> WriteResult:
-        """Write and wait for the device's answer: OK when it took the write.
-
-        A write the device answers with another status is sent again, `write_attempts` times in
-        all; a Nilan CTS 402 was seen refusing a write it took on a later try.
-        """
+        """Write once and wait for the device's answer: OK when it took the write, BUSY when it
+        answered another status - a Nilan CTS 402 answered 0x63 and 0x85 to writes it took later -
+        and ERROR for an answer without a status."""
         access = point.write
         if not isinstance(access, SetpointRegister):
             raise TypeError(f"point {point.key!r}: only a SetpointRegister can be written over micro_nabto")
         if value.bit_index is not None:
             raise ValueError(f"point {point.key!r}: a single bit cannot be written over micro_nabto")
         items = [(access.obj, access.address + i, register) for i, register in enumerate(value.registers)]
-        command = wire.setpoint_write(items)
-        status: int | None = None
-        for attempt in range(1, self._write_attempts + 1):
-            if attempt > 1:
-                await asyncio.sleep(self._write_pause)
-            answer = await self._connection.request(command)
-            if answer is None:
-                return self._written(WriteResult(Outcome.NO_ANSWER, detail="no answer from the device"))
-            status = wire.write_status(answer)
-            if status == 0:
-                return self._written(WriteResult(Outcome.OK))
-            _LOGGER.debug("micro_nabto: %r was answered with status %s (attempt %d of %d)", point.key,
-                          _status(status), attempt, self._write_attempts)
-        return self._written(WriteResult(
-            Outcome.ERROR, detail=f"the device answered with status {_status(status)}, {self._write_attempts} times"))
+        answer = await self._connection.request(wire.setpoint_write(items))
+        if answer is None:
+            return self._written(WriteResult(Outcome.NO_ANSWER, detail="no answer from the device"))
+        status = wire.write_status(answer)
+        if status is None:
+            return self._written(WriteResult(Outcome.ERROR, detail="an answer without a status"))
+        if status == 0:
+            return self._written(WriteResult(Outcome.OK))
+        return self._written(WriteResult(Outcome.BUSY, exception_code=status,
+                                         detail=f"the device answered with status 0x{status:02x}"))
 
     def _written(self, result: WriteResult) -> WriteResult:
         self._outcomes[result.outcome] += 1
@@ -228,10 +210,6 @@ class MicroNabtoDevice:
             return
         for point in batch.points:
             result[point.key] = raw
-
-
-def _status(status: int | None) -> str:
-    return "none" if status is None else f"0x{status:02x}"
 
 
 def _read_side(point: Point[Any]) -> Access:

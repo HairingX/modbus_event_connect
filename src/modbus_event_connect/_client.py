@@ -24,7 +24,7 @@ from ._errors import (
 from ._events import Subscriptions, ValueCallback, tell
 from ._key import Key, is_key
 from ._model import InstanceScanStep, Model, ModelSelector, RepeatedSection, ResolvedModel, resolve
-from ._point import Change, Labels, Point, PollRate, Selector
+from ._point import Change, Labels, Point, PollRate, Selector, WriteKind
 from ._scheduler import Scheduler
 from ._value import DataValue, Quality, Value
 from ._writes import Write, WriteQueue
@@ -94,7 +94,14 @@ class Client:
     """
 
     def __init__(self, device: Device, model: Model | ModelSelector, *,
-                 clock: Clock | None = None, read_only: bool = False) -> None:
+                 clock: Clock | None = None, read_only: bool = False,
+                 sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+                 write_retry_for: float = 0.0, write_retry_pause: float = 0.5) -> None:
+        """Args:
+            write_retry_for: seconds after its first sending that a write the device answered
+                `BUSY` is still sent again; 0 sends every write once.
+            write_retry_pause: seconds between those sendings.
+        """
         self._device = device
         self._select_model: ModelSelector = (lambda _identity: model) if isinstance(model, Model) else model
         self._clock: Clock = clock or SystemClock()
@@ -124,7 +131,9 @@ class Client:
         self._status_callbacks: dict[Status, list[StatusCallback]] = {status: [] for status in Status}
 
         self._poll_lock = asyncio.Lock()
-        self._writes = WriteQueue(device, answered=self._update_reachability, written=self._read_back,
+        self._writes = WriteQueue(device, clock=self._clock, sleep=sleep, retry_for=write_retry_for,
+                                  retry_pause=write_retry_pause, answered=self._update_reachability,
+                                  written=self._taken,
                                   pending=lambda pending: self._set_status(Status.WRITE_PENDING, pending))
 
     # ================================================================================= scan
@@ -165,15 +174,16 @@ class Client:
         if model is None:
             raise UnsupportedDeviceError(f"no model for a device that reports {dict(handshake)!r}")
         self._device.configure(model.options)
+        marks = self._writes.marks()
         answers = _ScanAnswers()
         try:
             resolved = resolve(model, await self._identify(model, handshake, answers))
             scanned: dict[str, ReadResult] = {}
-            marks: dict[_Scope, dict[str, str]] = {}
+            found: dict[_Scope, dict[str, str]] = {}
             reads: dict[_Scope, set[str]] = {}
             for scope in _scopes(resolved):
-                marks[scope], reads[scope] = await self._run_scan(resolved, scope, answers, scanned)
-            unavailable = _union(marks.values())
+                found[scope], reads[scope] = await self._run_scan(resolved, scope, answers, scanned)
+            unavailable = _union(found.values())
             readable = [p for p in resolved.points.values() if p.readable and p.key not in unavailable]
             unread = [p for p in readable if p.key not in scanned]
             first_answers: Mapping[str, ReadResult] = await self._device.read(unread) if unread else {}
@@ -182,10 +192,10 @@ class Client:
         except CannotConnectError:
             self._update_reachability(answers.any_answered)
             raise
-        self._commit(model, resolved, marks,
+        self._commit(model, resolved, found,
                      {scope: self._states([resolved.points[k] for k in keys], scanned)
                       for scope, keys in reads.items()})
-        self._publish(readable, {**scanned, **first_answers}, scanning=True)
+        self._publish(readable, {**scanned, **first_answers}, since=marks, scanning=True)
 
     async def _rescan(self, scope: tuple[str, int]) -> None:
         """Scan one instance again, and read what it now has.
@@ -195,6 +205,7 @@ class Client:
         """
         resolved = self._require_model()
         label, number = scope
+        marks = self._writes.marks()
         answers = _ScanAnswers()
         scanned: dict[str, ReadResult] = {}
         marked, read_keys = await self._run_scan(resolved, scope, answers, scanned)
@@ -213,7 +224,7 @@ class Client:
         first_answers: Mapping[str, ReadResult] = await self._device.read(unread) if unread else {}
         for point in instance:
             self._update_polling(point.key)
-        self._publish(readable, {**scanned, **first_answers}, scanning=True)
+        self._publish(readable, {**scanned, **first_answers}, since=marks, scanning=True)
 
     async def _identify(self, model: Model, handshake: Identity, answers: _ScanAnswers) -> Identity:
         """The handshake's identity, with what the model's identity points read added to it."""
@@ -514,7 +525,8 @@ class Client:
         async with self._poll_lock:
             before = self._available_points()
             try:
-                keys = self._require_scheduler().due()
+                marks = self._writes.marks()
+                keys = [key for key in self._require_scheduler().due() if not self._writes.disturbed(key, marks)]
                 if keys:
                     resolved = self._require_model()
                     await self._read_and_publish([resolved.points[k] for k in keys])
@@ -594,17 +606,24 @@ class Client:
             await self.poll()
 
     async def _read_and_publish(self, points: Sequence[Point[Any]]) -> None:
+        marks = self._writes.marks()
         answers = await self._device.read(points)
         # Before publishing: a recovery makes everything due, and must not undo these reads.
         self._update_reachability(any(a.outcome is not Outcome.NO_ANSWER for a in answers.values()))
-        self._publish(points, answers)
+        self._publish(points, answers, since=marks)
 
     def _publish(self, points: Sequence[Point[Any]], answers: Mapping[str, ReadResult], *,
-                 scanning: bool = False) -> None:
+                 since: Mapping[str, int], scanning: bool = False) -> None:
         """Store and tell what was read. A register found missing is no longer read; outside a scan,
-        what decides whether the unit has it is checked at once."""
+        what decides whether the unit has it is checked at once.
+
+        A point written to since the `since` marks were taken is left as it is, still due: what
+        was read may be from before the write.
+        """
         scheduler = self._require_scheduler()
         for point in points:
+            if self._writes.disturbed(point.key, since):
+                continue
             answer = answers[point.key]
             previous = self._values.get(point.key)
             data = self._data_value(point, answer, previous)
@@ -666,10 +685,22 @@ class Client:
 
     # ============================================================================= writing
 
+    def _as_written(self, point: Point[Any], value: object) -> DataValue[Any]:
+        encoded = encode(point, value)
+        if not encoded.registers:
+            return DataValue(value, Quality.GOOD, self._clock.now())
+        written, quality = decode(point, encoded.registers)
+        return DataValue(written, quality, self._clock.now(), raw=encoded.registers)
+
     async def write[T](self, key: Key[T], value: T) -> bool:
         """
         Write `value` to `key` and return whether the device accepted it. Writes go out in
-        order; a queued setting overtaken by a newer one returns the newer one's outcome.
+        order. A write the device answers `BUSY` is sent again for up to `write_retry_for`
+        seconds; a setting overtaken by a newer one before the device took it is not sent again,
+        and returns the newer one's outcome.
+
+        `key` is not read while it is being written. Once the device takes a setting, `key` holds
+        the value written until it is read back.
 
         Raises:
             ReadOnlyError: the client is read-only.
@@ -688,9 +719,12 @@ class Client:
         Write several values in order as one operation, stopping at the first refusal.
         Every value is checked before anything is sent. Returns whether all were accepted.
         """
-        encoded = [(point, encode(point, write.value))
-                   for point, write in ((self._writable_point(write.key), write) for write in writes)]
-        return await self._writes.write_sequence(encoded)
+        checked: list[tuple[Point[Any], object]] = []
+        for write in writes:
+            point = self._writable_point(write.key)
+            encode(point, write.value)
+            checked.append((point, write.value))
+        return await self._writes.write_sequence(checked)
 
     def _writable_point(self, key: Key[Any]) -> Point[Any]:
         if self._read_only:
@@ -704,8 +738,11 @@ class Client:
             raise ValueError(f"'{key}' cannot be written")
         return point
 
-    def _read_back(self, point: Point[Any]) -> None:
-        """Schedule the read-back of the written point and of the points its write disturbs."""
+    def _taken(self, point: Point[Any], value: object) -> None:
+        """Hold the setting the device took, as it will read it, and schedule the read-back of the
+        written point and of the points its write disturbs."""
+        if point.write_kind is WriteKind.STATE and point.readable and self._is_available(point.key):
+            self._store(point, self._as_written(point, value), self._values.get(point.key))
         scheduler = self._require_scheduler()
         resolved = self._require_model()
         after = resolved.model.read_back_delay(point)

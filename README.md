@@ -192,7 +192,11 @@ against the point's limits, or its states, and `InvalidValueError` says why it w
 - Writes are sent one at a time, in order.
 - If a setting is written several times while earlier writes are still waiting, only the newest
   value is sent. Commands are always all sent.
-- After a write, the point is read back, so subscribers see what the device really did.
+- A write the device answers busy is sent again until `Client(..., write_retry_for=...)` seconds
+  have passed since it was first sent, `write_retry_pause` apart; 0, the default, sends it once.
+  A newer setting takes over from one being sent again.
+- A point is not read while it is being written. Once the device takes a setting, subscribers
+  see the value written; then the point is read back, so they see what the device really did.
 - `await client.write_sequence([Write(MODE, Mode.HEAT), Write(TARGET, 21.5)])` checks every
   value first, then writes them in order and stops at the first refusal.
 - `client.status(Status.WRITE_PENDING).value` is `True` while writes are waiting or being sent.

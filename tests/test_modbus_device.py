@@ -388,11 +388,13 @@ async def test_busy_gives_up_after_its_retries() -> None:
     assert "after 4 busy retries" in raw.detail
 
 
-async def test_busy_is_retried_for_a_write_too() -> None:
+async def test_a_write_answered_busy_is_busy_and_sent_once() -> None:
     rig = Rig(SimulatedModbusDevice(holding_registers={0: 0}, busy_for=1))
     point = Point(Key("s", int), write=HoldingRegister(0), data_type=DataType.UINT16)
-    assert (await rig.device.write(point, EncodedWrite((9,)))).ok
-    assert rig.unit.holding_registers[0] == 9 and rig.sleeps.waits == [0.2]
+    result = await rig.device.write(point, EncodedWrite((9,)))
+    assert (result.outcome, result.exception_code) == (Outcome.BUSY, 0x06)
+    assert rig.unit.holding_registers[0] == 0 and rig.sleeps.waits == []
+    assert len(rig.unit.requests) == 1
 
 
 async def test_without_busy_retries_busy_is_answered_at_once() -> None:

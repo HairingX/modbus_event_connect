@@ -96,7 +96,8 @@ class ModbusDevice:
                  backoff_after: int = 3, backoff_for: float = 60.0) -> None:
         """Args:
             owns_connection: whether `disconnect()` also closes the shared connection.
-            busy_retries, busy_delay: retries for a 0x06 answer, doubling `busy_delay` each time.
+            busy_retries, busy_delay: retries of a read answered 0x06, doubling `busy_delay` each
+                time. A write answered 0x06 is not sent again: it is `BUSY`.
             backoff_after, backoff_for: unanswered requests before refusing new ones for this long."""
         if not 0 <= unit_id <= 255:
             raise ValueError(f"a unit id is 0-255, got {unit_id}")
@@ -187,6 +188,7 @@ class ModbusDevice:
         return result
 
     async def write(self, point: Point[Any], value: EncodedWrite) -> WriteResult:
+        """Write once; a 0x06 answer is `BUSY`."""
         access = point.write
         if access is None:
             raise TypeError(f"point {point.key!r} has no write side")
@@ -200,14 +202,14 @@ class ModbusDevice:
                 raise ValueError(f"point {point.key!r}: a coil is written with one register, 0 or 1, "
                                  f"not {value!r}")
             answer = await self._exchange(Request(self._unit, FunctionCode.WRITE_SINGLE_COIL, address,
-                                                  values=value.registers))
+                                                  values=value.registers), busy_retries=0)
         elif value.bit_index is not None:
             answer = await self._write_bit(address, value.bit_index, value.bit_value)
         else:
             if len(value.registers) > MAX_REGISTERS_PER_WRITE:
                 raise ValueError(f"point {point.key!r}: {len(value.registers)} registers exceed the "
                                  f"Modbus limit of {MAX_REGISTERS_PER_WRITE} per write")
-            answer = await self._exchange(self._register_write(address, value.registers))
+            answer = await self._exchange(self._register_write(address, value.registers), busy_retries=0)
         return WriteResult(answer.outcome, answer.exception_code, answer.detail)
 
     def diagnostics(self) -> Mapping[str, object]:
@@ -255,7 +257,8 @@ class ModbusDevice:
         mask = 1 << bit
         if self._configured().bit_write is BitWrite.MASK:
             return await self._exchange(Request(self._unit, FunctionCode.MASK_WRITE_REGISTER, address,
-                                                and_mask=~mask & 0xFFFF, or_mask=mask if on else 0))
+                                                and_mask=~mask & 0xFFFF, or_mask=mask if on else 0),
+                                        busy_retries=0)
         # Read-modify-write. Without the lock, two bit writes to one register interleave as
         # read, read, write, write - and the second write puts back the first one's bit.
         lock = self._bit_locks.setdefault(address, asyncio.Lock())
@@ -266,12 +269,14 @@ class ModbusDevice:
                 return current
             register = current.response.registers[0]
             register = register | mask if on else register & ~mask & 0xFFFF
-            return await self._exchange(self._register_write(address, (register,)))
+            return await self._exchange(self._register_write(address, (register,)), busy_retries=0)
 
     # ------------------------------------------------------------- one exchange, backoff
 
-    async def _exchange(self, request: Request) -> _Answer:
-        """Send `request`, retrying "busy" with backoff. Never raises for the device's doing."""
+    async def _exchange(self, request: Request, *, busy_retries: int | None = None) -> _Answer:
+        """Send `request`, retrying "busy" with backoff, `busy_retries` times if given. Never raises
+        for the device's doing."""
+        retries = self._busy_retries if busy_retries is None else busy_retries
         delay = self._busy_delay
         attempt = 0
         while True:
@@ -281,7 +286,7 @@ class ModbusDevice:
                 return _Answer(Outcome.NO_ANSWER, None,
                                f"{_where(request)}: not sent, backing off after "
                                f"{self._backoff_after} unanswered requests")
-            if response.exception_code != ExceptionCode.SERVER_DEVICE_BUSY or attempt >= self._busy_retries:
+            if response.exception_code != ExceptionCode.SERVER_DEVICE_BUSY or attempt >= retries:
                 break
             attempt += 1
             self._busy_repeats += 1
