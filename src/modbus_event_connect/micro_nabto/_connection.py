@@ -90,23 +90,26 @@ class MicroNabtoConnection:
 
     def __init__(self, email: str, *, host: str | None = None, device_id: str | None = None,
                  port: int = wire.DEVICE_PORT, timeout: float = 1.0, retries: int = 2,
-                 backoff_for: float = 10.0, session_idle: float = 12.0,
+                 answer_wait: float = 5.0, backoff_for: float = 10.0, session_idle: float = 12.0,
                  discovery_target: tuple[str, int] = wire.BROADCAST, clock: Clock | None = None) -> None:
         """Args:
             email: the account paired with the device; it is never logged.
             host, device_id: where to reach the device; with only `device_id`, it is discovered.
             timeout: seconds to wait for each answer.
+            answer_wait: seconds to wait for an answer once the device has said it has the
+                request; it is not sent again meanwhile.
         """
         if host is None and device_id is None:
             raise ValueError("a connection needs a host, a device_id, or both")
-        if timeout <= 0 or session_idle <= 0 or retries < 0 or backoff_for < 0:
+        if timeout <= 0 or session_idle <= 0 or retries < 0 or backoff_for < 0 or answer_wait < timeout:
             raise ValueError("timeout and session_idle must be positive; retries and backoff_for "
-                             "cannot be negative")
+                             "cannot be negative; answer_wait cannot be shorter than timeout")
         self._email = email
         self._device_id = device_id
         self._address: tuple[str, int] | None = (host, port) if host is not None else None
         self._timeout = timeout
         self._retries = retries
+        self._answer_wait = answer_wait
         self._backoff_for = backoff_for
         self._session_idle = session_idle
         self._discovery_target = discovery_target
@@ -117,13 +120,14 @@ class MicroNabtoConnection:
         self._transport: asyncio.DatagramTransport | None = None
         self._lock = asyncio.Lock()
         self._sequence = 0
-        self._waiting: tuple[int, asyncio.Future[wire.ConnectReply | wire.DataReply]] | None = None
+        self._waiting: tuple[int, asyncio.Future[wire.ConnectReply | wire.DataReply], asyncio.Event] | None = None
         self._backoff_until: float | None = None
         self._last_answer = 0.0
 
         self._exchanges = 0
         self._answered = 0
         self._resends = 0
+        self._received = 0
         self._handshakes = 0
         self._rediscoveries = 0
         self._latency_total = 0.0
@@ -164,14 +168,6 @@ class MicroNabtoConnection:
                 answer = await self._data(command)
             return answer
 
-    async def send(self, command: bytes) -> bool:
-        """Send `command` without waiting for an answer. False if there is no session to send it on."""
-        async with self._lock:
-            if not await self._ready() or self._server_id is None:
-                return False
-            self._send(wire.data_request(self._client_id, self._server_id, self._next_sequence(), command))
-            return True
-
     def diagnostics(self) -> Mapping[str, object]:
         """Counters for a bug report; never an address, a device id or the email."""
         return {
@@ -179,6 +175,7 @@ class MicroNabtoConnection:
             "exchanges": self._exchanges,
             "answered": self._answered,
             "resends": self._resends,
+            "received": self._received,
             "handshakes": self._handshakes,
             "rediscoveries": self._rediscoveries,
             "average_latency": self._latency_total / self._answered if self._answered else None,
@@ -251,17 +248,27 @@ class MicroNabtoConnection:
         self._exchanges += 1
         for attempt in range(self._retries + 1):
             future: asyncio.Future[wire.ConnectReply | wire.DataReply] = loop.create_future()
-            self._waiting = (sequence, future)
+            received = asyncio.Event()
+            self._waiting = (sequence, future, received)
             if attempt:
                 self._resends += 1
             started = self._clock.monotonic()
             self._send(datagram)
             try:
-                answer = await asyncio.wait_for(future, self._timeout)
-            except asyncio.TimeoutError:
-                continue
+                await asyncio.wait({future}, timeout=self._timeout)
+                if not future.done() and received.is_set():
+                    # uNabto: the device has the request and answers when it is ready; sending it
+                    # again would only be acknowledged again.
+                    await asyncio.wait({future}, timeout=self._answer_wait - self._timeout)
+                    if not future.done():
+                        return None
+                if not future.done():
+                    continue
+                answer = future.result()
             finally:
                 self._waiting = None
+                if not future.done():
+                    future.cancel()
             self._answered += 1
             self._last_answer = self._clock.monotonic()
             self._latency_total += self._last_answer - started
@@ -277,8 +284,13 @@ class MicroNabtoConnection:
         waiting = self._waiting
         if answer is None or waiting is None:
             return
-        sequence, future = waiting
-        if answer.sequence == sequence and not future.done():
+        sequence, future, received = waiting
+        if answer.sequence != sequence or future.done():
+            return
+        if isinstance(answer, wire.Received):
+            self._received += 1
+            received.set()
+        else:
             future.set_result(answer)
 
     def _next_sequence(self) -> int:

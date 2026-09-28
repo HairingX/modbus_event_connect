@@ -700,14 +700,17 @@ CTS 402 — which other devices may not share.
   anew, at an address found by the device id if it has changed, before the device counts as
   unreachable.
 - **Every answer is checked** against uNabto's checksum (a 16-bit sum) and padding (to an
-  even length); a damaged one counts as lost. The CTS 402 sends a packet without an answer
-  ahead of every answer; any such packet is ignored.
+  even length); a damaged one counts as lost. Ahead of every answer the CTS 402 sends uNabto's
+  NOTIFY_MICRO_ACK, "the Micro has received the request, but the answer isn't ready yet"; after
+  it the request is not sent again, and its answer is waited for up to `answer_wait`.
 - **One unknown address refuses a whole read** on the CTS 402, answered with a count of 0.
   A refused read is halved until the refusal is pinned down, as Modbus 0x02 is; any count
   that does not match is treated the same way, so a device that answers differently is not
   misread.
-- A setpoint write is sent without waiting for a confirmation; the read-back (7) shows whether
-  it took.
+- **A setpoint write waits for its answer**, which starts with a status: 0 when the device took
+  the write. A CTS 402 answered 0x63 and 0x85 to writes it did not take - they are not uNabto's
+  codes, which it sends as exceptions - and took the same write on a later try; so a write
+  answered otherwise is sent again, three times in all, and then fails naming the status.
 
 ---
 
@@ -791,11 +794,9 @@ A library that gets these wrong is worse than none.
    device number, slave device model — without reading a register; a CTS 402 reports 1140 /
    72270 / 1 and runs as its `CTS400` model. A `ModelSelector` over the handshake identity
    expresses that table.
+4. **A micro_nabto write is confirmed** by its answer's status (8), not only by the read-back.
 
 **Open**
 
-4. **Deadband default:** none (every change reported), or a default per unit?
+5. **Deadband default:** none (every change reported), or a default per unit?
    Proposed: none; a model sets it on the points whose device is noisy.
-5. **Confirming a micro_nabto write.** The device sends a receipt ahead of every answer to a
-   read. If it sends one for a write too, a write could be sent again until confirmed instead of
-   relying on the read-back. Finding out takes one write to a live device.

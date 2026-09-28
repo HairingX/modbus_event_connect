@@ -549,7 +549,8 @@ async def test_temperature_is_read():
 `SimulatedModbusDevice` refuses an unknown address with exception 0x02, Illegal Data Address,
 as the Modbus specification says, and can be made busy or silent; `SimulatedModbusGateway` can
 be made slow or cut off. `SimulatedMicroNabtoDevice` answers as a Nilan CTS 402 was measured
-to. `FakeClock` lets a test move time forward without waiting.
+to, and can be made to answer late (`answer_delay`) or to refuse writes (`write_statuses`).
+`FakeClock` lets a test move time forward without waiting.
 
 ---
 
