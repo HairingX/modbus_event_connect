@@ -553,6 +553,13 @@ to. `FakeClock` lets a test move time forward without waiting.
 
 ---
 
+## Acknowledgements
+
+How micro_nabto works - the local session with a Nilan or Genvex gateway, its handshake and
+its commands - was first worked out by [superrob](https://github.com/superrob) in
+[genvexnabto](https://github.com/superrob/genvexnabto). The implementation here is written
+anew, but it was his work that made a local connection possible at all.
+
 ## Disclaimer
 
 Provided "as is", without warranty of any kind. You are responsible for the safe operation of
