@@ -231,14 +231,31 @@ def test_precision_cannot_be_negative() -> None:
     _refused("precision cannot be negative", read=InputRegister(1), precision=-1)
 
 
+def test_a_transform_is_refused_on_text() -> None:
+    _refused("a transform applies to numbers, a BOOL or a bit", read=HoldingRegister(1),
+             data_type=DataType.string(2), transform=Transforms.INVERT_BOOL)
+
+
+@pytest.mark.parametrize("data_type", [DataType.BOOL, DataType.bit(1)])
+def test_a_bool_or_a_bit_takes_a_transform_that_keeps_zero_and_one(data_type: DataType) -> None:
+    Point(Key("p", bool), read=HoldingRegister(1), data_type=data_type, transform=Transforms.INVERT_BOOL)  # must not raise
+
+
+@pytest.mark.parametrize("data_type", [DataType.BOOL, DataType.bit(1)])
+@pytest.mark.parametrize("transform", [Transforms.SECONDS_AS_MINUTES, Transform(read=lambda v: 2 * v, write=lambda v: v / 2),
+                                       Transform(read=lambda v: 1 / v, write=lambda v: 1 / v)],
+                         ids=["seconds_as_minutes", "doubles", "divides_by_zero"])
+def test_a_bool_or_a_bit_refuses_a_transform_that_leaves_zero_and_one(data_type: DataType, transform: Transform) -> None:
+    _refused("must turn 0 and 1 into 0 and 1", read=HoldingRegister(1), data_type=data_type, transform=transform)
+
+
 @pytest.mark.parametrize("data_type", [DataType.BOOL, DataType.bit(1), DataType.string(2)])
 @pytest.mark.parametrize("fields,match", [
     ({"scale": 2}, "scale and offset apply to numbers"),
     ({"offset": 1}, "scale and offset apply to numbers"),
-    ({"transform": Transforms.INVERT_BOOL}, "transform applies to numbers"),
     ({"deadband": 1.0}, "deadband applies to numbers"),
     ({"limits": Limits(0, 1)}, "limits apply to numbers"),
-], ids=["scale", "offset", "transform", "deadband", "limits"])
+], ids=["scale", "offset", "deadband", "limits"])
 def test_number_only_features_are_refused_on_other_data_types(data_type: DataType, fields: dict[str, Any],
                                                            match: str) -> None:
     _refused(match, read=HoldingRegister(1), write=HoldingRegister(1), data_type=data_type, **fields)

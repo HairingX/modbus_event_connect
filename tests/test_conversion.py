@@ -383,6 +383,33 @@ def test_bool_write_refuses_anything_but_bool_or_zero_or_one(value: Value) -> No
         encode(point, value)
 
 
+@pytest.mark.parametrize("register,value", [(0, True), (1, False), (42, False)])
+def test_an_inverted_bool_reads_zero_as_true(register: int, value: bool) -> None:
+    point = _ro_point(DataType.BOOL, transform=Transforms.INVERT_BOOL)
+    assert decode(point, [register]) == (value, Quality.GOOD)
+
+
+def test_an_inverted_bool_writes_true_as_zero() -> None:
+    point = Point(Key("p", bool), read=HoldingRegister(0), write=HoldingRegister(0), data_type=DataType.BOOL,
+                  transform=Transforms.INVERT_BOOL)
+    assert encode(point, True).registers == (0,)
+    assert encode(point, False).registers == (1,)
+
+
+def test_an_inverted_coil_reads_and_writes_the_other_way_round() -> None:
+    coil = Point(Key("p", bool), read=Coil(0), write=Coil(0), data_type=DataType.BOOL, transform=Transforms.INVERT_BOOL)
+    assert decode(coil, [0]) == (True, Quality.GOOD)
+    assert encode(coil, True).registers == (0,)
+
+
+@pytest.mark.parametrize("bit", [0, 7, 15])
+def test_an_inverted_bit_reads_and_writes_the_other_way_round(bit: int) -> None:
+    point = _rw_point(DataType.bit(bit), transform=Transforms.INVERT_BOOL)
+    assert decode(point, [0xFFFF ^ (1 << bit)]) == (True, Quality.GOOD)
+    assert decode(point, [1 << bit]) == (False, Quality.GOOD)
+    assert encode(point, True) == EncodedWrite(bit_index=bit, bit_value=False)
+
+
 # ============================================================================================ STRING
 
 
