@@ -266,9 +266,8 @@ no enum names yet can still be told.
 - Repeated points get their key from the template, e.g. `Key(f"room_{n}_temp_air", float)`.
 - The library is being built new and nobody runs it yet, so Sentio — the first consumer — is
   free to choose its keys now. After that they are frozen.
-- **Nilan is different:** `nilan_proxy` runs in production behind the `nilan_connect`
-  integration. When it moves onto this library, its key strings must come out identical, and a
-  test compares the full key set before and after.
+- **Keys a consumer already stores stay as they are:** a device library that takes over from one
+  in use gives its points the same key strings, and a test compares the full key set.
 
 ---
 
@@ -798,18 +797,14 @@ A library that gets these wrong is worse than none.
    `after`; re-reading until stable is declared per effect.
 2. **Time** (5.7): `DataValue.timestamp` is a UTC `datetime`; scheduling uses the monotonic
    clock; both come from one injectable `Clock`.
-3. **micro_nabto access covers Nilan.** Checked against every model in `nilan_proxy`, which runs
-   in production: each point is one register at object 0 — `read_obj` / `write_obj` exist but no
-   model sets them — with signed, divider and offset, and setpoints add a write address and
-   min / max / step. No strings, no transforms. `DatapointRegister(a)` / `SetpointRegister(a)`, with the object
-   defaulting to 0 and the length following from the data type, covers all of it.
+3. **micro_nabto access covers Nilan and Genvex.** Every point of their controllers is one
+   register at object 0, signed or not, with a scale and an offset; a setting adds a write address
+   and its limits. `DatapointRegister(a)` / `SetpointRegister(a)`, with the object defaulting to 0
+   and the length following from the data type, covers all of it.
 
-   Two migration notes. `nilan_proxy` states min / max in **register** units, while limits
-   here are in engineering units (3.5), so migration converts them. And `nilan_proxy` picks a
-   model from a decision table over four handshake values — device model, device number, slave
-   device number, slave device model — without reading a register; a CTS 402 reports 1140 /
-   72270 / 1 and runs as its `CTS400` model. A `ModelSelector` over the handshake identity
-   expresses that table.
+   A controller's model is chosen from four handshake values - device model, device number, slave
+   device number, slave device model - without reading a register; a CTS 402 reports 1140 /
+   72270 / 1. A `ModelSelector` over the handshake identity expresses that choice.
 4. **A micro_nabto write is confirmed** by its answer's status (8), not only by the read-back.
 
 **Open**
