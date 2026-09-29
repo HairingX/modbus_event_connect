@@ -4,6 +4,7 @@ from __future__ import annotations
 import math
 import struct
 from collections.abc import Sequence
+from datetime import date, datetime, time
 from typing import Any
 
 from ._data_type import ByteOrder, DataTypeKind, WordOrder, raw_bounds
@@ -44,6 +45,8 @@ def decode(point: Point[Any], registers: Sequence[int]) -> tuple[Value, Quality]
         return (_bit_read(point, bool((registers[0] >> data_type.bit_index) & 1)), Quality.GOOD)
     if kind is DataTypeKind.STRING:
         return _decode_string(point, registers)
+    if data_type.is_temporal:
+        return _decode_dos(point, registers)
     if data_type.is_float:
         return _as_key_type(point, *_decode_float(point, registers))
     return _as_key_type(point, *_decode_int(point, registers))
@@ -67,6 +70,8 @@ def encode(point: Point[Any], value: object) -> EncodedWrite:
         return EncodedWrite(bit_index=data_type.bit_index, bit_value=_bit_written(point, _as_bit_value(point, value)))
     if kind is DataTypeKind.STRING:
         return _encode_string(point, value)
+    if data_type.is_temporal:
+        return _encode_dos(point, value)
     return _encode_numeric(point, _numeric_for_key_type(point, value))
 
 
@@ -242,9 +247,12 @@ def _bcd_pack(value: int, nibble_count: int) -> int:
 def _as_key_type(point: Point[Any], value: Value, quality: Quality) -> tuple[Value, Quality]:
     """A decoded number as the key's type: a float, or the state an integer names."""
     value_type: type[object] = point.key.type
-    if value is None or isinstance(value, (bool, str)):
+    if value is None or isinstance(value, (bool, str, date)):
         return (value, quality)
     if is_state_type(value_type):
+        if point.codes is not None:
+            state = point.codes.get(int(value)) if isinstance(value, int) else None
+            return (state, quality) if state is not None else (None, Quality.NO_DATA)
         try:
             return (value_type(value), quality)
         except ValueError:
@@ -265,6 +273,12 @@ def _numeric_for_key_type(point: Point[Any], value: object) -> int | float:
     if is_state_type(value_type):
         if not isinstance(value, int):
             raise InvalidValueError(f"point {point.key!r}: expected a {value_type.__name__}, got {value!r}")
+        if point.codes is not None:
+            code = next((code for code, state in point.codes.items() if state == value), None)
+            if code is None:
+                raise InvalidValueError(f"point {point.key!r}: {value!r} is not a state this point has; "
+                                        f"expected one of {[state.name for state in point.states]}")
+            return code
         try:
             return int(value_type(value))
         except ValueError:
@@ -358,6 +372,50 @@ def _encode_numeric(point: Point[Any], value: Value) -> EncodedWrite:
         raise InvalidValueError(f"point {point.key!r}: {value!r} overflows {kind.name}") from err
     combined = int.from_bytes(packed, "big")
     return EncodedWrite(registers=_split(combined, data_type.registers, point.word_order, point.byte_order))
+
+
+def _decode_dos(point: Point[Any], registers: Sequence[int]) -> tuple[Value, Quality]:
+    """A date, or a date and a time; NO_DATA for words that name none, such as a date of 0."""
+    words = _reorder(registers, WordOrder.HIGH_FIRST, point.byte_order)
+    day = _dos_date(words[0])
+    if day is None:
+        return (None, Quality.NO_DATA)
+    if point.data_type.kind is DataTypeKind.DOS_DATE:
+        return (day, Quality.GOOD)
+    moment = _dos_time(words[1])
+    if moment is None:
+        return (None, Quality.NO_DATA)
+    return (datetime.combine(day, moment), Quality.GOOD)
+
+
+def _dos_date(word: int) -> date | None:
+    try:
+        return date(1980 + (word >> 9), (word >> 5) & 0x0F, word & 0x1F)
+    except ValueError:
+        return None
+
+
+def _dos_time(word: int) -> time | None:
+    try:
+        return time(word >> 11, (word >> 5) & 0x3F, (word & 0x1F) * 2)
+    except ValueError:
+        return None
+
+
+def _encode_dos(point: Point[Any], value: object) -> EncodedWrite:
+    wants_time = point.data_type.kind is DataTypeKind.DOS_DATETIME
+    if wants_time != isinstance(value, datetime) or not isinstance(value, date):
+        wanted = "datetime" if wants_time else "date"
+        raise InvalidValueError(f"point {point.key!r}: expected a {wanted}, got {type(value).__name__}")
+    if not 1980 <= value.year <= 2107:
+        raise InvalidValueError(f"point {point.key!r}: {value!r} is outside the years 1980-2107 a DOS date holds")
+    words = [((value.year - 1980) << 9) | (value.month << 5) | value.day]
+    if isinstance(value, datetime):
+        if value.second % 2 or value.microsecond:
+            raise InvalidValueError(f"point {point.key!r}: {value!r} is not a whole even second, "
+                                    f"which a DOS time holds")
+        words.append((value.hour << 11) | (value.minute << 5) | (value.second // 2))
+    return EncodedWrite(registers=tuple(_reorder(words, WordOrder.HIGH_FIRST, point.byte_order)))
 
 
 def _encode_string(point: Point[Any], value: object) -> EncodedWrite:
