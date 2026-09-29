@@ -410,7 +410,8 @@ Point(STATE, read=InputRegister(20), codes={0: OperationState.OFF, 7: OperationS
 ```
 
 A code the table lacks is `NO_DATA`, and a state it lacks cannot be written; `point.states`
-names the states a point can have, in the enum's order.
+names the states a point can have, in the enum's order. On a point that is only read, several
+codes may name one state.
 
 `DOS_DATE` is one register packed the MS-DOS way - years since 1980, month, day - and reads as
 a `date`. `DOS_DATETIME` is such a date register followed by a time register - hours, minutes,

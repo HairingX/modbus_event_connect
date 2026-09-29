@@ -227,7 +227,8 @@ class Point[T]:
     codes: Mapping[int, IntEnum] | None = None
     """What each raw code means, for a key naming states: a code the table lacks reads as NO_DATA,
     and a state it lacks cannot be written. Devices that number the same states differently each
-    map theirs onto one shared IntEnum. None: each state is its own raw code."""
+    map theirs onto one shared IntEnum. Several codes may name one state on a point that is only
+    read. None: each state is its own raw code."""
     valid_raw: Collection[int] | None = None
     """The raw numbers - what the device sends, before scale and offset - that are values; any
     other reads as NO_DATA, and cannot be written. None: every number is a value.
@@ -353,7 +354,7 @@ def _type_problems(point: Point[Any]) -> list[str]:
         if point.limits is not None:
             found.append(f"the states of {value_type.__name__} are what may be written: no limits")
         if point.codes is not None:
-            found += _code_problems(point.codes, value_type, data_type)
+            found += _code_problems(point.codes, value_type, data_type, writable=point.writable)
         return found
     if data_type.is_temporal:
         wanted = datetime if data_type.kind is DataTypeKind.DOS_DATETIME else date
@@ -374,12 +375,13 @@ def _type_problems(point: Point[Any]) -> list[str]:
     return [f"a value is a bool, int, float, str, date, datetime or IntEnum, not {value_type.__name__}"]
 
 
-def _code_problems(codes: Mapping[int, IntEnum], states: type[IntEnum], data_type: DataType) -> list[str]:
+def _code_problems(codes: Mapping[int, IntEnum], states: type[IntEnum], data_type: DataType, *,
+                   writable: bool) -> list[str]:
     found: list[str] = []
     foreign = [state for state in codes.values() if not isinstance(state, states)]
     if foreign:
         found.append(f"codes name {foreign[0]!r}, which is not a state of {states.__name__}")
-    if len(set(codes.values())) != len(codes):
+    if writable and len(set(codes.values())) != len(codes):
         found.append("two codes name the same state, so it could not be written")
     bounds = raw_bounds(data_type.kind)
     if bounds is not None and any(not bounds[0] <= code <= bounds[1] for code in codes):
