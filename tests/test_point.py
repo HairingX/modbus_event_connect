@@ -182,14 +182,17 @@ class Other(IntEnum):
     (Mode, {"data_type": DataType.UINT16}),
     (Mode, {"data_type": DataType.INT16, "valid_raw": range(-0x8000, 0x7FFF)}),
     (Mode, {"data_type": DataType.UINT16, "codes": {3: Mode.OFF, 9: Mode.ON}}),
-    (Mode, {"data_type": DataType.UINT16, "codes": {3: Mode.OFF, 4: Mode.OFF}, "write": None}),
     (date, {"data_type": DataType.DOS_DATE}),
     (datetime, {"data_type": DataType.DOS_DATETIME}),
 ], ids=["bool-bit", "str-string", "int-whole-scale", "int-precision-0", "float-int16", "float-float32",
-        "states-u16", "states-with-no-data", "states-coded", "states-coded-twice-read-only", "dos-date",
-        "dos-datetime"])
+        "states-u16", "states-with-no-data", "states-coded", "dos-date", "dos-datetime"])
 def test_a_key_type_the_registers_can_hold_is_accepted(value_type: type[Any], fields: dict[str, Any]) -> None:
-    Point(Key("p", value_type), **{"read": HoldingRegister(1), "write": HoldingRegister(1), **fields})
+    Point(Key("p", value_type), read=HoldingRegister(1), write=HoldingRegister(1), **fields)
+
+
+def test_several_codes_may_name_one_state_on_a_point_that_is_only_read() -> None:
+    point = Point(Key("p", Mode), read=HoldingRegister(1), codes={3: Mode.OFF, 4: Mode.OFF})
+    assert point.states == (Mode.OFF,)
 
 
 @pytest.mark.parametrize("value_type,fields,match", [
