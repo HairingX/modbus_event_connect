@@ -116,13 +116,16 @@ def pick_model(identity):
 client = Client(ventilation, pick_model)
 ```
 
+Once connected, `client.model` is the model chosen and `client.identity` what the device reported
+about itself, with what the model's identity points read.
+
 `connect()` raises when it cannot finish:
 
 | Error | Meaning |
 |---|---|
 | `CannotConnectError` | The device could not be reached, or did not answer every read. Try again later. |
 | `AuthenticationError` | A micro_nabto device refused the email. Ask the user to check it. |
-| `UnsupportedDeviceError` | The device answered, but no model matches it. |
+| `UnsupportedDeviceError` | The device answered, but no model matches it. Its `identity` is what the device reported. |
 
 ## Reading values
 

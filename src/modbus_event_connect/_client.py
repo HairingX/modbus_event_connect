@@ -172,12 +172,13 @@ class Client:
         """
         model = self._select_model(handshake)
         if model is None:
-            raise UnsupportedDeviceError(f"no model for a device that reports {dict(handshake)!r}")
+            raise UnsupportedDeviceError(f"no model for a device that reports {dict(handshake)!r}", handshake)
         self._device.configure(model.options)
         marks = self._writes.marks()
         answers = _ScanAnswers()
         try:
             resolved = resolve(model, await self._identify(model, handshake, answers))
+            _LOGGER.debug("%s chosen for a device that reports %r", model.name, dict(resolved.identity))
             scanned: dict[str, ReadResult] = {}
             found: dict[_Scope, dict[str, str]] = {}
             reads: dict[_Scope, set[str]] = {}
@@ -330,6 +331,12 @@ class Client:
     @property
     def model(self) -> Model:
         return self._require_model().model
+
+    @property
+    def identity(self) -> Identity:
+        """What the device reported about itself when it connected, with what the model's identity
+        points read."""
+        return self._require_model().identity
 
     @property
     def points(self) -> Mapping[Key[Any], Point[Any]]:
