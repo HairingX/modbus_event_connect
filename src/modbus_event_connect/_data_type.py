@@ -42,12 +42,18 @@ class DataTypeKind(Enum):
     BIT = auto()
     """One bit of a 16-bit register."""
     STRING = auto()
+    DOS_DATE = auto()
+    """An MS-DOS date: years since 1980 in bits 15-9, the month in bits 8-5, the day in bits 4-0."""
+    DOS_DATETIME = auto()
+    """An MS-DOS date register followed by an MS-DOS time register: hours in bits 15-11, minutes in
+    bits 10-5, seconds halved in bits 4-0."""
 
 
 _REGISTERS: Mapping[DataTypeKind, int] = MappingProxyType({
     DataTypeKind.UINT16: 1, DataTypeKind.INT16: 1, DataTypeKind.BCD16: 1, DataTypeKind.BOOL: 1, DataTypeKind.BIT: 1,
     DataTypeKind.UINT32: 2, DataTypeKind.INT32: 2, DataTypeKind.FLOAT32: 2, DataTypeKind.BCD32: 2,
     DataTypeKind.UINT64: 4, DataTypeKind.INT64: 4, DataTypeKind.FLOAT64: 4,
+    DataTypeKind.DOS_DATE: 1, DataTypeKind.DOS_DATETIME: 2,
 })
 
 _RAW_BOUNDS: Mapping[DataTypeKind, tuple[int, int]] = MappingProxyType({
@@ -98,6 +104,8 @@ class DataType:
     BCD16: ClassVar[DataType]
     BCD32: ClassVar[DataType]
     BOOL: ClassVar[DataType]
+    DOS_DATE: ClassVar[DataType]
+    DOS_DATETIME: ClassVar[DataType]
 
     def __post_init__(self) -> None:
         if self.kind is DataTypeKind.BIT:
@@ -144,6 +152,11 @@ class DataType:
         return self.kind in _FLOAT_KINDS
 
     @property
+    def is_temporal(self) -> bool:
+        """Whether the value is a date, or a date and a time."""
+        return self.kind in (DataTypeKind.DOS_DATE, DataTypeKind.DOS_DATETIME)
+
+    @property
     def is_boolean(self) -> bool:
         return self.kind in (DataTypeKind.BOOL, DataTypeKind.BIT)
 
@@ -155,6 +168,6 @@ class DataType:
 
 for _kind in (DataTypeKind.UINT16, DataTypeKind.INT16, DataTypeKind.UINT32, DataTypeKind.INT32, DataTypeKind.UINT64,
               DataTypeKind.INT64, DataTypeKind.FLOAT32, DataTypeKind.FLOAT64, DataTypeKind.BCD16, DataTypeKind.BCD32,
-              DataTypeKind.BOOL):
+              DataTypeKind.BOOL, DataTypeKind.DOS_DATE, DataTypeKind.DOS_DATETIME):
     setattr(DataType, _kind.name, DataType(_kind))
 del _kind

@@ -1,6 +1,6 @@
 """Points, data_types, access, selectors, the protocol contract's value types, and the clock."""
 import pickle
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from enum import IntEnum
 from typing import Any, Callable
 
@@ -168,6 +168,10 @@ class Mode(IntEnum):
     ON = 1
 
 
+class Other(IntEnum):
+    ON = 1
+
+
 @pytest.mark.parametrize("value_type,fields", [
     (bool, {"data_type": DataType.bit(0)}),
     (str, {"data_type": DataType.string(2)}),
@@ -177,10 +181,18 @@ class Mode(IntEnum):
     (float, {"data_type": DataType.FLOAT32}),
     (Mode, {"data_type": DataType.UINT16}),
     (Mode, {"data_type": DataType.INT16, "valid_raw": range(-0x8000, 0x7FFF)}),
+    (Mode, {"data_type": DataType.UINT16, "codes": {3: Mode.OFF, 9: Mode.ON}}),
+    (date, {"data_type": DataType.DOS_DATE}),
+    (datetime, {"data_type": DataType.DOS_DATETIME}),
 ], ids=["bool-bit", "str-string", "int-whole-scale", "int-precision-0", "float-int16", "float-float32",
-        "states-u16", "states-with-no-data"])
+        "states-u16", "states-with-no-data", "states-coded", "dos-date", "dos-datetime"])
 def test_a_key_type_the_registers_can_hold_is_accepted(value_type: type[Any], fields: dict[str, Any]) -> None:
     Point(Key("p", value_type), read=HoldingRegister(1), write=HoldingRegister(1), **fields)
+
+
+def test_several_codes_may_name_one_state_on_a_point_that_is_only_read() -> None:
+    point = Point(Key("p", Mode), read=HoldingRegister(1), codes={3: Mode.OFF, 4: Mode.OFF})
+    assert point.states == (Mode.OFF,)
 
 
 @pytest.mark.parametrize("value_type,fields,match", [
@@ -194,8 +206,18 @@ def test_a_key_type_the_registers_can_hold_is_accepted(value_type: type[Any], fi
     (Mode, {"data_type": DataType.UINT16, "scale": 10}, "no scale, offset or transform"),
     (Mode, {"data_type": DataType.UINT16, "limits": Limits(0, 1)}, "no limits"),
     (bytes, {"data_type": DataType.UINT16}, "not bytes"),
+    (Mode, {"data_type": DataType.UINT16, "codes": {0: Mode.OFF, 1: Other.ON}}, "not a state of Mode"),
+    (Mode, {"data_type": DataType.UINT16, "codes": {0: Mode.OFF, 1: Mode.OFF}}, "the same state"),
+    (Mode, {"data_type": DataType.UINT16, "codes": {70000: Mode.OFF}}, "outside"),
+    (int, {"data_type": DataType.UINT16, "codes": {0: Mode.OFF}}, "codes name states"),
+    (Mode, {"data_type": DataType.UINT16, "codes": {0: Mode.OFF}, "transform": Transforms.INVERT_BOOL},
+     "no scale, offset or transform"),
+    (date, {"data_type": DataType.DOS_DATETIME}, "holds a datetime"),
+    (datetime, {"data_type": DataType.DOS_DATE}, "holds a date"),
+    (date, {"data_type": DataType.UINT16}, "held by DOS_DATE or DOS_DATETIME"),
 ], ids=["bool-u16", "str-u16", "int-fraction", "int-float", "int-transform", "float-string", "states-float",
-        "states-scaled", "states-limited", "bytes"])
+        "states-scaled", "states-limited", "bytes", "codes-foreign-state", "codes-twice", "codes-out-of-range",
+        "codes-without-states", "codes-and-transform", "date-in-datetime", "datetime-in-date", "date-in-u16"])
 def test_a_key_type_the_registers_cannot_hold_is_refused(value_type: type[Any], fields: dict[str, Any],
                                                          match: str) -> None:
     _refused(match, key=Key("p", value_type), read=HoldingRegister(1), write=HoldingRegister(1), **fields)

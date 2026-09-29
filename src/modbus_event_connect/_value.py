@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from enum import Enum, auto
 
-Value = float | int | str | bool | None
-"""What a point holds once decoded."""
+Value = float | int | str | bool | date | None
+"""What a point holds once decoded; a `datetime` is a `date`."""
 
 
 class Quality(Enum):

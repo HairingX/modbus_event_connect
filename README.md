@@ -299,8 +299,8 @@ THERMOSTAT = Model(name="Thermostat", manufacturer="Example",
 ```
 
 A key's type is what the point's value is: `bool` for `BOOL` or a bit, `str` for text, `int` for
-an integer that stays whole after scaling, `float` for any number, and an `IntEnum` for a number
-that names a state. Publish the keys with the model; they are how an application names the
+an integer that stays whole after scaling, `float` for any number, `date` and `datetime` for a
+packed date, and an `IntEnum` for a number that names a state. Publish the keys with the model; they are how an application names the
 points, with their types.
 
 A mistake in a point, such as limits on a point that cannot be written, or a key type its
@@ -369,7 +369,7 @@ device's documentation gives them.
 
 | Field | What it does |
 |---|---|
-| `data_type` | `UINT16` (the default), `INT16`, `UINT32`, `INT32`, `UINT64`, `INT64`, `FLOAT32`, `FLOAT64`, `BCD16`, `BCD32`, `BOOL` |
+| `data_type` | `UINT16` (the default), `INT16`, `UINT32`, `INT32`, `UINT64`, `INT64`, `FLOAT32`, `FLOAT64`, `BCD16`, `BCD32`, `BOOL`, `DOS_DATE`, `DOS_DATETIME` |
 | `DataType.bit(3)` | one bit of a register |
 | `DataType.string(8)` | text over 8 registers |
 | `word_order`, `byte_order` | for values over several registers; high word and big-endian by default |
@@ -377,6 +377,7 @@ device's documentation gives them.
 | `precision` | decimals to round to; by default, enough for `scale` and `offset` |
 | `transform` | a conversion after scaling, such as `Transforms.SECONDS_AS_MINUTES` |
 | `valid_raw` | the raw numbers that are values, of an integer or a `BOOL` register; any other reads as `NO_DATA` and cannot be written |
+| `codes` | for a key naming states: which state each raw code means |
 
 `valid_raw` takes a `range` or a set, and a `range` costs nothing however wide:
 
@@ -393,6 +394,29 @@ match, as the device's 0xFFFF is -1 to it.
 A `FLOAT32` or `FLOAT64` that reads NaN or infinity is `NO_DATA` by itself. A point whose key
 is an `IntEnum` reads its number as that state; a number no state names is `NO_DATA`, and
 `.raw` still holds it.
+
+Devices that number the same states differently share one `IntEnum`, each through its own
+`codes`:
+
+```python
+class OperationState(IntEnum):     # every state any of the devices has
+    OFF = 0
+    HEATING = 1
+    COOLING = 2
+    DEFROST = 3
+
+Point(STATE, read=InputRegister(20), codes={0: OperationState.OFF, 7: OperationState.HEATING,
+                                            8: OperationState.COOLING})
+```
+
+A code the table lacks is `NO_DATA`, and a state it lacks cannot be written; `point.states`
+names the states a point can have, in the enum's order. On a point that is only read, several
+codes may name one state.
+
+`DOS_DATE` is one register packed the MS-DOS way - years since 1980, month, day - and reads as
+a `date`. `DOS_DATETIME` is such a date register followed by a time register - hours, minutes,
+seconds halved - and reads as a `datetime` in the device's own clock, without a time zone.
+Words that name no date or time, such as a date of 0, are `NO_DATA`.
 
 ## Units
 

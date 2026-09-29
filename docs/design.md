@@ -164,6 +164,7 @@ heuristics:
 
 ```
 UINT16  INT16  UINT32  INT32  UINT64  INT64  FLOAT32  FLOAT64  BCD16  BCD32  BOOL
+DOS_DATE  DOS_DATETIME
 bit(n)  string(n, encoding)
 ```
 
@@ -172,7 +173,13 @@ bit(n)  string(n, encoding)
 - `bit(n)` is bit *n* of a 16-bit register; several points may share the address and are read
   with one request.
 - Named states (fan modes, blind states) are not a data type: the key's type is an `IntEnum`,
-  see 3.8, so every consumer uses the same states without re-implementing a mapping.
+  see 3.8, so every consumer uses the same states without re-implementing a mapping. Devices
+  that number the same states differently map their codes onto one shared `IntEnum` with the
+  point's `codes`, so a consumer handles each state once, whichever device it came from.
+- `DOS_DATE` is the MS-DOS date word (years since 1980 in bits 15-9, month in 8-5, day in 4-0);
+  `DOS_DATETIME` is a date word followed by a time word (hours in 15-11, minutes in 10-5,
+  seconds halved in 4-0). A read is a `date` or a naive `datetime` in the device's clock; a
+  word that names none is `NO_DATA`, and a write refuses what the words cannot hold.
 - Word and byte order apply to every multi-register type.
 
 ### 3.5 The value pipeline
@@ -245,7 +252,9 @@ runs, not a surprise at a device. The same pattern types keys elsewhere: Home As
 | `str` | `STRING` | the text |
 | `int` | an integer that stays whole after scale, offset and precision | an `int` |
 | `float` | any number | a `float` |
-| an `IntEnum` | an integer, unscaled | its member; a number no member names is `NO_DATA` |
+| an `IntEnum` | an integer, unscaled | its member, or the member its `codes` name for the number; a number neither names is `NO_DATA` |
+| `date` | `DOS_DATE` | the date |
+| `datetime` | `DOS_DATETIME` | the date and time, without a time zone |
 
 A point whose registers cannot hold its key's type is refused when it is created. The client
 refuses a key whose type differs from the model's point (`TypeError`), and a subscription made

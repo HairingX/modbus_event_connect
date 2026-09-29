@@ -5,6 +5,7 @@ from __future__ import annotations
 import itertools
 import math
 import struct
+from datetime import date, datetime
 from enum import IntEnum
 from typing import Any
 
@@ -478,6 +479,109 @@ def test_a_state_can_be_a_signed_integer() -> None:
     point = _state_point(Signed, DataType.INT16)
     assert decode(point, [0xFFFF]) == (Signed.ERROR, Quality.GOOD)
     assert encode(point, Signed.ERROR).registers == (0xFFFF,)
+
+
+# ====================================================================================== code tables
+
+
+class Shared(IntEnum):
+    """States two devices share, each numbering them its own way."""
+    OFF = 0
+    HEATING = 1
+    COOLING = 2
+    DEFROST = 3
+
+
+def _coded_point(codes: dict[int, Shared]) -> Point[Shared]:
+    return Point(Key("p", Shared), read=InputRegister(0), write=HoldingRegister(0), codes=codes)
+
+
+DEVICE_A = {0: Shared.OFF, 7: Shared.HEATING, 8: Shared.COOLING}
+DEVICE_B = {0: Shared.OFF, 1: Shared.COOLING, 13: Shared.DEFROST}
+
+
+@pytest.mark.parametrize(("codes", "raw", "state"), [
+    (DEVICE_A, 7, Shared.HEATING), (DEVICE_A, 8, Shared.COOLING),
+    (DEVICE_B, 1, Shared.COOLING), (DEVICE_B, 13, Shared.DEFROST),
+])
+def test_each_devices_code_decodes_to_the_shared_state_it_names(codes: dict[int, Shared], raw: int,
+                                                               state: Shared) -> None:
+    assert decode(_coded_point(codes), [raw]) == (state, Quality.GOOD)
+
+
+def test_a_code_the_table_lacks_is_no_data_even_when_it_is_a_states_own_number() -> None:
+    """Raw 1 is HEATING's number, but device A's table does not name it."""
+    assert decode(_coded_point(DEVICE_A), [1]) == (None, Quality.NO_DATA)
+
+
+def test_a_shared_state_is_written_as_the_devices_own_code() -> None:
+    assert encode(_coded_point(DEVICE_A), Shared.COOLING).registers == (8,)
+    assert encode(_coded_point(DEVICE_B), Shared.COOLING).registers == (1,)
+
+
+def test_a_state_the_table_lacks_cannot_be_written() -> None:
+    with pytest.raises(InvalidValueError, match="not a state this point has"):
+        encode(_coded_point(DEVICE_A), Shared.DEFROST)
+
+
+def test_a_points_states_are_those_its_codes_name_in_the_enums_order() -> None:
+    assert _coded_point(DEVICE_B).states == (Shared.OFF, Shared.COOLING, Shared.DEFROST)
+    assert _state_point(Mode).states == (Mode.OFF, Mode.ON, Mode.AUTO)
+    assert _rw_point(DataType.UINT16, int).states == ()
+
+
+# ================================================================================ MS-DOS date and time
+
+
+def _dos_point(data_type: DataType, value_type: type[Any], **kwargs: Any) -> Point[Any]:
+    return Point(Key("p", value_type), read=InputRegister(0), write=HoldingRegister(0), data_type=data_type,
+                 **kwargs)
+
+
+# 2026-09-29: year 46 since 1980, month 9, day 29 -> 0b0101110_1001_11101; 13:37:42 -> 0b01101_100101_10101
+DATE_WORD = (46 << 9) | (9 << 5) | 29
+TIME_WORD = (13 << 11) | (37 << 5) | 21
+
+
+def test_a_dos_date_decodes_from_its_packed_year_month_and_day() -> None:
+    assert decode(_dos_point(DataType.DOS_DATE, date), [DATE_WORD]) == (date(2026, 9, 29), Quality.GOOD)
+
+
+def test_a_dos_date_and_time_decode_from_two_registers_seconds_halved() -> None:
+    point = _dos_point(DataType.DOS_DATETIME, datetime)
+    assert decode(point, [DATE_WORD, TIME_WORD]) == (datetime(2026, 9, 29, 13, 37, 42), Quality.GOOD)
+
+
+@pytest.mark.parametrize("registers", [[0, TIME_WORD], [DATE_WORD, (24 << 11)], [(46 << 9) | (13 << 5) | 1, 0]],
+                         ids=["date-zero", "hour-24", "month-13"])
+def test_words_that_name_no_date_or_time_are_no_data(registers: list[int]) -> None:
+    assert decode(_dos_point(DataType.DOS_DATETIME, datetime), registers) == (None, Quality.NO_DATA)
+
+
+def test_a_dos_date_and_time_encode_back_to_their_words() -> None:
+    point = _dos_point(DataType.DOS_DATETIME, datetime)
+    assert encode(point, datetime(2026, 9, 29, 13, 37, 42)).registers == (DATE_WORD, TIME_WORD)
+    assert encode(_dos_point(DataType.DOS_DATE, date), date(2026, 9, 29)).registers == (DATE_WORD,)
+
+
+def test_a_little_endian_dos_date_swaps_the_bytes_of_its_word() -> None:
+    point = _dos_point(DataType.DOS_DATE, date, byte_order=ByteOrder.LITTLE)
+    swapped = ((DATE_WORD & 0xFF) << 8) | (DATE_WORD >> 8)
+    assert decode(point, [swapped]) == (date(2026, 9, 29), Quality.GOOD)
+    assert encode(point, date(2026, 9, 29)).registers == (swapped,)
+
+
+@pytest.mark.parametrize(("data_type", "value"), [
+    (DataType.DOS_DATETIME, datetime(2026, 9, 29, 13, 37, 43)),
+    (DataType.DOS_DATETIME, datetime(2026, 9, 29, 13, 37, 42, 5)),
+    (DataType.DOS_DATE, date(1979, 12, 31)),
+    (DataType.DOS_DATE, datetime(2026, 9, 29)),
+    (DataType.DOS_DATETIME, date(2026, 9, 29)),
+], ids=["odd-second", "microseconds", "before-1980", "datetime-as-date", "date-as-datetime"])
+def test_what_a_dos_word_cannot_hold_is_refused(data_type: DataType, value: object) -> None:
+    value_type = datetime if data_type.kind is DataTypeKind.DOS_DATETIME else date
+    with pytest.raises(InvalidValueError):
+        encode(_dos_point(data_type, value_type), value)
 
 
 # ======================================================================================== valid_raw

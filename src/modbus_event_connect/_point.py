@@ -4,7 +4,8 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import KW_ONLY, dataclass, field, replace
-from enum import Enum, auto
+from datetime import date, datetime
+from enum import Enum, IntEnum, auto
 from types import MappingProxyType
 from typing import Any, ClassVar, Hashable
 
@@ -223,6 +224,11 @@ class Point[T]:
     By default, enough for `scale` and `offset`; none for a float or a transform.
     """
     transform: Transform | None = None
+    codes: Mapping[int, IntEnum] | None = None
+    """What each raw code means, for a key naming states: a code the table lacks reads as NO_DATA,
+    and a state it lacks cannot be written. Devices that number the same states differently each
+    map theirs onto one shared IntEnum. Several codes may name one state on a point that is only
+    read. None: each state is its own raw code."""
     valid_raw: Collection[int] | None = None
     """The raw numbers - what the device sends, before scale and offset - that are values; any
     other reads as NO_DATA, and cannot be written. None: every number is a value.
@@ -250,6 +256,8 @@ class Point[T]:
         if self.valid_raw is not None and not isinstance(self.valid_raw, range):
             object.__setattr__(self, "valid_raw", frozenset(self.valid_raw))
         object.__setattr__(self, "labels", MappingProxyType(dict(self.labels)))
+        if self.codes is not None:
+            object.__setattr__(self, "codes", MappingProxyType(dict(self.codes)))
         if self.on_change is not None and self.on_change.after is None:
             object.__setattr__(self, "on_change", replace(self.on_change, after=0.0))
         problems = list(_problems(self))
@@ -263,6 +271,16 @@ class Point[T]:
     @property
     def writable(self) -> bool:
         return self.write is not None
+
+    @property
+    def states(self) -> tuple[IntEnum, ...]:
+        """The states this point can hold, in the order its IntEnum declares them: those its codes
+        name, or every state; none for a key that names no states."""
+        value_type: type[object] = self.key.type
+        if not is_state_type(value_type):
+            return ()
+        named = set(self.codes.values()) if self.codes is not None else set(value_type)
+        return tuple(state for state in value_type if state in named)
 
     @property
     def registers(self) -> int:
@@ -324,15 +342,23 @@ def _type_problems(point: Point[Any]) -> list[str]:
         return [f"the key must be a Key naming the value's type, such as Key({str(point.key)!r}, float)"]
     value_type: type[object] = point.key.type
     data_type = point.data_type
+    if point.codes is not None and not is_state_type(value_type):
+        return [f"codes name states, and {value_type.__name__} names none"]
     if is_state_type(value_type):
         found: list[str] = []
         if not data_type.is_integer:
             found.append(f"the states of {value_type.__name__} are integers, not {data_type!r}")
         if point.scale != 1 or point.offset != 0 or point.transform is not None:
-            found.append(f"the states of {value_type.__name__} are the raw integer: no scale, offset or transform")
+            found.append(f"the states of {value_type.__name__} are the raw integer, or its codes: no scale, "
+                         f"offset or transform")
         if point.limits is not None:
             found.append(f"the states of {value_type.__name__} are what may be written: no limits")
+        if point.codes is not None:
+            found += _code_problems(point.codes, value_type, data_type, writable=point.writable)
         return found
+    if data_type.is_temporal:
+        wanted = datetime if data_type.kind is DataTypeKind.DOS_DATETIME else date
+        return [] if value_type is wanted else [f"{data_type!r} holds a {wanted.__name__}, not {value_type.__name__}"]
     if value_type is bool:
         return [] if data_type.is_boolean else [f"a bool is held by BOOL or a bit, not {data_type!r}"]
     if value_type is str:
@@ -344,7 +370,23 @@ def _type_problems(point: Point[Any]) -> list[str]:
                 f"use float, or precision=0 (got {data_type!r}, scale {point.scale}, offset {point.offset})"]
     if value_type is float:
         return [] if data_type.is_numeric else [f"a float is held by a number, not {data_type!r}"]
-    return [f"a value is a bool, int, float, str or IntEnum, not {value_type.__name__}"]
+    if value_type in (date, datetime):
+        return [f"a {value_type.__name__} is held by DOS_DATE or DOS_DATETIME, not {data_type!r}"]
+    return [f"a value is a bool, int, float, str, date, datetime or IntEnum, not {value_type.__name__}"]
+
+
+def _code_problems(codes: Mapping[int, IntEnum], states: type[IntEnum], data_type: DataType, *,
+                   writable: bool) -> list[str]:
+    found: list[str] = []
+    foreign = [state for state in codes.values() if not isinstance(state, states)]
+    if foreign:
+        found.append(f"codes name {foreign[0]!r}, which is not a state of {states.__name__}")
+    if writable and len(set(codes.values())) != len(codes):
+        found.append("two codes name the same state, so it could not be written")
+    bounds = raw_bounds(data_type.kind)
+    if bounds is not None and any(not bounds[0] <= code <= bounds[1] for code in codes):
+        found.append(f"a code lies outside {data_type!r}'s range {bounds[0]}..{bounds[1]}")
+    return found
 
 
 def _value_problems(point: Point[Any]) -> list[str]:

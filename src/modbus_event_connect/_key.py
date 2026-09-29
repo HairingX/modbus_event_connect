@@ -9,8 +9,8 @@ class Key[T](str):
     """A point's key. At runtime it is its text: equal to it, hashed as it, stored as it.
 
     `Key("temperature", float)` names a point whose value is a float, and carries that type
-    wherever the key goes. The type is one of `bool`, `int`, `float`, `str`, or an `IntEnum`
-    naming the states of an integer.
+    wherever the key goes. The type is one of `bool`, `int`, `float`, `str`, `date`, `datetime`,
+    or an `IntEnum` naming the states of an integer.
     """
     type: type[T]
     """The type of the point's value."""
