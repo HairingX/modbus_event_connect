@@ -249,10 +249,12 @@ def test_an_unreachable_device_raises_cannot_connect() -> None:
     assert client.status(Status.CONNECTED).value is False
 
 
-def test_a_device_no_model_matches_raises_unsupported() -> None:
-    client = Client(FakeDevice(REGISTERS), lambda identity: None, clock=FakeClock())
-    with pytest.raises(UnsupportedDeviceError):
+def test_a_device_no_model_matches_raises_unsupported_with_what_it_reported() -> None:
+    client = Client(FakeDevice(REGISTERS, identity={"device_model": 9999}), lambda identity: None,
+                    clock=FakeClock())
+    with pytest.raises(UnsupportedDeviceError) as raised:
         asyncio.run(client.connect())
+    assert raised.value.identity == {"device_model": 9999}
 
 
 def test_the_selector_sees_the_handshake() -> None:
@@ -264,6 +266,14 @@ def test_the_selector_sees_the_handshake() -> None:
     device = FakeDevice(REGISTERS, identity={"device_model": 1140})
     asyncio.run(Client(device, select, clock=FakeClock()).connect())
     assert seen and seen[0]["device_model"] == 1140
+
+
+def test_the_identity_is_the_handshake_with_what_the_identity_points_read() -> None:
+    device = FakeDevice({**REGISTERS, "hardware": (2,)}, identity={"device_model": 1140})
+    client = Client(device, MODEL, clock=FakeClock())
+    asyncio.run(client.connect())
+    assert client.identity["device_model"] == 1140
+    assert client.identity["hardware"] == 2
 
 
 def test_the_protocol_is_given_the_models_options() -> None:

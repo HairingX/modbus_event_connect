@@ -1,4 +1,7 @@
 """Every error the library raises of its own."""
+from __future__ import annotations
+
+from collections.abc import Mapping
 
 
 class ClientError(Exception):
@@ -11,6 +14,11 @@ class CannotConnectError(ClientError):
 
 class UnsupportedDeviceError(ClientError):
     """The device answered, but no model matches it."""
+
+    def __init__(self, message: str, identity: Mapping[str, int | float | str | bool | None] | None = None) -> None:
+        super().__init__(message)
+        self.identity: Mapping[str, int | float | str | bool | None] = dict(identity or {})
+        """What the device reported about itself."""
 
 
 class NotConnectedError(ClientError):
