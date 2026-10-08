@@ -250,8 +250,10 @@ class ModbusTcpConnection:
             await self._close()
             return Response(ok=False, no_answer=True, detail=f"{name}: no answer in time")
         except Exception as err:
-            # pymodbus reports a timeout, a dropped link and a garbled frame by raising. The
-            # message can name the host, so only the kind of error is kept.
+            # pymodbus reports a timeout, a dropped link and a garbled frame by raising. A device
+            # can stop answering on a link it never closes, so the next request opens a new one.
+            # The message can name the host, so only the kind of error is kept.
+            await self._close()
             return Response(ok=False, no_answer=True, detail=f"{name}: {type(err).__name__}")
         if response is None:
             return Response(ok=False, no_answer=True, detail=f"{name}: no response")

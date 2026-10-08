@@ -5,6 +5,7 @@ from collections.abc import Callable
 from typing import Any
 
 import pymodbus.client
+from pymodbus.exceptions import ModbusIOException
 import pytest
 
 from modbus_event_connect.modbus._connection import (
@@ -228,6 +229,18 @@ async def test_a_timeout_raised_by_pymodbus_is_no_answer() -> None:
     client = FakeClient(lambda name, address, kw: asyncio.TimeoutError())
     response = await ModbusTcpConnection(HOST, client=client).request(holding(1))
     assert response.no_answer
+
+
+async def test_after_pymodbus_gives_up_waiting_the_next_request_opens_a_new_link() -> None:
+    no_response = ModbusIOException("No response received after 0 retries, continue with next request")
+    answers: list[Answer] = [no_response, FakeReply(registers=[7])]
+    client = FakeClient(lambda name, address, kw: answers.pop(0))
+    conn = ModbusTcpConnection(HOST, client=client)
+    assert (await conn.request(holding(1))).no_answer
+    assert client.closes == 1 and not conn.connected
+    response = await conn.request(holding(1))
+    assert response.ok and response.registers == (7,)
+    assert client.connects == 2
 
 
 async def test_a_client_that_never_answers_is_given_up_on_and_the_link_dropped() -> None:

@@ -4,6 +4,7 @@ import asyncio
 from typing import Any
 
 import pytest
+from pymodbus.exceptions import ModbusIOException
 
 from modbus_event_connect._data_type import DataType
 from modbus_event_connect._device import (
@@ -794,6 +795,40 @@ async def test_nothing_a_device_reports_names_its_host() -> None:
     assert raw.outcome is Outcome.NO_ANSWER and write.outcome is Outcome.NO_ANSWER
     for text in (raw.detail, write.detail, repr(device.diagnostics())):
         assert HOST not in text and "1502" not in text
+
+
+class SilentClient:
+    """A pymodbus client that connects but never gets an answer, as a device restarting does."""
+
+    def __init__(self) -> None:
+        self.connected = False
+        self.connects = 0
+
+    async def connect(self) -> bool:
+        self.connects += 1
+        self.connected = True
+        return True
+
+    def close(self) -> None:
+        self.connected = False
+
+    async def read_holding_registers(self, address: int, *, count: int = 1, device_id: int = 1) -> Any:
+        raise ModbusIOException("No response received after 0 retries, continue with next request")
+
+
+async def test_a_silent_device_is_reconnected_to_only_until_the_backoff_and_once_per_probe() -> None:
+    clock = FakeClock()
+    device = configured(ModbusDevice.tcp(HOST, clock=clock, sleep=Sleeps(), backoff_after=3, backoff_for=60))
+    assert isinstance(device._connection, ModbusTcpConnection)
+    client = SilentClient()
+    device._connection._client = client                             # no network
+    for _ in range(10):
+        await device.read([u16("a", HoldingRegister(0))])
+    assert client.connects == 3
+    clock.advance(60)
+    for _ in range(10):
+        await device.read([u16("a", HoldingRegister(0))])
+    assert client.connects == 4
 
 
 def test_a_modbus_device_is_a_device_protocol() -> None:
