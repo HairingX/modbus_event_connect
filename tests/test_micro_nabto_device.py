@@ -186,6 +186,65 @@ async def test_an_answer_cut_short_is_an_error_and_not_a_missing_point() -> None
         assert {a.outcome for a in answers.values()} == {Outcome.ERROR}
 
 
+def _zeroed(simulated: SimulatedMicroNabtoDevice, *addresses: int) -> None:
+    for address in addresses:
+        simulated.datapoint_registers[(0, address)] = 0
+
+
+async def test_an_answer_of_only_zeros_where_values_were_is_an_error_until_it_repeats() -> None:
+    async with _simulated() as simulated:
+        device = await _connected(simulated)
+        points = [_dp(1), _dp(2), _dp(3)]
+        await device.read(points)
+        _zeroed(simulated, 1, 2, 3)
+        held_back = await device.read(points)
+        assert {a.outcome for a in held_back.values()} == {Outcome.ERROR}
+        repeated = await device.read(points)
+        assert {(a.outcome, a.registers) for a in repeated.values()} == {(Outcome.OK, (0,))}
+
+
+async def test_an_answer_of_only_zeros_is_held_back_again_after_values_return() -> None:
+    async with _simulated() as simulated:
+        device = await _connected(simulated)
+        points = [_dp(1), _dp(2)]
+        await device.read(points)
+        _zeroed(simulated, 1, 2)
+        await device.read(points)
+        simulated.datapoint_registers.update({(0, 1): 1, (0, 2): 2})
+        await device.read(points)
+        _zeroed(simulated, 1, 2)
+        answers = await device.read(points)
+        assert {a.outcome for a in answers.values()} == {Outcome.ERROR}
+        assert "zeros_held_back': 2" in repr(device.diagnostics())
+
+
+async def test_zeros_never_preceded_by_values_are_taken() -> None:
+    async with _simulated() as simulated:
+        device = await _connected(simulated)
+        _zeroed(simulated, 1, 2)
+        answers = await device.read([_dp(1), _dp(2)])
+        assert {(a.outcome, a.registers) for a in answers.values()} == {(Outcome.OK, (0,))}
+
+
+async def test_an_answer_with_one_zero_among_values_is_taken() -> None:
+    async with _simulated() as simulated:
+        device = await _connected(simulated)
+        await device.read([_dp(1), _dp(2)])
+        _zeroed(simulated, 1)
+        answers = await device.read([_dp(1), _dp(2)])
+        assert {k: (a.outcome, a.registers) for k, a in answers.items()} == {
+            "dp_0_1": (Outcome.OK, (0,)), "dp_0_2": (Outcome.OK, (2,))}
+
+
+async def test_a_single_register_reading_zero_is_taken() -> None:
+    async with _simulated() as simulated:
+        device = await _connected(simulated)
+        await device.read([_dp(1)])
+        _zeroed(simulated, 1)
+        answers = await device.read([_dp(1)])
+        assert answers["dp_0_1"].outcome is Outcome.OK and answers["dp_0_1"].registers == (0,)
+
+
 async def test_a_point_of_another_protocol_cannot_be_read() -> None:
     async with _simulated() as simulated:
         with pytest.raises(TypeError):
@@ -392,6 +451,24 @@ async def test_a_silent_device_makes_the_client_unavailable_until_it_answers_aga
         await client.poll()
         good = client.value(Key("temp_outside", float))
         assert client.status(Status.CONNECTED).value is True and good is not None and good.quality is Quality.GOOD
+
+
+async def test_a_client_keeps_its_values_through_an_answer_of_only_zeros() -> None:
+    humidity = Point(Key("humidity", float), read=DatapointRegister(28), data_type=DataType.INT16, scale=0.1)
+    model = Model(name="CTS", manufacturer="Example", sections=[Section([TEMP, humidity])],
+                  options=MicroNabtoOptions(), read_back_after=1.0)
+    clock = FakeClock()
+    async with _simulated(clock=clock) as simulated:
+        client = Client(_device(simulated, clock=clock), model, clock=clock)
+        await client.connect()
+        client.subscribe(Key("temp_outside", float), _nothing)
+        client.subscribe(Key("humidity", float), _nothing)
+        _zeroed(simulated, 27, 28)
+        clock.advance(60)
+        await client.poll()
+        temp = client.value(Key("temp_outside", float))
+        assert temp is not None and (temp.value, temp.quality) == (-5.3, Quality.STALE)
+        assert client.status(Status.CONNECTED).value is True
 
 
 async def test_a_restarted_device_goes_unnoticed_by_the_client() -> None:

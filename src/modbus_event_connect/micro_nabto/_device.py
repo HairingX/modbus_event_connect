@@ -86,6 +86,8 @@ class MicroNabtoDevice:
         self._options: MicroNabtoOptions | None = None
         self._outcomes: Counter[Outcome] = Counter()
         self._isolated = 0
+        self._held_back = 0
+        self._last: dict[tuple[type[Access], int, int], int] = {}
 
     @classmethod
     def udp(cls, email: str, *, host: str | None = None, device_id: str | None = None,
@@ -163,6 +165,7 @@ class MicroNabtoDevice:
         return {
             "outcomes": {outcome.name: self._outcomes[outcome] for outcome in Outcome},
             "isolated_reads": self._isolated,
+            "zeros_held_back": self._held_back,
             **self._connection.diagnostics(),
         }
 
@@ -181,6 +184,19 @@ class MicroNabtoDevice:
         batches.append(_Batch(space, obj, tuple(current)))
         return batches
 
+    def _zeros_out_of_nowhere(self, space: type[Access], items: Sequence[tuple[int, int]],
+                              values: Sequence[int]) -> bool:
+        """Whether `values` are all 0 where the registers last held something else; remembers them.
+
+        A Nilan CTS 602's gateway now and then answers a whole read with zeros, and the next
+        one as before. Zeros that repeat are taken: a stopped unit reads 0 throughout.
+        """
+        registers = [(space, obj, address) for obj, address in items]
+        suspect = (len(values) > 1 and not any(values)
+                   and any(self._last.get(register, 0) for register in registers))
+        self._last.update(zip(registers, values))
+        return suspect
+
     async def _read_batch(self, batch: _Batch, result: dict[str, ReadResult]) -> None:
         build, parse = _READS[batch.space]
         items = batch.items
@@ -190,6 +206,9 @@ class MicroNabtoDevice:
             raw = ReadResult(Outcome.NO_ANSWER, detail="no answer from the device")
         elif values is None:
             raw = ReadResult(Outcome.ERROR, detail="a malformed answer")
+        elif len(values) == len(items) and self._zeros_out_of_nowhere(batch.space, items, values):
+            self._held_back += 1
+            raw = ReadResult(Outcome.ERROR, detail="an answer of only zeros, held back until it repeats")
         elif len(values) == len(items):
             self._outcomes[Outcome.OK] += 1
             offset = 0

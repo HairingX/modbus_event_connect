@@ -722,6 +722,12 @@ CTS 402 — which other devices may not share.
   A refused read is halved until the refusal is pinned down, as Modbus 0x02 is; any count
   that does not match is treated the same way, so a device that answers differently is not
   misread.
+- **An answer of only zeros is held back once.** A CTS 602's gateway was seen answering a
+  whole read with zeros now and then, every point at once, and the next read as before. A read
+  of more than one register that comes back all 0 where those registers last held something
+  else is therefore an `ERROR`, and the client keeps the last good values. The same zeros on the
+  next read are taken, so a unit that really reads 0 throughout, such as a stopped one, shows it
+  one read late. A read of one register cannot tell the two apart, and is always taken.
 - **A setpoint write waits for its answer**, which starts with a status: 0 when the device took
   the write. A CTS 402 answered 0x63 and 0x85 to writes it did not take - they are not uNabto's
   codes, which it sends as exceptions - and took the same write on a later try; so a write
@@ -763,6 +769,7 @@ A library that gets these wrong is worse than none.
 | `0x0B`: the gateway's device did not answer | `NO_ANSWER`, counted towards backoff |
 | No answer at all | `NO_ANSWER`; the value goes `STALE`; reachability follows answers, never the socket |
 | One bad address refuses a whole request | the request is halved until the refusal is pinned down: a few absent addresses among many cost few requests, though a request where every address is absent costs about twice as many as reading each alone |
+| A micro_nabto read answered with only zeros | `ERROR` the first time, where the registers held something else; taken when it repeats |
 | Devices accept different request sizes | `max_registers` / `max_bits` per model |
 | Four address spaces | one access class each; never batched together |
 | Word order and byte order | per point |
