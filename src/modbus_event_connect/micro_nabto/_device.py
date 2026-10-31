@@ -41,10 +41,15 @@ class MicroNabtoOptions(ProtocolOptions):
     """What a model states about its device in micro_nabto terms."""
     max_registers: int = MAX_REGISTERS_PER_READ
     """Most registers the device is asked for in one read."""
+    later_answer_wait: float | None = None
+    """Seconds a read sent again and answered with only zeros, where values were, is kept open
+    for a later answer; None leaves the connection's. One given to the connection overrides it."""
 
     def __post_init__(self) -> None:
         if self.max_registers < 1:
             raise ValueError(f"max_registers must be at least 1, got {self.max_registers}")
+        if self.later_answer_wait is not None and self.later_answer_wait < 0:
+            raise ValueError(f"later_answer_wait cannot be negative, got {self.later_answer_wait}")
 
     def problems(self, point: Point[Any]) -> list[str]:
         found: list[str] = []
@@ -117,8 +122,10 @@ class MicroNabtoDevice:
     def configure(self, options: ProtocolOptions | None) -> None:
         if options is None:
             self._options: MicroNabtoOptions | None = None
+            self._connection.use_model_later_answer_wait(None)
         elif isinstance(options, MicroNabtoOptions):
             self._options = options
+            self._connection.use_model_later_answer_wait(options.later_answer_wait)
         else:
             raise TypeError(f"a micro_nabto device needs MicroNabtoOptions, not {type(options).__name__}")
 

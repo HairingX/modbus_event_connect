@@ -154,6 +154,27 @@ async def test_a_new_session_counts_its_requests_and_its_age_afresh() -> None:
         assert exchange is not None and (exchange.session_request, exchange.session_age) == (2, 0.0)
 
 
+def test_the_wait_for_a_later_answer_is_the_connections_then_the_models_then_five_seconds() -> None:
+    connection = MicroNabtoConnection(EMAIL, host="device.invalid")
+    assert connection.later_answer_wait == 5.0
+    connection.use_model_later_answer_wait(2.0)
+    assert connection.later_answer_wait == 2.0
+    given = MicroNabtoConnection(EMAIL, host="device.invalid", later_answer_wait=7.0)
+    given.use_model_later_answer_wait(2.0)
+    assert given.later_answer_wait == 7.0
+    with pytest.raises(ValueError):
+        MicroNabtoConnection(EMAIL, host="device.invalid", later_answer_wait=-1.0)
+
+
+async def test_diagnostics_give_the_longest_answer_too() -> None:
+    async with _device() as device:
+        connection = _connection(device)
+        await connection.open()
+        await _read(connection, 1)
+        longest, average = connection.diagnostics()["max_latency"], connection.diagnostics()["average_latency"]
+        assert isinstance(longest, float) and isinstance(average, float) and longest >= average
+
+
 async def test_a_session_left_unused_is_renewed_before_the_device_ends_it() -> None:
     clock = FakeClock()
     async with _device(clock=clock, session_timeout=15.0) as device:

@@ -731,8 +731,9 @@ CTS 402 — which other devices may not share.
 
 ## 9. Diagnostics
 
-Per device: requests, failures by kind, average latency, backoff state, the consecutive failure
-count. Per point: last quality and when it was last good. This is what a bug report needs —
+Per device: requests, failures by kind, average and longest latency, backoff state, the
+consecutive failure count; for micro_nabto also resends, acknowledgements, and how often a request
+was kept open for a later answer, how often that answer was taken, and the longest wait. Per point: last quality and when it was last good. This is what a bug report needs —
 without a host address in it.
 
 micro_nabto logs each read's answer at debug: how old the session is and which of its requests
@@ -747,9 +748,12 @@ happens, so a unit without the fault never logs them. A ping's answer carries th
 answers to reads are logged.
 
 Such an answer is not taken at once:
-- **To a read sent again**, the request is kept open for up to `timeout` after it: a gateway that
-  got both sendings may answer both, and the zeros need not be the answer that holds the values.
-  A later answer to it with values is taken, and the warning says so.
+- **To a read sent again**, the request is kept open for a later answer, up to
+  `later_answer_wait`: a gateway that got both sendings may answer both, and the zeros need not be
+  the answer that holds the values. A later answer to it with values is taken, and the warning
+  says so and how long it was waited for. The wait is 5 s, the same a request the device has
+  acknowledged is given; a model sets its own in `MicroNabtoOptions`, and whoever opens the
+  connection can override both.
 - **Otherwise**, the registers are read again at once, with a new request, and that answer is
   taken, values or zeros; the warning says which. No value is held back, and nothing waits for
   the next poll.
