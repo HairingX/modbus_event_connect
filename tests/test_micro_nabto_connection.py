@@ -127,6 +127,18 @@ async def test_a_lost_datagram_is_sent_again() -> None:
         assert connection.diagnostics()["resends"] == 1
 
 
+async def test_the_last_exchange_says_the_request_was_sent_again_and_holds_the_answer() -> None:
+    async with _device() as device:
+        connection = _connection(device)
+        await connection.open()
+        device.drop = 1
+        await _read(connection, 1)
+        exchange = connection.last_exchange
+        assert exchange is not None and exchange.sends == 2
+        assert exchange.answer is not None and exchange.answer[0] == 0x16
+        assert (1001).to_bytes(2, "big") in exchange.answer
+
+
 async def test_a_session_left_unused_is_renewed_before_the_device_ends_it() -> None:
     clock = FakeClock()
     async with _device(clock=clock, session_timeout=15.0) as device:

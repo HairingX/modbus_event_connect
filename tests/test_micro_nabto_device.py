@@ -1,5 +1,6 @@
 """`MicroNabtoDevice`, alone and under a client, against a simulated device on localhost UDP."""
 import asyncio
+import logging
 from typing import Any
 
 import pytest
@@ -184,6 +185,75 @@ async def test_an_answer_cut_short_is_an_error_and_not_a_missing_point() -> None
         simulated.cut_short = True
         answers = await device.read([_dp(1), _dp(2)])
         assert {a.outcome for a in answers.values()} == {Outcome.ERROR}
+
+
+def _zeroed(simulated: SimulatedMicroNabtoDevice, *addresses: int) -> None:
+    for address in addresses:
+        simulated.datapoint_registers[(0, address)] = 0
+
+
+def _warnings(caplog: pytest.LogCaptureFixture) -> str:
+    return "\n".join(r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING)
+
+
+def _email_in(caplog: pytest.LogCaptureFixture) -> bool:
+    return EMAIL in caplog.text or EMAIL.encode().hex(" ") in caplog.text
+
+
+async def test_an_answer_of_only_zeros_where_values_were_is_logged_and_still_taken(
+        caplog: pytest.LogCaptureFixture) -> None:
+    async with _simulated() as simulated:
+        device = await _connected(simulated)
+        points = [_dp(1), _dp(2), _dp(3)]
+        await device.read(points)
+        _zeroed(simulated, 1, 2, 3)
+        with caplog.at_level(logging.WARNING, logger="modbus_event_connect.micro_nabto"):
+            answers = await device.read(points)
+        assert {(a.outcome, a.registers) for a in answers.values()} == {(Outcome.OK, (0,))}
+        assert "DatapointRegister 1 to 3 answered only zeros" in _warnings(caplog)
+        assert "sent 1 time(s)" in _warnings(caplog)
+        assert device.diagnostics()["answers_of_only_zeros"] == 1
+
+
+async def test_the_warning_says_when_the_answer_of_only_zeros_came_to_a_request_sent_again(
+        caplog: pytest.LogCaptureFixture) -> None:
+    async with _simulated() as simulated:
+        device = await _connected(simulated)
+        await device.read([_dp(1), _dp(2)])
+        _zeroed(simulated, 1, 2)
+        simulated.drop = 1
+        with caplog.at_level(logging.WARNING, logger="modbus_event_connect.micro_nabto"):
+            await device.read([_dp(1), _dp(2)])
+        assert "sent 2 time(s)" in _warnings(caplog)
+
+
+async def test_zeros_where_zeros_were_are_not_logged(caplog: pytest.LogCaptureFixture) -> None:
+    async with _simulated() as simulated:
+        device = await _connected(simulated)
+        _zeroed(simulated, 1, 2)
+        with caplog.at_level(logging.WARNING, logger="modbus_event_connect.micro_nabto"):
+            await device.read([_dp(1), _dp(2)])
+            await device.read([_dp(1), _dp(2)])
+        assert _warnings(caplog) == "" and device.diagnostics()["answers_of_only_zeros"] == 0
+
+
+async def test_one_register_reading_zero_is_not_logged(caplog: pytest.LogCaptureFixture) -> None:
+    async with _simulated() as simulated:
+        device = await _connected(simulated)
+        await device.read([_dp(1)])
+        _zeroed(simulated, 1)
+        with caplog.at_level(logging.WARNING, logger="modbus_event_connect.micro_nabto"):
+            await device.read([_dp(1)])
+        assert _warnings(caplog) == ""
+
+
+async def test_each_read_is_logged_at_debug_and_nothing_logged_carries_the_email(
+        caplog: pytest.LogCaptureFixture) -> None:
+    async with _simulated() as simulated:
+        with caplog.at_level(logging.DEBUG, logger="modbus_event_connect.micro_nabto"):
+            device = await _connected(simulated)
+            await device.read([_dp(1), _dp(2)])
+        assert "DatapointRegister 1 to 2 answered; sequence" in caplog.text and not _email_in(caplog)
 
 
 async def test_a_point_of_another_protocol_cannot_be_read() -> None:

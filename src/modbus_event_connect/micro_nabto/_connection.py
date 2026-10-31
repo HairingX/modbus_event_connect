@@ -76,6 +76,21 @@ async def discover(device_id: str | None = None, *, timeout: float = 2.0, resend
     return list(found.values())
 
 
+@dataclass(frozen=True)
+class Exchange:
+    """How one request and its answer went, for a bug report."""
+    sequence: int
+    sends: int
+    """How many times the request was sent: more than once when the device did not acknowledge
+    it in time."""
+    acknowledged: bool
+    """Whether the device said it had the request before it answered."""
+    seconds: float
+    """From the last sending to the answer."""
+    answer: bytes | None
+    """The answer's datagram from its kind on, the session's ids left out; None without one."""
+
+
 class MicroNabtoConnection:
     """A session with one device; requests are sent one at a time.
 
@@ -131,10 +146,17 @@ class MicroNabtoConnection:
         self._handshakes = 0
         self._rediscoveries = 0
         self._latency_total = 0.0
+        self._last_exchange: Exchange | None = None
 
     @property
     def connected(self) -> bool:
         return self._server_id is not None
+
+    @property
+    def last_exchange(self) -> Exchange | None:
+        """How the last request sent went; None before the first. The answer to a ping carries
+        the email, so an answer is logged only by whoever knows what it answers."""
+        return self._last_exchange
 
     async def open(self) -> Identity | None:
         """Establish a session.
@@ -246,6 +268,8 @@ class MicroNabtoConnection:
         datagram = packet(sequence)
         loop = asyncio.get_running_loop()
         self._exchanges += 1
+        acknowledged = False
+        started = self._clock.monotonic()
         for attempt in range(self._retries + 1):
             future: asyncio.Future[wire.ConnectReply | wire.DataReply] = loop.create_future()
             received = asyncio.Event()
@@ -261,7 +285,9 @@ class MicroNabtoConnection:
                     # again would only be acknowledged again.
                     await asyncio.wait({future}, timeout=self._answer_wait - self._timeout)
                     if not future.done():
+                        self._exchanged(sequence, attempt + 1, True, started, None)
                         return None
+                acknowledged = acknowledged or received.is_set()
                 if not future.done():
                     continue
                 answer = future.result()
@@ -272,8 +298,16 @@ class MicroNabtoConnection:
             self._answered += 1
             self._last_answer = self._clock.monotonic()
             self._latency_total += self._last_answer - started
+            self._exchanged(sequence, attempt + 1, acknowledged, started,
+                            answer.raw if isinstance(answer, wire.DataReply) else None)
             return answer
+        self._exchanged(sequence, self._retries + 1, acknowledged, started, None)
         return None
+
+    def _exchanged(self, sequence: int, sends: int, acknowledged: bool, started: float,
+                   answer: bytes | None) -> None:
+        self._last_exchange = Exchange(sequence, sends, acknowledged,
+                                       self._clock.monotonic() - started, answer)
 
     def _send(self, datagram: bytes) -> None:
         if self._transport is not None and self._address is not None and not self._transport.is_closing():
@@ -296,3 +330,12 @@ class MicroNabtoConnection:
     def _next_sequence(self) -> int:
         self._sequence = self._sequence % _SEQUENCE_MAX + 1
         return self._sequence
+
+
+def describe(exchange: Exchange) -> str:
+    """`exchange` in one line for a log, its answer in hex: only for an answer that cannot carry
+    the email, as a ping's does."""
+    answer = exchange.answer.hex(" ") if exchange.answer is not None else "none"
+    return (f"sequence {exchange.sequence}, sent {exchange.sends} time(s), "
+            f"{'acknowledged' if exchange.acknowledged else 'not acknowledged'} first, "
+            f"answer after {exchange.seconds:.3f} s: {answer}")
