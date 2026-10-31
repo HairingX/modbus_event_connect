@@ -91,6 +91,7 @@ class MicroNabtoDevice:
         self._isolated = 0
         self._only_zeros = 0
         self._last: dict[tuple[type[Access], int, int], int] = {}
+        self._zeroed_at: dict[tuple[type[Access], int, int], float] = {}
 
     @classmethod
     def udp(cls, email: str, *, host: str | None = None, device_id: str | None = None,
@@ -189,12 +190,22 @@ class MicroNabtoDevice:
 
     def _note_values(self, space: type[Access], items: Sequence[tuple[int, int]], values: Sequence[int]) -> None:
         """Remember `values`, and log the request when they are all 0 where the registers held
-        something else: a Nilan gateway was reported answering a whole read so now and then."""
+        something else, and when those registers answer values again: a Nilan gateway was
+        reported answering a whole read so now and then."""
         registers = [(space, obj, address) for obj, address in items]
+        exchange = self._connection.last_exchange
+        at = exchange.at if exchange is not None else 0.0
+        zeroed = [self._zeroed_at[r] for r in registers if r in self._zeroed_at]
         if len(values) > 1 and not any(values) and any(self._last.get(r, 0) for r in registers):
             self._only_zeros += 1
+            self._zeroed_at.update((r, at) for r in registers)
             _LOGGER.warning("micro_nabto: %s %d to %d answered only zeros, where they held values; %s",
                             space.__name__, items[0][1], items[-1][1], self._last_exchange())
+        elif zeroed and any(values):
+            for register in registers:
+                self._zeroed_at.pop(register, None)
+            _LOGGER.warning("micro_nabto: %s %d to %d answered values again, %.1f s after only zeros; %s",
+                            space.__name__, items[0][1], items[-1][1], at - min(zeroed), self._last_exchange())
         elif _LOGGER.isEnabledFor(logging.DEBUG):
             _LOGGER.debug("micro_nabto: %s %d to %d answered; %s",
                           space.__name__, items[0][1], items[-1][1], self._last_exchange())

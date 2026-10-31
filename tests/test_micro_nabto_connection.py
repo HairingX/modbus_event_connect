@@ -139,6 +139,21 @@ async def test_the_last_exchange_says_the_request_was_sent_again_and_holds_the_a
         assert (1001).to_bytes(2, "big") in exchange.answer
 
 
+async def test_a_new_session_counts_its_requests_and_its_age_afresh() -> None:
+    clock = FakeClock()
+    async with _device(clock=clock) as device:
+        connection = _connection(device, clock=clock)
+        await connection.open()
+        clock.advance(3.0)
+        await _read(connection, 1)
+        exchange = connection.last_exchange
+        assert exchange is not None and (exchange.session_request, exchange.session_age) == (2, 3.0)
+        clock.advance(13.0)                                              # past session_idle
+        await _read(connection, 1)
+        exchange = connection.last_exchange
+        assert exchange is not None and (exchange.session_request, exchange.session_age) == (2, 0.0)
+
+
 async def test_a_session_left_unused_is_renewed_before_the_device_ends_it() -> None:
     clock = FakeClock()
     async with _device(clock=clock, session_timeout=15.0) as device:

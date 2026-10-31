@@ -89,6 +89,12 @@ class Exchange:
     """From the last sending to the answer."""
     answer: bytes | None
     """The answer's datagram from its kind on, the session's ids left out; None without one."""
+    at: float = 0.0
+    """Monotonic time the exchange ended."""
+    session_age: float | None = None
+    """Seconds since the session was established; None before the first."""
+    session_request: int = 0
+    """Which request of the session this was, the handshake's ping being the first."""
 
 
 class MicroNabtoConnection:
@@ -147,6 +153,8 @@ class MicroNabtoConnection:
         self._rediscoveries = 0
         self._latency_total = 0.0
         self._last_exchange: Exchange | None = None
+        self._session_started: float | None = None
+        self._session_requests = 0
 
     @property
     def connected(self) -> bool:
@@ -244,6 +252,8 @@ class MicroNabtoConnection:
         if not connected.accepted:
             raise AuthenticationError("the device refused the handshake; is the email paired with it?")
         self._server_id = connected.server_id
+        self._session_started = self._clock.monotonic()
+        self._session_requests = 0
         answer = await self._data(wire.ping())
         found = wire.identity(answer) if answer is not None else None
         if found is None:
@@ -258,6 +268,7 @@ class MicroNabtoConnection:
         server_id = self._server_id
         if server_id is None:
             return None
+        self._session_requests += 1
         answer = await self._exchange(
             lambda sequence: wire.data_request(self._client_id, server_id, sequence, command))
         return answer.payload if isinstance(answer, wire.DataReply) else None
@@ -306,8 +317,10 @@ class MicroNabtoConnection:
 
     def _exchanged(self, sequence: int, sends: int, acknowledged: bool, started: float,
                    answer: bytes | None) -> None:
-        self._last_exchange = Exchange(sequence, sends, acknowledged,
-                                       self._clock.monotonic() - started, answer)
+        now = self._clock.monotonic()
+        age = now - self._session_started if self._session_started is not None else None
+        self._last_exchange = Exchange(sequence, sends, acknowledged, now - started, answer,
+                                       now, age, self._session_requests)
 
     def _send(self, datagram: bytes) -> None:
         if self._transport is not None and self._address is not None and not self._transport.is_closing():
@@ -336,6 +349,8 @@ def describe(exchange: Exchange) -> str:
     """`exchange` in one line for a log, its answer in hex: only for an answer that cannot carry
     the email, as a ping's does."""
     answer = exchange.answer.hex(" ") if exchange.answer is not None else "none"
-    return (f"sequence {exchange.sequence}, sent {exchange.sends} time(s), "
+    session = (f"request {exchange.session_request} of a session {exchange.session_age:.1f} s old"
+               if exchange.session_age is not None else "no session")
+    return (f"{session}, sequence {exchange.sequence}, sent {exchange.sends} time(s), "
             f"{'acknowledged' if exchange.acknowledged else 'not acknowledged'} first, "
             f"answer after {exchange.seconds:.3f} s: {answer}")
