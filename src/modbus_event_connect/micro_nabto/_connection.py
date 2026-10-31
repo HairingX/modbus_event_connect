@@ -95,6 +95,8 @@ class Exchange:
     """Seconds since the session was established; None before the first."""
     session_request: int = 0
     """Which request of the session this was, the handshake's ping being the first."""
+    set_aside: bool = False
+    """Whether an answer to the request was set aside for a later answer to it."""
 
 
 class MicroNabtoConnection:
@@ -185,17 +187,23 @@ class MicroNabtoConnection:
             self._transport.close()
             self._transport = None
 
-    async def request(self, command: bytes) -> bytes | None:
-        """Send `command` and return the device's answer, or None if it gave none."""
+    async def request(self, command: bytes, *, accept: Callable[[bytes], bool] | None = None) -> bytes | None:
+        """Send `command` and return the device's answer, or None if it gave none.
+
+        Args:
+            accept: whether an answer is one to take. An answer it refuses, to a request sent more
+                than once, is set aside while a later answer to the same request is waited for, up
+                to `timeout`; that one is taken if `accept` takes it, and the first otherwise.
+        """
         async with self._lock:
             if not await self._ready():
                 return None
-            answer = await self._data(command)
+            answer = await self._data(command, accept)
             if answer is None:
                 _LOGGER.info("micro_nabto: no answer; establishing the session anew")
                 if not await self._reestablish():
                     return None
-                answer = await self._data(command)
+                answer = await self._data(command, accept)
             return answer
 
     def diagnostics(self) -> Mapping[str, object]:
@@ -264,16 +272,17 @@ class MicroNabtoConnection:
 
     # ------------------------------------------------------------------------ exchange
 
-    async def _data(self, command: bytes) -> bytes | None:
+    async def _data(self, command: bytes, accept: Callable[[bytes], bool] | None = None) -> bytes | None:
         server_id = self._server_id
         if server_id is None:
             return None
         self._session_requests += 1
         answer = await self._exchange(
-            lambda sequence: wire.data_request(self._client_id, server_id, sequence, command))
+            lambda sequence: wire.data_request(self._client_id, server_id, sequence, command), accept)
         return answer.payload if isinstance(answer, wire.DataReply) else None
 
-    async def _exchange(self, packet: Callable[[int], bytes]) -> wire.ConnectReply | wire.DataReply | None:
+    async def _exchange(self, packet: Callable[[int], bytes], accept: Callable[[bytes], bool] | None = None,
+                        ) -> wire.ConnectReply | wire.DataReply | None:
         """Send a packet and wait for its reply, sending it again while none comes."""
         sequence = self._next_sequence()
         datagram = packet(sequence)
@@ -306,21 +315,43 @@ class MicroNabtoConnection:
                 self._waiting = None
                 if not future.done():
                     future.cancel()
+            set_aside = False
+            if (accept is not None and attempt and isinstance(answer, wire.DataReply)
+                    and not accept(answer.payload)):
+                # A device that got the request twice may answer both sendings, and the answer
+                # that came first need not be the one that holds the values.
+                later = await self._later_answer(sequence)
+                if later is not None and accept(later.payload):
+                    answer, set_aside = later, True
             self._answered += 1
             self._last_answer = self._clock.monotonic()
             self._latency_total += self._last_answer - started
             self._exchanged(sequence, attempt + 1, acknowledged, started,
-                            answer.raw if isinstance(answer, wire.DataReply) else None)
+                            answer.raw if isinstance(answer, wire.DataReply) else None, set_aside)
             return answer
         self._exchanged(sequence, self._retries + 1, acknowledged, started, None)
         return None
 
+    async def _later_answer(self, sequence: int) -> wire.DataReply | None:
+        """Another answer to the request with `sequence`, if one comes within `timeout`."""
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[wire.ConnectReply | wire.DataReply] = loop.create_future()
+        self._waiting = (sequence, future, asyncio.Event())
+        try:
+            await asyncio.wait({future}, timeout=self._timeout)
+            answer = future.result() if future.done() else None
+        finally:
+            self._waiting = None
+            if not future.done():
+                future.cancel()
+        return answer if isinstance(answer, wire.DataReply) else None
+
     def _exchanged(self, sequence: int, sends: int, acknowledged: bool, started: float,
-                   answer: bytes | None) -> None:
+                   answer: bytes | None, set_aside: bool = False) -> None:
         now = self._clock.monotonic()
         age = now - self._session_started if self._session_started is not None else None
         self._last_exchange = Exchange(sequence, sends, acknowledged, now - started, answer,
-                                       now, age, self._session_requests)
+                                       now, age, self._session_requests, set_aside)
 
     def _send(self, datagram: bytes) -> None:
         if self._transport is not None and self._address is not None and not self._transport.is_closing():
@@ -353,4 +384,5 @@ def describe(exchange: Exchange) -> str:
                if exchange.session_age is not None else "no session")
     return (f"{session}, sequence {exchange.sequence}, sent {exchange.sends} time(s), "
             f"{'acknowledged' if exchange.acknowledged else 'not acknowledged'} first, "
-            f"answer after {exchange.seconds:.3f} s: {answer}")
+            f"answer after {exchange.seconds:.3f} s"
+            f"{', the first answer set aside for a later one' if exchange.set_aside else ''}: {answer}")

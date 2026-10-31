@@ -240,12 +240,47 @@ async def test_the_warnings_say_how_old_the_session_was_and_when_values_came_bac
         with caplog.at_level(logging.WARNING, logger="modbus_event_connect.micro_nabto"):
             await device.read(points)
             assert "request 3 of a session 5.0 s old" in _warnings(caplog)
+            assert "read again: only zeros again, which are taken" in _warnings(caplog)
             await device.read(points)                                    # still zeros: no warning
-            assert _warnings(caplog).count("micro_nabto") == 1
+            assert _warnings(caplog).count("micro_nabto") == 2
             simulated.datapoint_registers.update({(0, 1): 1, (0, 2): 2})
             clock.advance(4)
             await device.read(points)
         assert "DatapointRegister 1 to 2 answered values again, 4.0 s after only zeros" in _warnings(caplog)
+
+
+async def test_an_answer_of_only_zeros_is_read_again_at_once_and_its_values_taken(
+        caplog: pytest.LogCaptureFixture) -> None:
+    async with _simulated() as simulated:
+        device = await _connected(simulated)
+        points = [_dp(1), _dp(2), _dp(3)]
+        await device.read(points)
+        simulated.zero_answers = 1
+        with caplog.at_level(logging.WARNING, logger="modbus_event_connect.micro_nabto"):
+            answers = await device.read(points)
+        assert [a.registers for a in answers.values()] == [(1,), (2,), (3,)]
+        assert "reading them again at once" in _warnings(caplog)
+        assert "read again: values, which are taken" in _warnings(caplog)
+        assert device.diagnostics()["answers_of_only_zeros"] == 1
+
+
+async def test_a_later_answer_with_values_to_a_request_sent_again_is_taken_over_zeros(
+        caplog: pytest.LogCaptureFixture) -> None:
+    async with _simulated() as simulated:
+        device = await _connected(simulated)
+        points = [_dp(1), _dp(2)]
+        await device.read(points)
+        # The receipt is lost, so the read is sent again; the device answers the repeat at once
+        # with zeros, and the first sending a little later with its values.
+        simulated.acknowledge = False
+        simulated.zeros_for_repeats = True
+        simulated.answer_delay = 0.08
+        with caplog.at_level(logging.WARNING, logger="modbus_event_connect.micro_nabto"):
+            answers = await device.read(points)
+        assert {k: a.registers for k, a in answers.items()} == {"dp_0_1": (1,), "dp_0_2": (2,)}
+        assert "answered only zeros to a request sent 2 times, then values to it" in _warnings(caplog)
+        assert "the first answer set aside for a later one" in _warnings(caplog)
+        assert "reading them again" not in _warnings(caplog)
 
 
 async def test_zeros_where_zeros_were_are_not_logged(caplog: pytest.LogCaptureFixture) -> None:

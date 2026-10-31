@@ -28,6 +28,8 @@ _MAX_ADDRESS: Mapping[tuple[str, type[Access]], int] = {
 """SetpointRegister reads carry a two-byte address; datapoint reads and setpoint writes four."""
 
 _Parse = Callable[[bytes], list[int] | None]
+_Register = tuple[type[Access], int, int]
+"""A register by its space, object and address."""
 _READS: Mapping[type[Access], tuple[Callable[[Sequence[tuple[int, int]]], bytes], _Parse]] = {
     DatapointRegister: (wire.datapoint_read, wire.datapoint_values),
     SetpointRegister: (wire.setpoint_read, wire.setpoint_values),
@@ -90,8 +92,8 @@ class MicroNabtoDevice:
         self._outcomes: Counter[Outcome] = Counter()
         self._isolated = 0
         self._only_zeros = 0
-        self._last: dict[tuple[type[Access], int, int], int] = {}
-        self._zeroed_at: dict[tuple[type[Access], int, int], float] = {}
+        self._last: dict[_Register, int] = {}
+        self._zeroed_at: dict[_Register, float] = {}
 
     @classmethod
     def udp(cls, email: str, *, host: str | None = None, device_id: str | None = None,
@@ -188,19 +190,47 @@ class MicroNabtoDevice:
         batches.append(_Batch(space, obj, tuple(current)))
         return batches
 
+    def _only_zeros_where_values_were(self, registers: Sequence[_Register], values: Sequence[int]) -> bool:
+        """Whether `values` are all 0, of more than one register, where those last held something else:
+        a Nilan gateway was reported answering a whole read so now and then."""
+        return len(values) > 1 and not any(values) and any(self._last.get(r, 0) for r in registers)
+
+    async def _checked(self, build: Callable[[Sequence[tuple[int, int]]], bytes], parse: _Parse,
+                       space: type[Access], items: Sequence[tuple[int, int]], values: list[int]) -> list[int]:
+        """The values to take for an answer: an answer of only zeros where values were is logged,
+        and the registers read again at once; that answer is taken, whatever it holds."""
+        registers = [(space, obj, address) for obj, address in items]
+        span = f"{space.__name__} {items[0][1]} to {items[-1][1]}"
+        exchange = self._connection.last_exchange
+        if exchange is not None and exchange.set_aside:
+            self._only_zeros += 1
+            _LOGGER.warning("micro_nabto: %s answered only zeros to a request sent %d times, then values "
+                            "to it, which are taken; %s", span, exchange.sends, self._last_exchange())
+            return values
+        if not self._only_zeros_where_values_were(registers, values):
+            return values
+        self._only_zeros += 1
+        _LOGGER.warning("micro_nabto: %s answered only zeros, where they held values; reading them again "
+                        "at once; %s", span, self._last_exchange())
+        answer = await self._connection.request(build(items))
+        again = parse(answer) if answer is not None else None
+        if again is None or len(again) != len(values):
+            _LOGGER.warning("micro_nabto: %s read again: no answer that fits, so the zeros are taken", span)
+            return values
+        _LOGGER.warning("micro_nabto: %s read again: %s; %s", span,
+                        "values, which are taken" if any(again) else "only zeros again, which are taken",
+                        self._last_exchange())
+        return again
+
     def _note_values(self, space: type[Access], items: Sequence[tuple[int, int]], values: Sequence[int]) -> None:
-        """Remember `values`, and log the request when they are all 0 where the registers held
-        something else, and when those registers answer values again: a Nilan gateway was
-        reported answering a whole read so now and then."""
+        """Remember the values taken, and log when registers that were taken as only zeros hold
+        values again, with how long the zeros lasted."""
         registers = [(space, obj, address) for obj, address in items]
         exchange = self._connection.last_exchange
         at = exchange.at if exchange is not None else 0.0
         zeroed = [self._zeroed_at[r] for r in registers if r in self._zeroed_at]
-        if len(values) > 1 and not any(values) and any(self._last.get(r, 0) for r in registers):
-            self._only_zeros += 1
+        if self._only_zeros_where_values_were(registers, values):
             self._zeroed_at.update((r, at) for r in registers)
-            _LOGGER.warning("micro_nabto: %s %d to %d answered only zeros, where they held values; %s",
-                            space.__name__, items[0][1], items[-1][1], self._last_exchange())
         elif zeroed and any(values):
             for register in registers:
                 self._zeroed_at.pop(register, None)
@@ -218,13 +248,20 @@ class MicroNabtoDevice:
     async def _read_batch(self, batch: _Batch, result: dict[str, ReadResult]) -> None:
         build, parse = _READS[batch.space]
         items = batch.items
-        answer = await self._connection.request(build(items))
+        registers = [(batch.space, obj, address) for obj, address in items]
+
+        def worth_taking(payload: bytes) -> bool:
+            found = parse(payload)
+            return found is None or not self._only_zeros_where_values_were(registers, found)
+
+        answer = await self._connection.request(build(items), accept=worth_taking)
         values = parse(answer) if answer is not None else None
         if answer is None:
             raw = ReadResult(Outcome.NO_ANSWER, detail="no answer from the device")
         elif values is None:
             raw = ReadResult(Outcome.ERROR, detail="a malformed answer")
         elif len(values) == len(items):
+            values = await self._checked(build, parse, batch.space, items, values)
             self._note_values(batch.space, items, values)
             self._outcomes[Outcome.OK] += 1
             offset = 0

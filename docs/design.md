@@ -743,8 +743,16 @@ logged so as a warning and counted (`answers_of_only_zeros`), and so is the answ
 values to those registers again, with how long the zeros lasted: a Nilan gateway was reported
 answering a whole read with zeros now and then, and these two lines are what tell whether that
 follows a resend, a new session or a flag, and how long it lasts. Each comes once a time it
-happens, so a unit without the fault never logs them. The answers are taken as they come. A
-ping's answer carries the email, so only answers to reads are logged.
+happens, so a unit without the fault never logs them. A ping's answer carries the email, so only
+answers to reads are logged.
+
+Such an answer is not taken at once:
+- **To a read sent again**, the request is kept open for up to `timeout` after it: a gateway that
+  got both sendings may answer both, and the zeros need not be the answer that holds the values.
+  A later answer to it with values is taken, and the warning says so.
+- **Otherwise**, the registers are read again at once, with a new request, and that answer is
+  taken, values or zeros; the warning says which. No value is held back, and nothing waits for
+  the next poll.
 
 ---
 
@@ -774,6 +782,7 @@ A library that gets these wrong is worse than none.
 | `0x0B`: the gateway's device did not answer | `NO_ANSWER`, counted towards backoff |
 | No answer at all | `NO_ANSWER`; the value goes `STALE`; reachability follows answers, never the socket |
 | One bad address refuses a whole request | the request is halved until the refusal is pinned down: a few absent addresses among many cost few requests, though a request where every address is absent costs about twice as many as reading each alone |
+| A micro_nabto read answered with only zeros where values were | a later answer to a read sent again is taken if it holds values; otherwise the read is sent again at once and its answer taken; logged as warnings |
 | Devices accept different request sizes | `max_registers` / `max_bits` per model |
 | Four address spaces | one access class each; never batched together |
 | Word order and byte order | per point |
