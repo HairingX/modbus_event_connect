@@ -162,6 +162,7 @@ def test_the_wait_for_a_later_answer_is_the_connections_then_the_models_then_fiv
     given = MicroNabtoConnection(EMAIL, host="device.invalid", later_answer_wait=7.0)
     given.use_model_later_answer_wait(2.0)
     assert given.later_answer_wait == 7.0
+    assert given.diagnostics()["later_answer_wait"] == 7.0
     with pytest.raises(ValueError):
         MicroNabtoConnection(EMAIL, host="device.invalid", later_answer_wait=-1.0)
 

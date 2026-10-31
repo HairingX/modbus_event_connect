@@ -395,6 +395,10 @@ class Client:
         """Consecutive failed reads of `key`."""
         return self._consecutive_failures.get(key, 0)
 
+    def diagnostics(self) -> Mapping[str, object]:
+        """The device's counters for a bug report: requests, failures by outcome, latency. No addresses."""
+        return self._device.diagnostics()
+
     # ============================================================================ interest
 
     def subscribe[T](self, key: Key[T], callback: ValueCallback[T], *, poll: bool = True) -> Callable[[], None]:

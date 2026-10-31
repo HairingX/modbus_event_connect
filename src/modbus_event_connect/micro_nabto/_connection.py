@@ -253,6 +253,7 @@ class MicroNabtoConnection:
             "rediscoveries": self._rediscoveries,
             "average_latency": self._latency_total / self._answered if self._answered else None,
             "max_latency": self._max_latency if self._answered else None,
+            "later_answer_wait": self.later_answer_wait,
             "later_answer_waits": self._later_answer_waits,
             "later_answers_taken": self._later_answers_taken,
             "longest_later_answer_wait": self._longest_later_answer_wait,

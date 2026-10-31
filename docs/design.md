@@ -731,10 +731,11 @@ CTS 402 — which other devices may not share.
 
 ## 9. Diagnostics
 
-Per device: requests, failures by kind, average and longest latency, backoff state, the
-consecutive failure count; for micro_nabto also resends, acknowledgements, and how often a request
-was kept open for a later answer, how often that answer was taken, and the longest wait. Per point: last quality and when it was last good. This is what a bug report needs —
-without a host address in it.
+Per device, and from the client as `diagnostics()`: requests, failures by kind, average and
+longest latency, backoff state, the consecutive failure count; for micro_nabto also resends,
+acknowledgements, the wait for a later answer in use, how often a request was kept open for one,
+how often that answer was taken, and the longest wait. Per point: last quality and when it was
+last good. This is what a bug report needs — without a host address in it.
 
 micro_nabto logs each read's answer at debug: how old the session is and which of its requests
 this was, the sequence number, how many times the request was sent, whether the device
