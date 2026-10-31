@@ -40,7 +40,9 @@ Each one has a real case behind it.
 ```
   Model        Sentio, Nilan, a lamp …     declares points, poll rates, effects, scan steps
   ─────────────────────────────────────────────────────────────────────────────────────────
-  Core         points, data types, polling, events, availability, quality, consumer API
+  Core         points, data types, polling, events, availability, quality, consumer API;
+               what is protocol-free of it - keys, values, points by their behaviour, the
+               scheduler, subscriptions, reachability - is event_connect's
   ─────────────────────────────────────────────────────────────────────────────────────────
   Protocol     Modbus, micro_nabto         address spaces, register numbering, batching,
                                            function codes, mapping device errors to quality
@@ -432,6 +434,7 @@ point has a time at which it becomes due for reading.**
 |---|---|
 | the point's poll rate | due when its value is older than the poll rate's interval |
 | a write that disturbs it | due at write + `after`, whatever its poll rate |
+| a failed read | due `retry_after` later, twice as long after each further failure, never after its next regular read |
 | a trigger | due now |
 | reconnect | everything due now |
 | `refresh(...)` from the consumer | the selected points due now |
@@ -618,9 +621,11 @@ The callback receives the old and the new `DataValue`.
   value. The library exposes the consecutive failure count; the tolerance is the consumer's
   policy.
 - **Whether the device is reachable** is `Status.CONNECTED`, and it is decided by answers, never
-  by the socket: a TCP socket stays open for minutes after a cable is pulled. A pass or a write
-  that nothing answered makes it False; the first answer makes it True again and makes every
-  value due. Each change is logged once, not on every failed read.
+  by the socket: a TCP socket stays open for minutes after a cable is pulled. It turns False only
+  once nothing has been answered for the model's `offline_after`, counted from the first
+  unanswered pass or write, so one lost packet does not make the device unavailable; the first
+  answer makes it True again and makes every value due. Each change is logged once, not on every
+  failed read.
 
 ---
 

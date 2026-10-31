@@ -6,7 +6,7 @@ from typing import Any, Callable
 
 import pytest
 
-from modbus_event_connect import _unit as unit_module
+from event_connect import _unit as unit_module
 from modbus_event_connect._clock import Clock, SystemClock
 from modbus_event_connect._data_type import DataType, DataTypeKind
 from modbus_event_connect._device import EncodedWrite, Outcome, ReadResult, WriteResult
@@ -715,6 +715,7 @@ UNITS: dict[Unit, tuple[str, str]] = {
     Unit.KILOWATT: ("kW", "kW"),
     Unit.WATT_HOUR: ("W·h", "W.h"),
     Unit.KILOWATT_HOUR: ("kW·h", "kW.h"),
+    Unit.MILLIVOLT: ("mV", "mV"),
     Unit.VOLT: ("V", "V"),
     Unit.AMPERE: ("A", "A"),
     Unit.HERTZ: ("Hz", "Hz"),

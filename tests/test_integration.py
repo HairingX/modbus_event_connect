@@ -477,6 +477,9 @@ def test_status_follows_the_connection() -> None:
     gateway.link_down = True
     clock.advance(60)
     asyncio.run(client.poll())
+    assert seen == [False, True]
+    clock.advance(30)
+    asyncio.run(client.poll())
     assert seen == [False, True, False]
 
 

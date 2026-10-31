@@ -383,6 +383,8 @@ async def test_a_silent_device_makes_the_client_unavailable_until_it_answers_aga
         simulated.silent = True
         clock.advance(60)
         await client.poll()
+        clock.advance(30)
+        await client.poll()
         stale = client.value(Key("temp_outside", float))
         assert client.status(Status.CONNECTED).value is False and stale is not None and stale.quality is Quality.STALE
 

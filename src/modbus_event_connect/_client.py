@@ -6,9 +6,10 @@ import logging
 import math
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
 from enum import Enum, auto
 from typing import Any
+
+from event_connect import DEFAULT_TIMING, Reachability, Write, changed, stale
 
 from ._clock import Clock, SystemClock
 from ._conversion import decode, encode
@@ -24,10 +25,10 @@ from ._errors import (
 from ._events import Subscriptions, ValueCallback, tell
 from ._key import Key, is_key
 from ._model import InstanceScanStep, Model, ModelSelector, RepeatedSection, ResolvedModel, resolve
-from ._point import Change, Labels, Point, PollRate, Selector, WriteKind
+from ._point import Labels, Point, PollRate, Selector, WriteKind
 from ._scheduler import Scheduler
 from ._value import DataValue, Quality, Value
-from ._writes import Write, WriteQueue
+from ._writes import WriteQueue
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -126,6 +127,7 @@ class Client:
         """When `refresh(PollRate.SCAN)` asked for the checks, which runs them without the schedule."""
         self._consecutive_failures: dict[str, int] = {}
         self._reported_offline = False
+        self._reachability = Reachability(self._clock, DEFAULT_TIMING.offline_after)
         self._status: dict[Status, DataValue[bool]] = {
             status: DataValue(False, Quality.GOOD, self._clock.now()) for status in Status}
         self._status_callbacks: dict[Status, list[StatusCallback]] = {status: [] for status in Status}
@@ -295,7 +297,8 @@ class Client:
 
     def _commit(self, model: Model, resolved: ResolvedModel, marks: dict[_Scope, dict[str, str]],
                 reads: dict[_Scope, dict[str, tuple[Quality, Value]]]) -> None:
-        scheduler = Scheduler(self._clock, model.poll_intervals, min_poll_interval=model.min_poll_interval)
+        scheduler = Scheduler(self._clock, model.poll_intervals, min_poll_interval=model.min_poll_interval,
+                              retry_after=model.retry_after)
         scheduler.set_points(resolved.points.values())
         for target, seconds in self._interval_overrides.items():
             if isinstance(target, PollRate) or target in resolved.points:
@@ -324,6 +327,7 @@ class Client:
                               "reported", key, key.type.__name__, model.name, resolved.points[key].key.type.__name__)
         for key in resolved.points:
             self._update_polling(key)
+        self._reachability = Reachability(self._clock, model.offline_after)
         self._update_reachability(True)
 
     # ========================================================================= the picture
@@ -394,6 +398,17 @@ class Client:
     def consecutive_failures(self, key: str) -> int:
         """Consecutive failed reads of `key`."""
         return self._consecutive_failures.get(key, 0)
+
+    @property
+    def silent(self) -> bool:
+        """Whether the device left the latest request unanswered."""
+        return self._reachability.silent
+
+    @property
+    def silent_for(self) -> float:
+        """Seconds since the device first left a request unanswered since its last answer; 0 while
+        it answers."""
+        return self._reachability.silent_for
 
     # ============================================================================ interest
 
@@ -656,31 +671,36 @@ class Client:
                 value, quality = decode(point, answer.registers)
             except InvalidValueError as err:
                 _LOGGER.error("'%s' answered registers that do not fit it: %s", point.key, err)
-                return _stale(previous, now)
+                return stale(previous, now)
             return DataValue(value, quality, now, raw=tuple(answer.registers))
         if answer.outcome in (Outcome.MISSING, Outcome.UNSUPPORTED):
             return DataValue(None, Quality.MISSING, now)
         if answer.outcome is Outcome.OFFLINE:
             return DataValue(None, Quality.OFFLINE, now)
-        return _stale(previous, now)
+        return stale(previous, now)
 
     def _store(self, point: Point[Any], data: DataValue[Any], previous: DataValue[Any] | None) -> None:
         self._values[point.key] = data
         self._subscriptions.report(point, data)
         trigger = point.on_change
-        if trigger is not None and previous is not None and _changed(previous, data, trigger.when):
+        if trigger is not None and previous is not None and changed(previous, data, trigger.when):
             keys = [p.key for p in _select(self._require_model(), trigger.targets)
                     if p.readable and self._is_available(p.key)]
             if keys:
                 self._require_scheduler().refresh(keys, after=trigger.after or 0.0, until_stable=trigger.until_stable)
 
     def _update_reachability(self, answered: bool) -> None:
-        """Update reachability from whether the device answered, logging each change once."""
-        if answered == self._status[Status.CONNECTED].value:
+        """Update reachability from whether the device answered, logging each change once.
+
+        The device counts as not answering only once it has been silent for the model's
+        `offline_after`, so one lost answer does not make it unavailable.
+        """
+        reachable = self._reachability.answered() if answered else self._reachability.unanswered()
+        if reachable == self._status[Status.CONNECTED].value:
             return
-        self._set_status(Status.CONNECTED, answered)
+        self._set_status(Status.CONNECTED, reachable)
         name = self._resolved.model.name if self._resolved is not None else "The device"
-        if not answered:
+        if not reachable:
             self._reported_offline = True
             _LOGGER.info("%s stopped answering", name)
             return
@@ -877,25 +897,6 @@ def _union(marks: Iterable[Mapping[str, str]]) -> dict[str, str]:
         for key, reason in marked.items():
             found.setdefault(key, reason)
     return found
-
-
-def _stale(previous: DataValue[Any] | None, now: datetime) -> DataValue[Any]:
-    """The last good value, marked STALE and keeping the time it was good."""
-    if previous is not None and previous.quality in (Quality.GOOD, Quality.STALE):
-        return DataValue(previous.value, Quality.STALE, previous.timestamp)
-    return DataValue(None, Quality.STALE, now)
-
-
-def _changed(old: DataValue[Any], new: DataValue[Any], when: Change) -> bool:
-    """Whether a change from `old` to `new` matches `when`. Only good values compare."""
-    if not (old.is_good and new.is_good) or old.value == new.value:
-        return False
-    if when is Change.ANY:
-        return True
-    before, after = old.value, new.value
-    if not isinstance(before, (int, float)) or not isinstance(after, (int, float)):
-        return False
-    return after > before if when is Change.RISING else after < before
 
 
 def _tell_status(callback: StatusCallback, status: Status, old: DataValue[Any] | None, new: DataValue[Any]) -> None:
