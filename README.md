@@ -37,6 +37,10 @@ A *point* is one value the device has, such as a temperature or a setting. Its *
 wherever it is stored, and a type checker knows from it what reading the point gives and what
 writing it takes.
 
+Keys, values, points by their behaviour, the scheduling of reads and what a write or a change
+sets off are those of [event_connect](https://github.com/HairingX/event_connect), the
+protocol-free core this library is built on; they are imported from here under the same names.
+
 Everything is imported from four places. The modules inside them are internal, and may change in
 any release.
 
@@ -212,7 +216,12 @@ reaches the device. Use it while developing against a real installation.
 After `connect()`, the client follows whether the device answers. You do not need to connect
 again after an outage.
 
-- `client.status(Status.CONNECTED).value` is `False` while the device does not answer.
+- `client.status(Status.CONNECTED).value` is `False` once the device has not answered for the
+  model's `offline_after`, 30 seconds unless it says otherwise, so one lost answer does not make it
+  unavailable. Meanwhile its values are `STALE`, and `client.silent` and `client.silent_for` say
+  whether the latest request went unanswered, and for how long the device has been silent.
+- A read that fails is tried again `retry_after` seconds later, 1 unless the model says otherwise,
+  then twice as long after each further failure, never later than the point's next regular read.
 - `client.subscribe_status(Status.CONNECTED, callback)` tells you when that changes. A status is
   not a point, so a model's keys never collide with it.
 - When the device answers again, every polled point is read at once.
@@ -443,6 +452,8 @@ for a setting people think of in hours gets `transform=Transforms.MINUTES_AS_HOU
 | `deadband=0.2` | changes smaller than this are not reported |
 | `Model(poll_intervals=...)` | this device's own seconds per poll rate |
 | `Model(min_poll_interval=5)` | the shortest interval this device copes with; apps cannot go below it |
+| `Model(retry_after=1.0)` | seconds before a failed read is tried again, doubling after each further failure |
+| `Model(offline_after=30.0)` | seconds without an answer before the device counts as not answering |
 
 Pick the rate from how fast the value changes, not from how often it is looked at:
 temperatures `MEDIUM`, on/off states `FAST`, settings `SLOW`, firmware versions `STATIC`.

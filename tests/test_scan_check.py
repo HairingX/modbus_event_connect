@@ -20,7 +20,6 @@ from modbus_event_connect import (
     RepeatedSection,
     Scan,
     Section,
-    Status,
 )
 from modbus_event_connect._device import Identity, Outcome, ProtocolOptions, ReadResult, WriteResult
 from modbus_event_connect._data_type import DataType
@@ -312,7 +311,7 @@ def test_an_unanswered_check_changes_nothing() -> None:
     asyncio.run(client.refresh(PollRate.SCAN))
     assert set(client.points) == keys
     assert seen.calls == []
-    assert client.status(Status.CONNECTED).value is False
+    assert client.silent
 
 
 def test_a_change_to_what_the_whole_unit_scan_read_scans_everything_again() -> None:

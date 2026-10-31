@@ -34,6 +34,9 @@ obvious from the name - one or two lines, no narrative.
 - pyright strict must report 0 errors (`pyright`); the configuration is in `pyproject.toml`.
   The release scripts are a project of their own: `pyright -p .github/scripts`.
 - Every problem found gets a test that fails without the fix.
+- What is protocol-free - keys, values, points by their behaviour, the scheduler, subscriptions,
+  reachability - is `event_connect`'s, re-exported here under the same names; a fix to it goes
+  there. This package requires a range of it, never one version.
 - Test support - simulators, fake clocks, checks that sample behaviour - lives in `testing/`,
   never in the modules that run in production.
 - Live tests (`tests/test_live_*.py`) only read, and skip themselves unless a device is

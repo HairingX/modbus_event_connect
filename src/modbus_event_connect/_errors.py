@@ -1,41 +1,22 @@
-"""Every error the library raises of its own."""
-from __future__ import annotations
+"""Every error the library raises of its own: event_connect's."""
+from event_connect import (
+    AuthenticationError,
+    CannotConnectError,
+    ClientError,
+    InvalidValueError,
+    ModelError,
+    NotConnectedError,
+    ReadOnlyError,
+    UnsupportedDeviceError,
+)
 
-from collections.abc import Mapping
-
-
-class ClientError(Exception):
-    """Base for the errors the client raises about its own state."""
-
-
-class CannotConnectError(ClientError):
-    """The device could not be reached, or did not answer every request during the scan."""
-
-
-class UnsupportedDeviceError(ClientError):
-    """The device answered, but no model matches it."""
-
-    def __init__(self, message: str, identity: Mapping[str, int | float | str | bool | None] | None = None) -> None:
-        super().__init__(message)
-        self.identity: Mapping[str, int | float | str | bool | None] = dict(identity or {})
-        """What the device reported about itself."""
-
-
-class NotConnectedError(ClientError):
-    """The operation needs a device that has been scanned."""
-
-
-class ReadOnlyError(ClientError):
-    """A write was asked of a read-only client."""
-
-
-class AuthenticationError(ClientError):
-    """The device refused the credentials it was given."""
-
-
-class InvalidValueError(ValueError):
-    """A value a point cannot take, or registers that are not a value of it."""
-
-
-class ModelError(ValueError):
-    """A model does not resolve cleanly against an identity; lists every problem found."""
+__all__ = [
+    "AuthenticationError",
+    "CannotConnectError",
+    "ClientError",
+    "InvalidValueError",
+    "ModelError",
+    "NotConnectedError",
+    "ReadOnlyError",
+    "UnsupportedDeviceError",
+]

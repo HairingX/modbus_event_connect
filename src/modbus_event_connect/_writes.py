@@ -11,17 +11,9 @@ from typing import Any
 from ._clock import Clock
 from ._conversion import encode
 from ._device import Device, EncodedWrite, Outcome, WriteResult
-from ._key import Key
 from ._point import Point, WriteKind
 
 _LOGGER = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class Write[T]:
-    """One write of a sequence: `value` to the point `key` names."""
-    key: Key[T]
-    value: T
 
 
 @dataclass(eq=False)

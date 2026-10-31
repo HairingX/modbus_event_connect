@@ -39,7 +39,7 @@ from modbus_event_connect._point import (
     WriteKind,
 )
 from modbus_event_connect._value import DataValue, Quality
-from modbus_event_connect._writes import Write
+from modbus_event_connect import Write
 from modbus_event_connect.modbus._access import (
     Coil,
     HoldingRegister,
@@ -689,6 +689,8 @@ def test_after_an_outage_everything_wanted_is_read_once_again() -> None:
     _silence(device)
     clock.advance(60)
     asyncio.run(client.poll())
+    clock.advance(30)
+    asyncio.run(client.poll())
     assert client.status(Status.CONNECTED).value is False
 
     for key, registers in REGISTERS.items():
@@ -1174,7 +1176,36 @@ def test_reachability_follows_the_answers_not_the_socket() -> None:
     assert device.connected is True
     clock.advance(60)
     asyncio.run(client.poll())
+    clock.advance(30)
+    asyncio.run(client.poll())
     assert client.status(Status.CONNECTED).value is False
+
+
+def test_one_unanswered_read_does_not_make_the_device_unreachable() -> None:
+    client, device, clock = _connected()
+    client.subscribe(TEMP, Recorder())
+    _silence(device)
+    clock.advance(60)
+    asyncio.run(client.poll())
+    assert client.status(Status.CONNECTED).value is True
+    assert client.silent and client.silent_for == 0.0
+    clock.advance(29)
+    assert client.silent_for == 29.0
+
+
+def test_a_failed_read_is_tried_again_a_second_later() -> None:
+    client, device, clock = _connected()
+    client.subscribe(SERIAL, Recorder())
+    client.subscribe(TEMP, Recorder())
+    _silence(device)
+    clock.advance(60)
+    asyncio.run(client.poll())
+    for key, registers in REGISTERS.items():
+        device.answer(key, *registers)
+    device.reads.clear()
+    clock.advance(1)
+    asyncio.run(client.poll())
+    assert "temp" in device.read_keys()
 
 
 def test_an_outage_and_its_recovery_are_logged_once_each() -> None:
@@ -1192,14 +1223,17 @@ def test_an_outage_and_its_recovery_are_logged_once_each() -> None:
     assert [m for m in records.messages if "answer" in m] == ["TEST stopped answering", "TEST answers again"]
 
 
-def test_a_write_left_unanswered_marks_the_device_unreachable_and_an_answered_one_reachable() -> None:
-    client, device, _ = _connected()
+def test_writes_left_unanswered_for_the_grace_mark_the_device_unreachable_and_an_answered_one_reachable() -> None:
+    client, device, clock = _connected()
     device.write_outcomes["mode"] = Outcome.NO_ANSWER
+    asyncio.run(client.write(MODE, 2))
+    assert client.status(Status.CONNECTED).value is True and client.silent
+    clock.advance(30)
     asyncio.run(client.write(MODE, 2))
     assert client.status(Status.CONNECTED).value is False
     device.write_outcomes["mode"] = Outcome.OK
     asyncio.run(client.write(MODE, 2))
-    assert client.status(Status.CONNECTED).value is True
+    assert client.status(Status.CONNECTED).value is True and not client.silent
 
 
 @pytest.mark.parametrize("outcome", [Outcome.NO_ANSWER, Outcome.BUSY])

@@ -33,7 +33,7 @@ from ._point import (
 )
 from ._unit import Unit
 from ._value import DataValue, Quality
-from ._writes import Write
+from event_connect import Write
 
 __version__ = _installed_version("modbus_event_connect")
 __all__ = [
