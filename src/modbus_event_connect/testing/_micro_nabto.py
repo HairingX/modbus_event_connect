@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from .._clock import Clock, SystemClock
@@ -30,6 +30,8 @@ class _Session:
     server_id: bytes
     email: str
     last_seen: float
+    sequences: set[bytes] = field(default_factory=set[bytes])
+    """The sequence numbers of the requests received in the session."""
 
 
 class SimulatedMicroNabtoDevice:
@@ -68,6 +70,14 @@ class SimulatedMicroNabtoDevice:
         and applied."""
         self.answer_delay = 0.0
         """Seconds between the receipt of a request and its answer."""
+        self.acknowledge = True
+        """Send uNabto's receipt ahead of each answer; False, as when every receipt is lost, so the
+        client sends a request again."""
+        self.zeros_for_repeats = False
+        """Answer a read sent again at once with zeros where its values belong, and send the first
+        sending's answer as usual: what a Nilan gateway was suspected of doing."""
+        self.zero_answers = 0
+        """Reads still to answer with zeros where their values belong."""
 
         self.datagrams = 0
         """Datagrams that reached the device, answered or not."""
@@ -184,20 +194,25 @@ class SimulatedMicroNabtoDevice:
             del self._sessions[client_id]
             return
         session.last_seen = now
-        receipt = b"\x34\x00\x00\x08\x00\x00\x00\x03"
-        self._send(_header(client_id, server_id, _DATA, sequence, 16 + len(receipt)) + receipt, addr)
+        if self.acknowledge:
+            receipt = b"\x34\x00\x00\x08\x00\x00\x00\x03"
+            self._send(_header(client_id, server_id, _DATA, sequence, 16 + len(receipt)) + receipt, addr)
+        repeat = sequence in session.sequences
+        session.sequences.add(sequence)
 
         length = int.from_bytes(data[18:20], "big")
         command = data[22:16 + length - 3]
         answer = self._answer(command, session)
         if answer is None:
             return
-        padding = 2 - len(answer) % 2
-        total = 22 + len(answer) + padding + 2
-        packet = (_header(client_id, server_id, _DATA, sequence, total)
-                  + b"\x36\x00" + (total - 16).to_bytes(2, "big") + b"\x00\x0a"
-                  + answer + bytes([padding]) * padding)
-        packet += (sum(packet) & 0xFFFF).to_bytes(2, "big")
+        zeros = _only_zeros(command[3], answer)
+        if repeat and self.zeros_for_repeats and zeros is not None:
+            self._send(_answer_packet(client_id, server_id, sequence, zeros), addr)
+            return
+        if self.zero_answers > 0 and zeros is not None:
+            self.zero_answers -= 1
+            answer = zeros
+        packet = _answer_packet(client_id, server_id, sequence, answer)
         for _ in range(2 if self.duplicate else 1):
             if self.answer_delay > 0:
                 asyncio.get_running_loop().call_later(self.answer_delay, self._send, packet, addr)
@@ -284,3 +299,18 @@ def _lookup(image: Mapping[tuple[int, int], int], items: list[tuple[int, int]]) 
 
 def _u32(value: int) -> bytes:
     return value.to_bytes(4, "big")
+
+
+def _answer_packet(client_id: bytes, server_id: bytes, sequence: bytes, answer: bytes) -> bytes:
+    padding = 2 - len(answer) % 2
+    total = 22 + len(answer) + padding + 2
+    packet = (_header(client_id, server_id, _DATA, sequence, total)
+              + b"\x36\x00" + (total - 16).to_bytes(2, "big") + b"\x00\x0a"
+              + answer + bytes([padding]) * padding)
+    return packet + (sum(packet) & 0xFFFF).to_bytes(2, "big")
+
+
+def _only_zeros(code: int, answer: bytes) -> bytes | None:
+    """`answer` to a read with every value 0, or None if it is no read's answer."""
+    start = {_DATAPOINT_READ: 2, _SETPOINT_READ: 3}.get(code)
+    return answer[:start] + bytes(len(answer) - start) if start is not None else None

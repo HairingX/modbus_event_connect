@@ -1,6 +1,7 @@
 """One micro_nabto device implementing `Device`: points in, `ReadResult` / `WriteResult` out."""
 from __future__ import annotations
 
+import logging
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -8,10 +9,12 @@ from typing import Any
 
 from . import _wire as wire
 from ._access import DatapointRegister, SetpointRegister
-from ._connection import MicroNabtoConnection
+from ._connection import MicroNabtoConnection, describe
 from .._data_type import DataTypeKind
 from .._device import EncodedWrite, Identity, Outcome, ProtocolOptions, ReadResult, WriteResult
 from .._point import Access, Point
+
+_LOGGER = logging.getLogger(__name__)
 
 MAX_REGISTERS_PER_READ = 64
 """Registers per read request; a CTS 402 answered 108, so this leaves room."""
@@ -25,6 +28,8 @@ _MAX_ADDRESS: Mapping[tuple[str, type[Access]], int] = {
 """SetpointRegister reads carry a two-byte address; datapoint reads and setpoint writes four."""
 
 _Parse = Callable[[bytes], list[int] | None]
+_Register = tuple[type[Access], int, int]
+"""A register by its space, object and address."""
 _READS: Mapping[type[Access], tuple[Callable[[Sequence[tuple[int, int]]], bytes], _Parse]] = {
     DatapointRegister: (wire.datapoint_read, wire.datapoint_values),
     SetpointRegister: (wire.setpoint_read, wire.setpoint_values),
@@ -36,10 +41,15 @@ class MicroNabtoOptions(ProtocolOptions):
     """What a model states about its device in micro_nabto terms."""
     max_registers: int = MAX_REGISTERS_PER_READ
     """Most registers the device is asked for in one read."""
+    later_answer_wait: float | None = None
+    """Seconds a read sent again and answered with only zeros, where values were, is kept open
+    for a later answer; None leaves the connection's. One given to the connection overrides it."""
 
     def __post_init__(self) -> None:
         if self.max_registers < 1:
             raise ValueError(f"max_registers must be at least 1, got {self.max_registers}")
+        if self.later_answer_wait is not None and self.later_answer_wait < 0:
+            raise ValueError(f"later_answer_wait cannot be negative, got {self.later_answer_wait}")
 
     def problems(self, point: Point[Any]) -> list[str]:
         found: list[str] = []
@@ -86,6 +96,9 @@ class MicroNabtoDevice:
         self._options: MicroNabtoOptions | None = None
         self._outcomes: Counter[Outcome] = Counter()
         self._isolated = 0
+        self._only_zeros = 0
+        self._last: dict[_Register, int] = {}
+        self._zeroed_at: dict[_Register, float] = {}
 
     @classmethod
     def udp(cls, email: str, *, host: str | None = None, device_id: str | None = None,
@@ -109,8 +122,10 @@ class MicroNabtoDevice:
     def configure(self, options: ProtocolOptions | None) -> None:
         if options is None:
             self._options: MicroNabtoOptions | None = None
+            self._connection.use_model_later_answer_wait(None)
         elif isinstance(options, MicroNabtoOptions):
             self._options = options
+            self._connection.use_model_later_answer_wait(options.later_answer_wait)
         else:
             raise TypeError(f"a micro_nabto device needs MicroNabtoOptions, not {type(options).__name__}")
 
@@ -163,6 +178,7 @@ class MicroNabtoDevice:
         return {
             "outcomes": {outcome.name: self._outcomes[outcome] for outcome in Outcome},
             "isolated_reads": self._isolated,
+            "answers_of_only_zeros": self._only_zeros,
             **self._connection.diagnostics(),
         }
 
@@ -181,16 +197,79 @@ class MicroNabtoDevice:
         batches.append(_Batch(space, obj, tuple(current)))
         return batches
 
+    def _only_zeros_where_values_were(self, registers: Sequence[_Register], values: Sequence[int]) -> bool:
+        """Whether `values` are all 0, of more than one register, where those last held something else:
+        a Nilan gateway was reported answering a whole read so now and then."""
+        return len(values) > 1 and not any(values) and any(self._last.get(r, 0) for r in registers)
+
+    async def _checked(self, build: Callable[[Sequence[tuple[int, int]]], bytes], parse: _Parse,
+                       space: type[Access], items: Sequence[tuple[int, int]], values: list[int]) -> list[int]:
+        """The values to take for an answer: an answer of only zeros where values were is logged,
+        and the registers read again at once; that answer is taken, whatever it holds."""
+        registers = [(space, obj, address) for obj, address in items]
+        span = f"{space.__name__} {items[0][1]} to {items[-1][1]}"
+        exchange = self._connection.last_exchange
+        if exchange is not None and exchange.set_aside:
+            self._only_zeros += 1
+            _LOGGER.warning("micro_nabto: %s answered only zeros to a request sent %d times, then values "
+                            "to it, which are taken; %s", span, exchange.sends, self._last_exchange())
+            return values
+        if not self._only_zeros_where_values_were(registers, values):
+            return values
+        self._only_zeros += 1
+        _LOGGER.warning("micro_nabto: %s answered only zeros, where they held values; reading them again "
+                        "at once; %s", span, self._last_exchange())
+        answer = await self._connection.request(build(items))
+        again = parse(answer) if answer is not None else None
+        if again is None or len(again) != len(values):
+            _LOGGER.warning("micro_nabto: %s read again: no answer that fits, so the zeros are taken", span)
+            return values
+        _LOGGER.warning("micro_nabto: %s read again: %s; %s", span,
+                        "values, which are taken" if any(again) else "only zeros again, which are taken",
+                        self._last_exchange())
+        return again
+
+    def _note_values(self, space: type[Access], items: Sequence[tuple[int, int]], values: Sequence[int]) -> None:
+        """Remember the values taken, and log when registers that were taken as only zeros hold
+        values again, with how long the zeros lasted."""
+        registers = [(space, obj, address) for obj, address in items]
+        exchange = self._connection.last_exchange
+        at = exchange.at if exchange is not None else 0.0
+        zeroed = [self._zeroed_at[r] for r in registers if r in self._zeroed_at]
+        if self._only_zeros_where_values_were(registers, values):
+            self._zeroed_at.update((r, at) for r in registers)
+        elif zeroed and any(values):
+            for register in registers:
+                self._zeroed_at.pop(register, None)
+            _LOGGER.warning("micro_nabto: %s %d to %d answered values again, %.1f s after only zeros; %s",
+                            space.__name__, items[0][1], items[-1][1], at - min(zeroed), self._last_exchange())
+        elif _LOGGER.isEnabledFor(logging.DEBUG):
+            _LOGGER.debug("micro_nabto: %s %d to %d answered; %s",
+                          space.__name__, items[0][1], items[-1][1], self._last_exchange())
+        self._last.update(zip(registers, values))
+
+    def _last_exchange(self) -> str:
+        exchange = self._connection.last_exchange
+        return describe(exchange) if exchange is not None else "no exchange recorded"
+
     async def _read_batch(self, batch: _Batch, result: dict[str, ReadResult]) -> None:
         build, parse = _READS[batch.space]
         items = batch.items
-        answer = await self._connection.request(build(items))
+        registers = [(batch.space, obj, address) for obj, address in items]
+
+        def worth_taking(payload: bytes) -> bool:
+            found = parse(payload)
+            return found is None or not self._only_zeros_where_values_were(registers, found)
+
+        answer = await self._connection.request(build(items), accept=worth_taking)
         values = parse(answer) if answer is not None else None
         if answer is None:
             raw = ReadResult(Outcome.NO_ANSWER, detail="no answer from the device")
         elif values is None:
             raw = ReadResult(Outcome.ERROR, detail="a malformed answer")
         elif len(values) == len(items):
+            values = await self._checked(build, parse, batch.space, items, values)
+            self._note_values(batch.space, items, values)
             self._outcomes[Outcome.OK] += 1
             offset = 0
             for point in batch.points:

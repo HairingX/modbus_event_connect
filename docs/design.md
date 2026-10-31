@@ -736,9 +736,33 @@ CTS 402 — which other devices may not share.
 
 ## 9. Diagnostics
 
-Per device: requests, failures by kind, average latency, backoff state, the consecutive failure
-count. Per point: last quality and when it was last good. This is what a bug report needs —
-without a host address in it.
+Per device, and from the client as `diagnostics()`: requests, failures by kind, average and
+longest latency, backoff state, the consecutive failure count; for micro_nabto also resends,
+acknowledgements, the wait for a later answer in use, how often a request was kept open for one,
+how often that answer was taken, and the longest wait. Per point: last quality and when it was
+last good. This is what a bug report needs — without a host address in it.
+
+micro_nabto logs each read's answer at debug: how old the session is and which of its requests
+this was, the sequence number, how many times the request was sent, whether the device
+acknowledged it first, how long the answer took, and the answer in hex with the header's flags. A
+read of more than one register answered with only zeros, where those registers held values, is
+logged so as a warning and counted (`answers_of_only_zeros`), and so is the answer that brings
+values to those registers again, with how long the zeros lasted: a Nilan gateway was reported
+answering a whole read with zeros now and then, and these two lines are what tell whether that
+follows a resend, a new session or a flag, and how long it lasts. Each comes once a time it
+happens, so a unit without the fault never logs them. A ping's answer carries the email, so only
+answers to reads are logged.
+
+Such an answer is not taken at once:
+- **To a read sent again**, the request is kept open for a later answer, up to
+  `later_answer_wait`: a gateway that got both sendings may answer both, and the zeros need not be
+  the answer that holds the values. A later answer to it with values is taken, and the warning
+  says so and how long it was waited for. The wait is 5 s, the same a request the device has
+  acknowledged is given; a model sets its own in `MicroNabtoOptions`, and whoever opens the
+  connection can override both.
+- **Otherwise**, the registers are read again at once, with a new request, and that answer is
+  taken, values or zeros; the warning says which. No value is held back, and nothing waits for
+  the next poll.
 
 ---
 
@@ -768,6 +792,7 @@ A library that gets these wrong is worse than none.
 | `0x0B`: the gateway's device did not answer | `NO_ANSWER`, counted towards backoff |
 | No answer at all | `NO_ANSWER`; the value goes `STALE`; reachability follows answers, never the socket |
 | One bad address refuses a whole request | the request is halved until the refusal is pinned down: a few absent addresses among many cost few requests, though a request where every address is absent costs about twice as many as reading each alone |
+| A micro_nabto read answered with only zeros where values were | a later answer to a read sent again is taken if it holds values; otherwise the read is sent again at once and its answer taken; logged as warnings |
 | Devices accept different request sizes | `max_registers` / `max_bits` per model |
 | Four address spaces | one access class each; never batched together |
 | Word order and byte order | per point |

@@ -105,7 +105,7 @@ class FakeDevice:
         return WriteResult(outcome)
 
     def diagnostics(self) -> Mapping[str, object]:
-        return {}
+        return {"reads": len(self.reads)}
 
     def read_keys(self) -> set[str]:
         return {key for batch in self.reads for key in batch}
@@ -305,6 +305,12 @@ def test_connect_reads_the_device_once() -> None:
     client.subscribe(COUNTER, Recorder())
     asyncio.run(client.poll())
     assert device.reads == [], "nothing is due right after connect"
+
+
+def test_diagnostics_are_the_devices() -> None:
+    client, device, _ = _connected()
+    asyncio.run(client.poll())
+    assert client.diagnostics() == device.diagnostics() == {"reads": len(device.reads)}
 
 
 def test_a_scan_step_removes_what_the_unit_does_not_have() -> None:

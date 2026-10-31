@@ -76,6 +76,36 @@ async def discover(device_id: str | None = None, *, timeout: float = 2.0, resend
     return list(found.values())
 
 
+LATER_ANSWER_WAIT = 5.0
+"""Seconds a read sent again, answered with what its reader refuses, is kept open for a later
+answer, unless the connection or the model says otherwise."""
+
+
+@dataclass(frozen=True)
+class Exchange:
+    """How one request and its answer went, for a bug report."""
+    sequence: int
+    sends: int
+    """How many times the request was sent: more than once when the device did not acknowledge
+    it in time."""
+    acknowledged: bool
+    """Whether the device said it had the request before it answered."""
+    seconds: float
+    """From the last sending to the answer."""
+    answer: bytes | None
+    """The answer's datagram from its kind on, the session's ids left out; None without one."""
+    at: float = 0.0
+    """Monotonic time the exchange ended."""
+    session_age: float | None = None
+    """Seconds since the session was established; None before the first."""
+    session_request: int = 0
+    """Which request of the session this was, the handshake's ping being the first."""
+    set_aside: bool = False
+    """Whether an answer to the request was set aside for a later answer to it."""
+    waited: float = 0.0
+    """Seconds the request was kept open for a later answer; 0 when it was not."""
+
+
 class MicroNabtoConnection:
     """A session with one device; requests are sent one at a time.
 
@@ -91,6 +121,7 @@ class MicroNabtoConnection:
     def __init__(self, email: str, *, host: str | None = None, device_id: str | None = None,
                  port: int = wire.DEVICE_PORT, timeout: float = 1.0, retries: int = 2,
                  answer_wait: float = 5.0, backoff_for: float = 10.0, session_idle: float = 12.0,
+                 later_answer_wait: float | None = None,
                  discovery_target: tuple[str, int] = wire.BROADCAST, clock: Clock | None = None) -> None:
         """Args:
             email: the account paired with the device; it is never logged.
@@ -98,12 +129,17 @@ class MicroNabtoConnection:
             timeout: seconds to wait for each answer.
             answer_wait: seconds to wait for an answer once the device has said it has the
                 request; it is not sent again meanwhile.
+            later_answer_wait: seconds a request sent again, answered with what its sender
+                refuses, is kept open for a later answer; None leaves it to the model, and to
+                `LATER_ANSWER_WAIT` without one.
         """
         if host is None and device_id is None:
             raise ValueError("a connection needs a host, a device_id, or both")
         if timeout <= 0 or session_idle <= 0 or retries < 0 or backoff_for < 0 or answer_wait < timeout:
             raise ValueError("timeout and session_idle must be positive; retries and backoff_for "
                              "cannot be negative; answer_wait cannot be shorter than timeout")
+        if later_answer_wait is not None and later_answer_wait < 0:
+            raise ValueError(f"later_answer_wait cannot be negative, got {later_answer_wait}")
         self._email = email
         self._device_id = device_id
         self._address: tuple[str, int] | None = (host, port) if host is not None else None
@@ -131,10 +167,40 @@ class MicroNabtoConnection:
         self._handshakes = 0
         self._rediscoveries = 0
         self._latency_total = 0.0
+        self._last_exchange: Exchange | None = None
+        self._session_started: float | None = None
+        self._session_requests = 0
+        self._later_answer_wait_given = later_answer_wait
+        self._later_answer_wait_of_model: float | None = None
+        self._max_latency = 0.0
+        self._later_answer_waits = 0
+        self._later_answers_taken = 0
+        self._longest_later_answer_wait = 0.0
 
     @property
     def connected(self) -> bool:
         return self._server_id is not None
+
+    @property
+    def later_answer_wait(self) -> float:
+        """Seconds a request sent again, answered with what its sender refuses, is kept open for
+        a later answer: as the connection was given it, else as the model says, else
+        `LATER_ANSWER_WAIT`."""
+        if self._later_answer_wait_given is not None:
+            return self._later_answer_wait_given
+        if self._later_answer_wait_of_model is not None:
+            return self._later_answer_wait_of_model
+        return LATER_ANSWER_WAIT
+
+    def use_model_later_answer_wait(self, seconds: float | None) -> None:
+        """Take the model's `later_answer_wait`, which one given to the connection overrides."""
+        self._later_answer_wait_of_model = seconds
+
+    @property
+    def last_exchange(self) -> Exchange | None:
+        """How the last request sent went; None before the first. The answer to a ping carries
+        the email, so an answer is logged only by whoever knows what it answers."""
+        return self._last_exchange
 
     async def open(self) -> Identity | None:
         """Establish a session.
@@ -155,17 +221,24 @@ class MicroNabtoConnection:
             self._transport.close()
             self._transport = None
 
-    async def request(self, command: bytes) -> bytes | None:
-        """Send `command` and return the device's answer, or None if it gave none."""
+    async def request(self, command: bytes, *, accept: Callable[[bytes], bool] | None = None) -> bytes | None:
+        """Send `command` and return the device's answer, or None if it gave none.
+
+        Args:
+            accept: whether an answer is one to take. An answer it refuses, to a request sent more
+                than once, is set aside while a later answer to the same request is waited for, up
+                to `later_answer_wait`; that one is taken if `accept` takes it, and the first
+                otherwise.
+        """
         async with self._lock:
             if not await self._ready():
                 return None
-            answer = await self._data(command)
+            answer = await self._data(command, accept)
             if answer is None:
                 _LOGGER.info("micro_nabto: no answer; establishing the session anew")
                 if not await self._reestablish():
                     return None
-                answer = await self._data(command)
+                answer = await self._data(command, accept)
             return answer
 
     def diagnostics(self) -> Mapping[str, object]:
@@ -179,6 +252,11 @@ class MicroNabtoConnection:
             "handshakes": self._handshakes,
             "rediscoveries": self._rediscoveries,
             "average_latency": self._latency_total / self._answered if self._answered else None,
+            "max_latency": self._max_latency if self._answered else None,
+            "later_answer_wait": self.later_answer_wait,
+            "later_answer_waits": self._later_answer_waits,
+            "later_answers_taken": self._later_answers_taken,
+            "longest_later_answer_wait": self._longest_later_answer_wait,
         }
 
     # ------------------------------------------------------------------------ session
@@ -222,6 +300,8 @@ class MicroNabtoConnection:
         if not connected.accepted:
             raise AuthenticationError("the device refused the handshake; is the email paired with it?")
         self._server_id = connected.server_id
+        self._session_started = self._clock.monotonic()
+        self._session_requests = 0
         answer = await self._data(wire.ping())
         found = wire.identity(answer) if answer is not None else None
         if found is None:
@@ -232,20 +312,24 @@ class MicroNabtoConnection:
 
     # ------------------------------------------------------------------------ exchange
 
-    async def _data(self, command: bytes) -> bytes | None:
+    async def _data(self, command: bytes, accept: Callable[[bytes], bool] | None = None) -> bytes | None:
         server_id = self._server_id
         if server_id is None:
             return None
+        self._session_requests += 1
         answer = await self._exchange(
-            lambda sequence: wire.data_request(self._client_id, server_id, sequence, command))
+            lambda sequence: wire.data_request(self._client_id, server_id, sequence, command), accept)
         return answer.payload if isinstance(answer, wire.DataReply) else None
 
-    async def _exchange(self, packet: Callable[[int], bytes]) -> wire.ConnectReply | wire.DataReply | None:
+    async def _exchange(self, packet: Callable[[int], bytes], accept: Callable[[bytes], bool] | None = None,
+                        ) -> wire.ConnectReply | wire.DataReply | None:
         """Send a packet and wait for its reply, sending it again while none comes."""
         sequence = self._next_sequence()
         datagram = packet(sequence)
         loop = asyncio.get_running_loop()
         self._exchanges += 1
+        acknowledged = False
+        started = self._clock.monotonic()
         for attempt in range(self._retries + 1):
             future: asyncio.Future[wire.ConnectReply | wire.DataReply] = loop.create_future()
             received = asyncio.Event()
@@ -261,7 +345,9 @@ class MicroNabtoConnection:
                     # again would only be acknowledged again.
                     await asyncio.wait({future}, timeout=self._answer_wait - self._timeout)
                     if not future.done():
+                        self._exchanged(sequence, attempt + 1, True, started, None)
                         return None
+                acknowledged = acknowledged or received.is_set()
                 if not future.done():
                     continue
                 answer = future.result()
@@ -272,8 +358,45 @@ class MicroNabtoConnection:
             self._answered += 1
             self._last_answer = self._clock.monotonic()
             self._latency_total += self._last_answer - started
+            self._max_latency = max(self._max_latency, self._last_answer - started)
+            set_aside, waited = False, 0.0
+            if (accept is not None and attempt and isinstance(answer, wire.DataReply)
+                    and not accept(answer.payload)):
+                # A device that got the request twice may answer both sendings, and the answer
+                # that came first need not be the one that holds the values.
+                later = await self._later_answer(sequence)
+                waited = self._clock.monotonic() - self._last_answer
+                self._later_answer_waits += 1
+                self._longest_later_answer_wait = max(self._longest_later_answer_wait, waited)
+                if later is not None and accept(later.payload):
+                    answer, set_aside = later, True
+                    self._later_answers_taken += 1
+            self._exchanged(sequence, attempt + 1, acknowledged, started,
+                            answer.raw if isinstance(answer, wire.DataReply) else None, set_aside, waited)
             return answer
+        self._exchanged(sequence, self._retries + 1, acknowledged, started, None)
         return None
+
+    async def _later_answer(self, sequence: int) -> wire.DataReply | None:
+        """Another answer to the request with `sequence`, if one comes within `later_answer_wait`."""
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[wire.ConnectReply | wire.DataReply] = loop.create_future()
+        self._waiting = (sequence, future, asyncio.Event())
+        try:
+            await asyncio.wait({future}, timeout=self.later_answer_wait)
+            answer = future.result() if future.done() else None
+        finally:
+            self._waiting = None
+            if not future.done():
+                future.cancel()
+        return answer if isinstance(answer, wire.DataReply) else None
+
+    def _exchanged(self, sequence: int, sends: int, acknowledged: bool, started: float,
+                   answer: bytes | None, set_aside: bool = False, waited: float = 0.0) -> None:
+        now = self._clock.monotonic()
+        age = now - self._session_started if self._session_started is not None else None
+        self._last_exchange = Exchange(sequence, sends, acknowledged, now - started, answer,
+                                       now, age, self._session_requests, set_aside, waited)
 
     def _send(self, datagram: bytes) -> None:
         if self._transport is not None and self._address is not None and not self._transport.is_closing():
@@ -296,3 +419,21 @@ class MicroNabtoConnection:
     def _next_sequence(self) -> int:
         self._sequence = self._sequence % _SEQUENCE_MAX + 1
         return self._sequence
+
+
+def describe(exchange: Exchange) -> str:
+    """`exchange` in one line for a log, its answer in hex: only for an answer that cannot carry
+    the email, as a ping's does."""
+    answer = exchange.answer.hex(" ") if exchange.answer is not None else "none"
+    session = (f"request {exchange.session_request} of a session {exchange.session_age:.1f} s old"
+               if exchange.session_age is not None else "no session")
+    return (f"{session}, sequence {exchange.sequence}, sent {exchange.sends} time(s), "
+            f"{'acknowledged' if exchange.acknowledged else 'not acknowledged'} first, "
+            f"answer after {exchange.seconds:.3f} s{_later(exchange)}: {answer}")
+
+
+def _later(exchange: Exchange) -> str:
+    if not exchange.waited and not exchange.set_aside:
+        return ""
+    found = "and took the later one" if exchange.set_aside else "and none came"
+    return f", then kept open {exchange.waited:.3f} s for a later answer {found}"
