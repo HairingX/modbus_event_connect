@@ -617,9 +617,9 @@ The callback receives the old and the new `DataValue`.
 - What the consumer shows subscribes, and updates from the callback, so it changes only when
   its own value does.
 - What to build from `can_read` / `can_write`; unit, limits, step and device from the point.
-- A tolerance before `STALE` is shown as unavailable, so one lost packet does not flap a
-  value. The library exposes the consecutive failure count; the tolerance is the consumer's
-  policy.
+- One lost packet does not flap a value: a `STALE` value is the last good one, read again within
+  seconds, and the device counts as unreachable only after the model's `offline_after`. A
+  consumer that wants one value shown as unavailable sooner has its consecutive failure count.
 - **Whether the device is reachable** is `Status.CONNECTED`, and it is decided by answers, never
   by the socket: a TCP socket stays open for minutes after a cable is pulled. It turns False only
   once nothing has been answered for the model's `offline_after`, counted from the first
