@@ -735,6 +735,14 @@ Per device: requests, failures by kind, average latency, backoff state, the cons
 count. Per point: last quality and when it was last good. This is what a bug report needs —
 without a host address in it.
 
+micro_nabto logs each read's answer at debug: its sequence number, how many times the request was
+sent, whether the device acknowledged it first, how long the answer took, and the answer in hex
+with the header's flags. A read of more than one register answered with only zeros, where those
+registers held values, is logged so as a warning and counted (`answers_of_only_zeros`): a Nilan
+gateway was reported answering a whole read with zeros now and then, and the log line is what
+tells whether that follows a resend or carries a flag. The answers are taken as they come. A
+ping's answer carries the email, so only answers to reads are logged.
+
 ---
 
 ## 10. Testing

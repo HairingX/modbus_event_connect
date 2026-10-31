@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .._device import Identity
 
@@ -43,6 +43,9 @@ class DataReply:
     sequence: int
     payload: bytes
     """The command's answer, without padding or checksum."""
+    raw: bytes = field(default=b"", compare=False)
+    """The whole datagram from its kind on: the header's flags, padding and checksum included,
+    the session's ids left out."""
 
 
 # ================================================================================ requests
@@ -143,7 +146,7 @@ def reply(datagram: bytes, client_id: bytes) -> ConnectReply | DataReply | Recei
         padding = padded[-1]
         if not 0 < padding <= len(padded) or padded[-padding:] != bytes([padding]) * padding:
             return None
-        return DataReply(sequence, padded[:-padding])
+        return DataReply(sequence, padded[:-padding], datagram[8:])
     return None
 
 

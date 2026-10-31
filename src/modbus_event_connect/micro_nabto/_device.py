@@ -1,6 +1,7 @@
 """One micro_nabto device implementing `Device`: points in, `ReadResult` / `WriteResult` out."""
 from __future__ import annotations
 
+import logging
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -8,10 +9,12 @@ from typing import Any
 
 from . import _wire as wire
 from ._access import DatapointRegister, SetpointRegister
-from ._connection import MicroNabtoConnection
+from ._connection import MicroNabtoConnection, describe
 from .._data_type import DataTypeKind
 from .._device import EncodedWrite, Identity, Outcome, ProtocolOptions, ReadResult, WriteResult
 from .._point import Access, Point
+
+_LOGGER = logging.getLogger(__name__)
 
 MAX_REGISTERS_PER_READ = 64
 """Registers per read request; a CTS 402 answered 108, so this leaves room."""
@@ -86,6 +89,8 @@ class MicroNabtoDevice:
         self._options: MicroNabtoOptions | None = None
         self._outcomes: Counter[Outcome] = Counter()
         self._isolated = 0
+        self._only_zeros = 0
+        self._last: dict[tuple[type[Access], int, int], int] = {}
 
     @classmethod
     def udp(cls, email: str, *, host: str | None = None, device_id: str | None = None,
@@ -163,6 +168,7 @@ class MicroNabtoDevice:
         return {
             "outcomes": {outcome.name: self._outcomes[outcome] for outcome in Outcome},
             "isolated_reads": self._isolated,
+            "answers_of_only_zeros": self._only_zeros,
             **self._connection.diagnostics(),
         }
 
@@ -181,6 +187,23 @@ class MicroNabtoDevice:
         batches.append(_Batch(space, obj, tuple(current)))
         return batches
 
+    def _note_values(self, space: type[Access], items: Sequence[tuple[int, int]], values: Sequence[int]) -> None:
+        """Remember `values`, and log the request when they are all 0 where the registers held
+        something else: a Nilan gateway was reported answering a whole read so now and then."""
+        registers = [(space, obj, address) for obj, address in items]
+        if len(values) > 1 and not any(values) and any(self._last.get(r, 0) for r in registers):
+            self._only_zeros += 1
+            _LOGGER.warning("micro_nabto: %s %d to %d answered only zeros, where they held values; %s",
+                            space.__name__, items[0][1], items[-1][1], self._last_exchange())
+        elif _LOGGER.isEnabledFor(logging.DEBUG):
+            _LOGGER.debug("micro_nabto: %s %d to %d answered; %s",
+                          space.__name__, items[0][1], items[-1][1], self._last_exchange())
+        self._last.update(zip(registers, values))
+
+    def _last_exchange(self) -> str:
+        exchange = self._connection.last_exchange
+        return describe(exchange) if exchange is not None else "no exchange recorded"
+
     async def _read_batch(self, batch: _Batch, result: dict[str, ReadResult]) -> None:
         build, parse = _READS[batch.space]
         items = batch.items
@@ -191,6 +214,7 @@ class MicroNabtoDevice:
         elif values is None:
             raw = ReadResult(Outcome.ERROR, detail="a malformed answer")
         elif len(values) == len(items):
+            self._note_values(batch.space, items, values)
             self._outcomes[Outcome.OK] += 1
             offset = 0
             for point in batch.points:
