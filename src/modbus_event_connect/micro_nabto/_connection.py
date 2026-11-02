@@ -346,8 +346,6 @@ class MicroNabtoConnection:
                 return True
             self._next_reason = f"after {idle:.1f} s unused"
             return await self._reestablish()
-        if not self._breaker.allows(self._clock.monotonic()):
-            return False
         return await self._reestablish()
 
     async def _reestablish(self) -> bool:
@@ -358,18 +356,18 @@ class MicroNabtoConnection:
             return False
 
     async def _establish(self) -> Identity | None:
-        told = False
-        try:
+        """Establish a session as the handshake's breaker allows; None if it holds the handshake
+        back, or the device did not answer."""
+        attempt = self._breaker.attempt(self._clock.monotonic())
+        if attempt is None:
+            return None
+        with attempt:
             identity = await self._try_establish()
             if identity is None:
-                self._breaker.unanswered(self._clock.monotonic())
+                attempt.unanswered(self._clock.monotonic())
             else:
-                self._breaker.answered()
-            told = True
-            return identity
-        finally:
-            if not told:
-                self._breaker.released()
+                attempt.answered()
+        return identity
 
     async def _try_establish(self) -> Identity | None:
         self._answer_before = self._last_answer

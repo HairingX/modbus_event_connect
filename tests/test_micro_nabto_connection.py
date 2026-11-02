@@ -362,3 +362,19 @@ async def test_nothing_logged_or_diagnosed_names_the_host_port_device_or_email()
     assert records, "the scenario logs something, so the check below is not vacuous"
     for secret in (host, str(port), device.device_id, EMAIL, "stranger@example.invalid"):
         assert not [line for line in said if secret in line], secret
+
+
+async def test_a_cancelled_handshake_probe_lets_the_next_one_through() -> None:
+    clock = FakeClock()
+    async with _device(clock=clock) as device:
+        device.silent = True
+        connection = _connection(device, clock=clock)
+        assert await connection.open() is None
+        clock.advance(10)
+        probe = asyncio.ensure_future(_read(connection, 1))
+        await asyncio.sleep(0.01)
+        probe.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await probe
+        device.silent = False
+        assert await _read(connection, 1) == [1001]
