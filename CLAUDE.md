@@ -9,6 +9,10 @@ quality. How and why it is built as it is: `docs/design.md`. The libraries for W
 ## This library
 
 - What a device has belongs to its model, not here: the library knows no device.
+- What is protocol-free - keys, values, points by their behaviour, the scheduler, subscriptions,
+  reachability, statuses and the parts failures are ridden out with - is `event_connect`'s,
+  re-exported here under the same names; a fix to it goes there. This package requires a range
+  of it, never one version.
 - Its public API is what `modbus_event_connect`, `.modbus`, `.micro_nabto` and `.testing`
   export; the modules inside them are internal.
 - Test support - simulators, fake clocks, checks that sample behaviour - lives in `testing/`,
@@ -74,11 +78,6 @@ obvious from the name - one or two lines, no narrative.
   unchecked. Every run warns while it lasts. Each pull request raises the coverage and takes
   files off the list, never the reverse, until the transition is removed.
 - Every problem found gets a test that fails without the fix.
-- What is protocol-free - keys, values, points by their behaviour, the scheduler, subscriptions,
-  reachability - is `event_connect`'s, re-exported here under the same names; a fix to it goes
-  there. This package requires a range of it, never one version.
-- Test support - simulators, fake clocks, checks that sample behaviour - lives in `testing/`,
-  never in the modules that run in production.
 - The test tools are pinned with `==` in `requirements-test.txt`, pyright, pytest and
   pytest-cov among them: `pip install -e . -r requirements-test.txt`.
 - No real IP addresses, hostnames, serial numbers, email addresses or credentials in tracked
