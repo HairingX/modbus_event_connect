@@ -9,7 +9,8 @@ from typing import Any, TypeVar
 import pytest
 
 from modbus_event_connect import _client as client_module
-from modbus_event_connect._client import Client, Status
+from modbus_event_connect import Status
+from modbus_event_connect._client import Client
 from modbus_event_connect._data_type import DataType
 from modbus_event_connect._device import (
     EncodedWrite,
@@ -39,7 +40,7 @@ from modbus_event_connect._point import (
     WriteKind,
 )
 from modbus_event_connect._value import DataValue, Quality
-from modbus_event_connect._writes import Write
+from modbus_event_connect import Write
 from modbus_event_connect.modbus._access import (
     Coil,
     HoldingRegister,
@@ -718,6 +719,8 @@ def test_after_an_outage_everything_wanted_is_read_once_again() -> None:
     _silence(device)
     clock.advance(60)
     asyncio.run(client.poll())
+    clock.advance(30)
+    asyncio.run(client.poll())
     assert client.status(Status.CONNECTED).value is False
 
     for key, registers in REGISTERS.items():
@@ -1175,22 +1178,23 @@ def _silence(device: FakeDevice, outcome: Outcome = Outcome.NO_ANSWER) -> None:
 class LogRecords(logging.Handler):
     """Keeps the client's log records for the duration of a `with` block."""
 
-    def __init__(self) -> None:
+    def __init__(self, name: str = client_module.__name__) -> None:
         super().__init__(level=logging.INFO)
         self.messages: list[str] = []
+        self._name = name
 
     def emit(self, record: logging.LogRecord) -> None:
         self.messages.append(record.getMessage())
 
     def __enter__(self) -> "LogRecords":
-        logger = logging.getLogger(client_module.__name__)
+        logger = logging.getLogger(self._name)
         self._previous = logger.level
         logger.setLevel(logging.INFO)
         logger.addHandler(self)
         return self
 
     def __exit__(self, *_: object) -> None:
-        logger = logging.getLogger(client_module.__name__)
+        logger = logging.getLogger(self._name)
         logger.removeHandler(self)
         logger.setLevel(self._previous)
 
@@ -1203,13 +1207,56 @@ def test_reachability_follows_the_answers_not_the_socket() -> None:
     assert device.connected is True
     clock.advance(60)
     asyncio.run(client.poll())
+    clock.advance(30)
+    asyncio.run(client.poll())
     assert client.status(Status.CONNECTED).value is False
+
+
+def test_one_unanswered_read_does_not_make_the_device_unreachable() -> None:
+    client, device, clock = _connected()
+    client.subscribe(TEMP, Recorder())
+    _silence(device)
+    clock.advance(60)
+    asyncio.run(client.poll())
+    assert client.status(Status.CONNECTED).value is True
+    assert client.silent and client.silent_for == 0.0
+    clock.advance(29)
+    assert client.silent_for == 29.0
+
+
+def test_a_failed_read_waits_for_the_next_regular_read_while_the_device_is_silent() -> None:
+    client, device, clock = _connected()
+    client.subscribe(TEMP, Recorder())
+    _silence(device)
+    clock.advance(60)
+    asyncio.run(client.poll())
+    device.reads.clear()
+    clock.advance(1)
+    asyncio.run(client.poll())
+    assert device.read_keys() == set()
+
+
+def test_what_failed_while_the_device_was_silent_is_read_as_soon_as_it_answers_again() -> None:
+    client, device, clock = _connected()
+    client.subscribe(TEMP, Recorder())
+    _silence(device)
+    clock.advance(60)
+    asyncio.run(client.poll())
+    for key, registers in REGISTERS.items():
+        device.answer(key, *registers)
+    clock.advance(10)
+    device.reads.clear()
+    asyncio.run(client.poll())
+    assert device.read_keys() == {"alarm_summary"}
+    assert client.seconds_until_next_poll() == 0.0
+    asyncio.run(client.poll())
+    assert "temp" in device.read_keys() and client.consecutive_failures(TEMP) == 0
 
 
 def test_an_outage_and_its_recovery_are_logged_once_each() -> None:
     client, device, clock = _connected()
     client.subscribe(TEMP, Recorder())
-    with LogRecords() as records:
+    with LogRecords("event_connect") as records:
         _silence(device)
         for _ in range(3):
             clock.advance(60)
@@ -1218,17 +1265,21 @@ def test_an_outage_and_its_recovery_are_logged_once_each() -> None:
         for _ in range(3):
             clock.advance(60)
             asyncio.run(client.poll())
-    assert [m for m in records.messages if "answer" in m] == ["TEST stopped answering", "TEST answers again"]
+    assert [m for m in records.messages if "answer" in m] == ["TEST stopped answering 60 s ago",
+                                                                  "TEST answers again, after 180 s"]
 
 
-def test_a_write_left_unanswered_marks_the_device_unreachable_and_an_answered_one_reachable() -> None:
-    client, device, _ = _connected()
+def test_writes_left_unanswered_for_the_grace_mark_the_device_unreachable_and_an_answered_one_reachable() -> None:
+    client, device, clock = _connected()
     device.write_outcomes["mode"] = Outcome.NO_ANSWER
+    asyncio.run(client.write(MODE, 2))
+    assert client.status(Status.CONNECTED).value is True and client.silent
+    clock.advance(30)
     asyncio.run(client.write(MODE, 2))
     assert client.status(Status.CONNECTED).value is False
     device.write_outcomes["mode"] = Outcome.OK
     asyncio.run(client.write(MODE, 2))
-    assert client.status(Status.CONNECTED).value is True
+    assert client.status(Status.CONNECTED).value is True and not client.silent
 
 
 @pytest.mark.parametrize("outcome", [Outcome.NO_ANSWER, Outcome.BUSY])

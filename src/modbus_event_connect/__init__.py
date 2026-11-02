@@ -1,7 +1,7 @@
 """Declarative device models over Modbus and micro_nabto, read and written through one client."""
 from importlib.metadata import version as _installed_version
 
-from ._client import Client, PointsCallback, Status, StatusCallback
+from ._client import Client, PointsCallback
 from ._clock import Clock
 from ._data_type import ByteOrder, DataType, DataTypeKind, WordOrder
 from ._device import Identity
@@ -31,31 +31,52 @@ from ._point import (
     Transforms,
     WriteKind,
 )
+from ._resilience import (
+    NO_RETRY,
+    AnyOf,
+    Attempts,
+    CircuitBreaker,
+    Exponential,
+    Fixed,
+    Jitter,
+    Retry,
+    Steps,
+    Stop,
+    Wait,
+    Within,
+)
 from ._unit import Unit
 from ._value import DataValue, Quality
-from ._writes import Write
+from event_connect import Status, StatusCallback, Write
 
 __version__ = _installed_version("modbus_event_connect")
 __all__ = [
+    "AnyOf",
+    "Attempts",
     "AuthenticationError",
     "ByteOrder",
     "CannotConnectError",
     "Change",
+    "CircuitBreaker",
     "Client",
     "ClientError",
     "Clock",
     "DataType",
     "DataTypeKind",
     "DataValue",
+    "Exponential",
+    "Fixed",
     "Identity",
     "InstanceScanStep",
     "InvalidValueError",
+    "Jitter",
     "Key",
     "Labels",
     "Limits",
     "Model",
     "ModelError",
     "ModelSelector",
+    "NO_RETRY",
     "NotConnectedError",
     "Point",
     "PointsCallback",
@@ -65,17 +86,22 @@ __all__ = [
     "ReadOnlyError",
     "Refresh",
     "RepeatedSection",
+    "Retry",
     "Scan",
     "ScanStep",
     "Section",
     "Selector",
     "Status",
     "StatusCallback",
+    "Steps",
+    "Stop",
     "Transform",
     "Transforms",
     "Unit",
     "UnsupportedDeviceError",
     "ValueCallback",
+    "Wait",
+    "Within",
     "WordOrder",
     "Write",
     "WriteKind",

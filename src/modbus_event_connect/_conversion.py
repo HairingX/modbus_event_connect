@@ -247,7 +247,7 @@ def _bcd_pack(value: int, nibble_count: int) -> int:
 def _as_key_type(point: Point[Any], value: Value, quality: Quality) -> tuple[Value, Quality]:
     """A decoded number as the key's type: a float, or the state an integer names."""
     value_type: type[object] = point.key.type
-    if value is None or isinstance(value, (bool, str, date)):
+    if value is None or isinstance(value, (bool, str, date, time)):
         return (value, quality)
     if is_state_type(value_type):
         if point.codes is not None:

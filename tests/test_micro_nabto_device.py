@@ -5,7 +5,8 @@ from typing import Any
 
 import pytest
 
-from modbus_event_connect._client import Client, Status
+from modbus_event_connect import Status
+from modbus_event_connect._client import Client
 from modbus_event_connect._data_type import DataType
 from modbus_event_connect._device import Device, EncodedWrite, Identity, Outcome
 from modbus_event_connect._errors import (
@@ -446,6 +447,8 @@ async def test_a_silent_device_makes_the_client_unavailable_until_it_answers_aga
         client.subscribe(Key("temp_outside", float), _nothing)
         simulated.silent = True
         clock.advance(60)
+        await client.poll()
+        clock.advance(30)
         await client.poll()
         stale = client.value(Key("temp_outside", float))
         assert client.status(Status.CONNECTED).value is False and stale is not None and stale.quality is Quality.STALE

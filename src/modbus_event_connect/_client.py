@@ -6,9 +6,9 @@ import logging
 import math
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
-from enum import Enum, auto
 from typing import Any
+
+from event_connect import DEFAULT_TIMING, Reachability, Status, StatusBoard, StatusCallback, Write, changed, stale
 
 from ._clock import Clock, SystemClock
 from ._conversion import decode, encode
@@ -24,23 +24,12 @@ from ._errors import (
 from ._events import Subscriptions, ValueCallback, tell
 from ._key import Key, is_key
 from ._model import InstanceScanStep, Model, ModelSelector, RepeatedSection, ResolvedModel, resolve
-from ._point import Change, Labels, Point, PollRate, Selector, WriteKind
+from ._point import Labels, Point, PollRate, Selector, WriteKind
 from ._scheduler import Scheduler
 from ._value import DataValue, Quality, Value
-from ._writes import Write, WriteQueue
+from ._writes import WriteQueue
 
 _LOGGER = logging.getLogger(__name__)
-
-class Status(Enum):
-    """What the client itself knows about its device, apart from the device's points."""
-    CONNECTED = auto()
-    """True while the device answers."""
-    WRITE_PENDING = auto()
-    """True from the first queued write until the last one has finished."""
-
-
-StatusCallback = Callable[[Status, DataValue[bool] | None, DataValue[bool]], None]
-"""Called with the status, its previous value (None the first time) and the new value."""
 
 PointsCallback = Callable[[frozenset[Key[Any]], frozenset[Key[Any]]], None]
 """Called with the keys the unit has gained and the keys it has lost, once its points changed."""
@@ -125,16 +114,14 @@ class Client:
         self._checks_requested: float | None = None
         """When `refresh(PollRate.SCAN)` asked for the checks, which runs them without the schedule."""
         self._consecutive_failures: dict[str, int] = {}
-        self._reported_offline = False
-        self._status: dict[Status, DataValue[bool]] = {
-            status: DataValue(False, Quality.GOOD, self._clock.now()) for status in Status}
-        self._status_callbacks: dict[Status, list[StatusCallback]] = {status: [] for status in Status}
+        self._reachability = Reachability(self._clock, DEFAULT_TIMING.offline_after)
+        self._statuses = StatusBoard(self._clock)
 
         self._poll_lock = asyncio.Lock()
         self._writes = WriteQueue(device, clock=self._clock, sleep=sleep, retry_for=write_retry_for,
                                   retry_pause=write_retry_pause, answered=self._update_reachability,
                                   written=self._taken,
-                                  pending=lambda pending: self._set_status(Status.WRITE_PENDING, pending))
+                                  pending=lambda pending: self._statuses.set(Status.WRITE_PENDING, pending))
 
     # ================================================================================= scan
 
@@ -161,8 +148,8 @@ class Client:
         """Cancel pending pulses and let go of the device."""
         self._writes.cancel_pulses()
         await self._device.disconnect()
-        self._reported_offline = False
-        self._set_status(Status.CONNECTED, False)
+        self._reachability = Reachability(self._clock, self._reachability_grace(), name=self._reachability.name)
+        self._statuses.set(Status.CONNECTED, False)
 
     async def _scan(self, handshake: Identity) -> None:
         """
@@ -324,6 +311,7 @@ class Client:
                               "reported", key, key.type.__name__, model.name, resolved.points[key].key.type.__name__)
         for key in resolved.points:
             self._update_polling(key)
+        self._reachability = Reachability(self._clock, model.offline_after, name=model.name)
         self._update_reachability(True)
 
     # ========================================================================= the picture
@@ -389,11 +377,22 @@ class Client:
 
     def status(self, status: Status) -> DataValue[bool]:
         """The current value of `status`: True or False, from the moment the client exists."""
-        return self._status[status]
+        return self._statuses.value(status)
 
     def consecutive_failures(self, key: str) -> int:
         """Consecutive failed reads of `key`."""
         return self._consecutive_failures.get(key, 0)
+
+    @property
+    def silent(self) -> bool:
+        """Whether the device left the latest request unanswered."""
+        return self._reachability.silent
+
+    @property
+    def silent_for(self) -> float:
+        """Seconds since the device first left a request unanswered since its last answer; 0 while
+        it answers."""
+        return self._reachability.silent_for
 
     def diagnostics(self) -> Mapping[str, object]:
         """The device's counters for a bug report: requests, failures by outcome, latency. No addresses."""
@@ -429,14 +428,7 @@ class Client:
 
         Returns the unsubscriber.
         """
-        callbacks = self._status_callbacks[status]
-        callbacks.append(callback)
-        _tell_status(callback, status, None, self._status[status])
-
-        def unsubscribe() -> None:
-            if callback in callbacks:
-                callbacks.remove(callback)
-        return unsubscribe
+        return self._statuses.subscribe(status, callback)
 
     def subscribe_points(self, callback: PointsCallback) -> Callable[[], None]:
         """Call `callback` whenever the points this unit has change, with the keys gained and lost.
@@ -658,9 +650,7 @@ class Client:
                     self._checks_requested = now if self._checks_requested is None else min(self._checks_requested, now)
             success = answer.outcome is Outcome.OK and data.quality is not Quality.STALE
             self._consecutive_failures[point.key] = 0 if success else self.consecutive_failures(point.key) + 1
-            scheduler.record(point.key, data, success=success)
-            if answer.retry_after is not None:
-                scheduler.refresh([point.key], after=answer.retry_after, force=True)
+            scheduler.record(point.key, data, success=success, retry_after=answer.retry_after)
             self._store(point, data, previous)
 
     def _data_value(self, point: Point[Any], answer: ReadResult, previous: DataValue[Any] | None) -> DataValue[Any]:
@@ -670,39 +660,36 @@ class Client:
                 value, quality = decode(point, answer.registers)
             except InvalidValueError as err:
                 _LOGGER.error("'%s' answered registers that do not fit it: %s", point.key, err)
-                return _stale(previous, now)
+                return stale(previous, now)
             return DataValue(value, quality, now, raw=tuple(answer.registers))
         if answer.outcome in (Outcome.MISSING, Outcome.UNSUPPORTED):
             return DataValue(None, Quality.MISSING, now)
         if answer.outcome is Outcome.OFFLINE:
             return DataValue(None, Quality.OFFLINE, now)
-        return _stale(previous, now)
+        return stale(previous, now)
 
     def _store(self, point: Point[Any], data: DataValue[Any], previous: DataValue[Any] | None) -> None:
         self._values[point.key] = data
         self._subscriptions.report(point, data)
         trigger = point.on_change
-        if trigger is not None and previous is not None and _changed(previous, data, trigger.when):
+        if trigger is not None and previous is not None and changed(previous, data, trigger.when):
             keys = [p.key for p in _select(self._require_model(), trigger.targets)
                     if p.readable and self._is_available(p.key)]
             if keys:
                 self._require_scheduler().refresh(keys, after=trigger.after or 0.0, until_stable=trigger.until_stable)
 
     def _update_reachability(self, answered: bool) -> None:
-        """Update reachability from whether the device answered, logging each change once."""
-        if answered == self._status[Status.CONNECTED].value:
-            return
-        self._set_status(Status.CONNECTED, answered)
-        name = self._resolved.model.name if self._resolved is not None else "The device"
-        if not answered:
-            self._reported_offline = True
-            _LOGGER.info("%s stopped answering", name)
-            return
-        if self._scheduler is not None:
-            self._scheduler.reset()
-        if self._reported_offline:
-            self._reported_offline = False
-            _LOGGER.info("%s answers again", name)
+        """Update reachability from whether the device answered.
+
+        The device counts as not answering only once it has been silent for the model's
+        `offline_after`, so one lost answer does not make it unavailable.
+        """
+        reachable = (self._reachability.answered(self._scheduler) if answered
+                     else self._reachability.unanswered())
+        self._statuses.set(Status.CONNECTED, reachable)
+
+    def _reachability_grace(self) -> float:
+        return self._resolved.model.offline_after if self._resolved is not None else DEFAULT_TIMING.offline_after
 
     # ============================================================================= writing
 
@@ -815,15 +802,6 @@ class Client:
         if point.readable:
             self._scheduler.set_polled(key, self._should_poll(point) and self._is_available(key))
 
-    def _set_status(self, status: Status, value: bool) -> None:
-        current = self._status[status]
-        if current.value == value:
-            return
-        data = DataValue(value, Quality.GOOD, self._clock.now())
-        self._status[status] = data
-        for callback in list(self._status_callbacks[status]):
-            _tell_status(callback, status, current, data)
-
 
 class _ScanContext:
     """What a scan step may do: read without side effects, and record availability."""
@@ -891,30 +869,3 @@ def _union(marks: Iterable[Mapping[str, str]]) -> dict[str, str]:
         for key, reason in marked.items():
             found.setdefault(key, reason)
     return found
-
-
-def _stale(previous: DataValue[Any] | None, now: datetime) -> DataValue[Any]:
-    """The last good value, marked STALE and keeping the time it was good."""
-    if previous is not None and previous.quality in (Quality.GOOD, Quality.STALE):
-        return DataValue(previous.value, Quality.STALE, previous.timestamp)
-    return DataValue(None, Quality.STALE, now)
-
-
-def _changed(old: DataValue[Any], new: DataValue[Any], when: Change) -> bool:
-    """Whether a change from `old` to `new` matches `when`. Only good values compare."""
-    if not (old.is_good and new.is_good) or old.value == new.value:
-        return False
-    if when is Change.ANY:
-        return True
-    before, after = old.value, new.value
-    if not isinstance(before, (int, float)) or not isinstance(after, (int, float)):
-        return False
-    return after > before if when is Change.RISING else after < before
-
-
-def _tell_status(callback: StatusCallback, status: Status, old: DataValue[Any] | None, new: DataValue[Any]) -> None:
-    """Call one status subscriber; its error is logged and kept from the others."""
-    try:
-        callback(status, old, new)
-    except Exception:
-        _LOGGER.exception("a subscriber to %s raised", status)

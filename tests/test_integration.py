@@ -9,7 +9,8 @@ from typing import Any, TypeVar
 
 import pytest
 
-from modbus_event_connect._client import Client, Status
+from modbus_event_connect import Status
+from modbus_event_connect._client import Client
 from modbus_event_connect._data_type import DataType
 from modbus_event_connect._errors import CannotConnectError, InvalidValueError, ReadOnlyError
 from modbus_event_connect._key import Key
@@ -477,6 +478,9 @@ def test_status_follows_the_connection() -> None:
     gateway.link_down = True
     clock.advance(60)
     asyncio.run(client.poll())
+    assert seen == [False, True]
+    clock.advance(30)
+    asyncio.run(client.poll())
     assert seen == [False, True, False]
 
 
@@ -514,3 +518,26 @@ def test_writes_land_in_order_even_when_the_device_is_busy() -> None:
         await asyncio.gather(*(client.write(NAME, text) for text in ("A", "B", "C", "D")))
     within(5, presses())
     assert gateway.units[1].holding_registers[19] == 0x4400, "the device holds an earlier value than the last one asked for"
+
+
+def test_after_an_outage_of_15_s_a_value_read_every_10_s_is_back_20_s_after_it_began() -> None:
+    """A device's own backoff decides when it is asked again; nothing on top of it may delay that."""
+    gateway = SimulatedModbusGateway({1: _unit()})
+    clock = FakeClock()
+    device = ModbusDevice(gateway, unit_id=1, clock=clock, sleep=_no_wait)
+    client = Client(device, MODEL, clock=clock, sleep=_no_wait)
+    asyncio.run(client.connect())
+    client.subscribe(TEMP, _nothing)
+    client.set_poll_interval(TEMP, 10.0)
+    gateway.link_down = True
+    good_again: int | None = None
+    for second in range(1, 41):
+        clock.advance(1)
+        if second == 15:
+            gateway.link_down = False
+        asyncio.run(client.poll())
+        value = client.value(TEMP)
+        if second >= 15 and good_again is None and value is not None and value.quality is Quality.GOOD \
+                and value.timestamp == clock.now():
+            good_again = second
+    assert good_again == 20

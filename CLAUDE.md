@@ -9,6 +9,10 @@ quality. How and why it is built as it is: `docs/design.md`. The libraries for W
 ## This library
 
 - What a device has belongs to its model, not here: the library knows no device.
+- What is protocol-free - keys, values, points by their behaviour, the scheduler, subscriptions,
+  reachability, statuses and the parts failures are ridden out with - is `event_connect`'s,
+  re-exported here under the same names; a fix to it goes there. This package requires a range
+  of it, never one version.
 - Its public API is what `modbus_event_connect`, `.modbus`, `.micro_nabto` and `.testing`
   export; the modules inside them are internal.
 - Test support - simulators, fake clocks, checks that sample behaviour - lives in `testing/`,
