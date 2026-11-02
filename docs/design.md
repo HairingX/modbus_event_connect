@@ -489,8 +489,9 @@ The library still owns no timer. It owns a **plan**; the host owns the **clock**
 `poll()` from its own tick. One call reads everything that is due, whichever poll rate it
 came from, so a fast point and a slow neighbour at the next address share one request.
 
-`poll()` does not overlap itself: a call arriving while one is running returns once the
-running one finishes, instead of queueing a second pass.
+`poll()` does not overlap itself: a call arriving while one is running waits for it to finish,
+then makes a pass of its own only if something is still due, such as what a `refresh()` or a
+write's read-back asked for meanwhile. Calls that overlap with nothing new to read make one pass.
 
 Order within a pass: points due because of a write or a trigger first, then the most overdue.
 
@@ -737,32 +738,56 @@ CTS 402 — which other devices may not share.
 ## 9. Diagnostics
 
 Per device, and from the client as `diagnostics()`: requests, failures by kind, average and
-longest latency, backoff state, the consecutive failure count; for micro_nabto also resends,
-acknowledgements, the wait for a later answer in use, how often a request was kept open for one,
-how often that answer was taken, and the longest wait. Per point: last quality and when it was
-last good. This is what a bug report needs — without a host address in it.
+longest latency, backoff state, the consecutive failure count. For micro_nabto also: resends,
+acknowledgements, the wait for a later answer in use and how it went; how often the device went
+silent and the longest silence; handshakes it refused, by status; and of answers of only zeros,
+the time allowed, how many readings again were sent, how each episode ended (values at once,
+values after waiting, values in halves, zeros taken), how many are open, the longest until
+values, the largest request answered with values and the smallest answered with zeros. Per point:
+last quality and when it was last good. This is what a bug report needs — without a host address
+in it.
 
-micro_nabto logs each read's answer at debug: how old the session is and which of its requests
-this was, the sequence number, how many times the request was sent, whether the device
-acknowledged it first, how long the answer took, and the answer in hex with the header's flags. A
-read of more than one register answered with only zeros, where those registers held values, is
-logged so as a warning and counted (`answers_of_only_zeros`), and so is the answer that brings
-values to those registers again, with how long the zeros lasted: a Nilan gateway was reported
-answering a whole read with zeros now and then, and these two lines are what tell whether that
-follows a resend, a new session or a flag, and how long it lasts. Each comes once a time it
-happens, so a unit without the fault never logs them. A ping's answer carries the email, so only
-answers to reads are logged.
+micro_nabto logs each read's answer at debug: how old the session is, why it was established and
+how long after the answer before it, which of its requests this was, the sequence number, how many
+times the request was sent, whether the device acknowledged it first, how long the answer took,
+and the answer in hex with the header's flags. A ping's answer carries the email, so only answers
+to reads are logged.
 
-Such an answer is not taken at once:
+Whatever explains an outcome is logged as a warning, once a time it happens, so that Home
+Assistant's log tells it without debug and a unit without the fault never logs it:
+- **A request left unanswered**, with the session it was in and how long after the last answer;
+  then nothing more until the device answers again, which is logged with how long it was silent
+  and how many requests went unanswered.
+- **A handshake refused** for anything but the email, with uNabto's status: 0x8009 is a device
+  with no session free, as one is while old sessions have yet to time out. It is tried again
+  after `backoff_for`. Only 0x8004 is a refused email, `AuthenticationError`.
+- **An answer of only zeros** to a read of more than one register, where those registers held
+  values: the registers by count and address, the points, the requests of the read it belongs
+  to, the five requests before it with what each answered, the library's version, and the
+  exchange. Then the outcome, below.
+
+The cause of such zeros is not known for sure. A Nilan CTS 602's gateway answered the first reads
+of a new session with zeros, at once and again 18 ms later, and with values 10 s later; it answers
+within milliseconds, so from what it holds, not from the controller, and the zeros are taken to
+mean it holds nothing yet. Too many registers in one request, or one address, would give zeros
+too; the warnings carry what tells them apart. The answer is not taken at once:
 - **To a read sent again**, the request is kept open for a later answer, up to
   `later_answer_wait`: a gateway that got both sendings may answer both, and the zeros need not be
   the answer that holds the values. A later answer to it with values is taken, and the warning
-  says so and how long it was waited for. The wait is 5 s, the same a request the device has
-  acknowledged is given; a model sets its own in `MicroNabtoOptions`, and whoever opens the
-  connection can override both.
-- **Otherwise**, the registers are read again at once, with a new request, and that answer is
-  taken, values or zeros; the warning says which. No value is held back, and nothing waits for
-  the next poll.
+  says so and how long it was waited for. The wait is 5 s; a model sets its own in
+  `MicroNabtoOptions`, and whoever opens the connection can override both.
+- **Otherwise**, the registers are read again at once, which a single bad answer does not
+  survive. If they are zeros again, the points answer `BUSY` with `retry_after`: the client keeps
+  their last values, as `STALE`, and reads them again half a second after the zeros, then once a
+  second. Nothing waits: other points, writes and refreshes go on, and any reading of those
+  registers in between counts, without moving the time. The first values end it, and the warning
+  says how long after the zeros they came and what each reading before them answered, so the
+  device's time is known to within a second.
+- **At `reread_zeros_for`** after the zeros, 7.5 s, short of the 10 s between two fast polls, the
+  registers are read in two halves. Values from the halves are taken, and the warning says the
+  request was too many registers for the device; a model then sets `max_registers`, which holds
+  however many points it gains. Zeros from the halves are taken as what the unit reads. A model
+  sets the time in `MicroNabtoOptions`, and whoever creates the device can override both.
 
 ---
 
@@ -792,7 +817,7 @@ A library that gets these wrong is worse than none.
 | `0x0B`: the gateway's device did not answer | `NO_ANSWER`, counted towards backoff |
 | No answer at all | `NO_ANSWER`; the value goes `STALE`; reachability follows answers, never the socket |
 | One bad address refuses a whole request | the request is halved until the refusal is pinned down: a few absent addresses among many cost few requests, though a request where every address is absent costs about twice as many as reading each alone |
-| A micro_nabto read answered with only zeros where values were | a later answer to a read sent again is taken if it holds values; otherwise the read is sent again at once and its answer taken; logged as warnings |
+| A micro_nabto read answered with only zeros where values were | a later answer to a read sent again is taken if it holds values; otherwise read again at once, then the last values kept as STALE and the registers read again every second, without holding anything up, until values come or, at `reread_zeros_for`, two halves are read and their answer taken; logged as warnings |
 | Devices accept different request sizes | `max_registers` / `max_bits` per model |
 | Four address spaces | one access class each; never batched together |
 | Word order and byte order | per point |

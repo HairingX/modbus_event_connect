@@ -596,6 +596,35 @@ def test_overlapping_refresh_calls_do_one_pass() -> None:
     assert len(device.reads) == 1
 
 
+def test_a_read_asking_to_be_read_again_soon_is_read_then() -> None:
+    client, device, clock = _connected()
+    client.subscribe(TEMP, Recorder())
+    device.answers["temp"] = ReadResult(Outcome.BUSY, retry_after=0.5)
+    clock.advance(60)
+    asyncio.run(client.poll())
+    assert client.seconds_until_next_poll() == 0.5
+
+
+def test_a_negative_retry_after_is_refused() -> None:
+    with pytest.raises(ValueError):
+        ReadResult(Outcome.BUSY, retry_after=-1.0)
+
+
+def test_a_refresh_during_a_pass_reads_its_points_once_that_pass_ends() -> None:
+    client, device, clock = _connected()
+    client.subscribe(TEMP, Recorder())
+    device.delay = 0.02
+    clock.advance(60)
+
+    async def poll_then_refresh() -> None:
+        running = asyncio.create_task(client.poll())
+        await asyncio.sleep(0.005)
+        await client.refresh(["mode"])
+        await running
+    within(2, poll_then_refresh())
+    assert len(device.reads) == 2 and device.reads[-1] == ("mode",)
+
+
 def test_the_next_poll_is_counted_in_seconds_from_now() -> None:
     client, _, clock = _connected()
     asyncio.run(client.poll())

@@ -16,6 +16,13 @@ NOTIFY_PAYLOAD = 0x34
 NOTIFY_MICRO_ACK = 3
 """uNabto's notification that the device has the request and answers when it is ready."""
 ACCEPTED = b"\x00\x00\x00\x01"
+REFUSED_ACCESS = 0x8004
+"""uNabto's NOTIFY_ERROR_CP_ACCESS: the client was not granted access."""
+BUSY = 0x8009
+"""uNabto's NOTIFY_ERROR_BUSY_MICRO: no session is free on the device."""
+CONNECT_STATUSES = {REFUSED_ACCESS: "access refused", BUSY: "busy, no session free",
+                    0x800B: "re-attaching to its server", 0x8008: "encryption mismatch"}
+"""Names of the handshake statuses a log names."""
 PONG = b"pong"
 _DEVICE_ID_AT = 19
 
@@ -30,6 +37,9 @@ class ConnectReply:
     sequence: int
     accepted: bool
     server_id: bytes
+    status: int = 1
+    """uNabto's status for the handshake: 1 when accepted, `REFUSED_ACCESS` for an email the
+    device does not know, `BUSY` while it has no session free."""
 
 
 @dataclass(frozen=True)
@@ -134,7 +144,8 @@ def reply(datagram: bytes, client_id: bytes) -> ConnectReply | DataReply | Recei
     if kind == _U_CONNECT:
         if len(datagram) < 28:
             return None
-        return ConnectReply(sequence, datagram[20:24] == ACCEPTED, datagram[24:28])
+        return ConnectReply(sequence, datagram[20:24] == ACCEPTED, datagram[24:28],
+                            int.from_bytes(datagram[20:24], "big"))
     if (kind == _DATA and len(datagram) >= 24 and datagram[16] == NOTIFY_PAYLOAD
             and int.from_bytes(datagram[20:24], "big") == NOTIFY_MICRO_ACK):
         return Received(sequence)
