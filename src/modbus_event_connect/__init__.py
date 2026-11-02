@@ -1,7 +1,7 @@
 """Declarative device models over Modbus and micro_nabto, read and written through one client."""
 from importlib.metadata import version as _installed_version
 
-from ._client import Client, PointsCallback, Status, StatusCallback
+from ._client import Client, PointsCallback
 from ._clock import Clock
 from ._data_type import ByteOrder, DataType, DataTypeKind, WordOrder
 from ._device import Identity
@@ -47,7 +47,7 @@ from ._resilience import (
 )
 from ._unit import Unit
 from ._value import DataValue, Quality
-from event_connect import Write
+from event_connect import Status, StatusCallback, Write
 
 __version__ = _installed_version("modbus_event_connect")
 __all__ = [

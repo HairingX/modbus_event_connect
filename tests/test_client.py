@@ -9,7 +9,8 @@ from typing import Any, TypeVar
 import pytest
 
 from modbus_event_connect import _client as client_module
-from modbus_event_connect._client import Client, Status
+from modbus_event_connect import Status
+from modbus_event_connect._client import Client
 from modbus_event_connect._data_type import DataType
 from modbus_event_connect._device import (
     EncodedWrite,

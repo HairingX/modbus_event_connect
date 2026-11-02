@@ -5,7 +5,8 @@ from typing import Any
 
 import pytest
 
-from modbus_event_connect._client import Client, Status
+from modbus_event_connect import Status
+from modbus_event_connect._client import Client
 from modbus_event_connect._data_type import DataType
 from modbus_event_connect._device import Device, EncodedWrite, Identity, Outcome
 from modbus_event_connect._errors import (
