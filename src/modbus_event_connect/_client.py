@@ -8,7 +8,7 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from event_connect import DEFAULT_TIMING, Reachability, Status, StatusBoard, StatusCallback, Write, changed, stale
+from event_connect import DEFAULT_TIMING, Passes, Reachability, Status, StatusBoard, StatusCallback, Write, changed, stale
 
 from ._clock import Clock, SystemClock
 from ._conversion import decode, encode
@@ -117,7 +117,7 @@ class Client:
         self._reachability = Reachability(self._clock, DEFAULT_TIMING.offline_after)
         self._statuses = StatusBoard(self._clock)
 
-        self._poll_lock = asyncio.Lock()
+        self._passes = Passes()
         self._writes = WriteQueue(device, clock=self._clock, sleep=sleep, retry_for=write_retry_for,
                                   retry_pause=write_retry_pause, answered=self._update_reachability,
                                   written=self._taken,
@@ -522,27 +522,24 @@ class Client:
         Raises:
             UnsupportedDeviceError: the unit changed, and no model matches it any more.
         """
-        if self._poll_lock.locked():
-            async with self._poll_lock:
-                pass
-            if not self._anything_due():
-                return
-        async with self._poll_lock:
-            before = self._available_points()
-            try:
-                marks = self._writes.marks()
-                keys = [key for key in self._require_scheduler().due() if not self._writes.disturbed(key, marks)]
-                if keys:
-                    resolved = self._require_model()
-                    await self._read_and_publish([resolved.points[k] for k in keys])
-                requested = self._checks_requested
-                if requested is not None and requested <= self._clock.monotonic():
-                    self._checks_requested = None
-                    await self._run_checks()
-                elif self._scheduled_polling:
-                    await self._run_checks()
-            finally:
-                self._tell_points(before)
+        await self._passes.run(self._pass, due=self._anything_due)
+
+    async def _pass(self) -> None:
+        before = self._available_points()
+        try:
+            marks = self._writes.marks()
+            keys = [key for key in self._require_scheduler().due() if not self._writes.disturbed(key, marks)]
+            if keys:
+                resolved = self._require_model()
+                await self._read_and_publish([resolved.points[k] for k in keys])
+            requested = self._checks_requested
+            if requested is not None and requested <= self._clock.monotonic():
+                self._checks_requested = None
+                await self._run_checks()
+            elif self._scheduled_polling:
+                await self._run_checks()
+        finally:
+            self._tell_points(before)
 
     def _anything_due(self) -> bool:
         if self._scheduler is None:

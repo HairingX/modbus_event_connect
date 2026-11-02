@@ -33,7 +33,7 @@ classifiers = [
 ]
 requires-python = ">=3.14"
 dependencies = [
-    "event_connect>=0.2,<0.3",
+    "event_connect>=0.3,<0.4",
     "pymodbus>=3.6,<4",
 ]
 
