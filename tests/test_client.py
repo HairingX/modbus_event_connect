@@ -1177,22 +1177,23 @@ def _silence(device: FakeDevice, outcome: Outcome = Outcome.NO_ANSWER) -> None:
 class LogRecords(logging.Handler):
     """Keeps the client's log records for the duration of a `with` block."""
 
-    def __init__(self) -> None:
+    def __init__(self, name: str = client_module.__name__) -> None:
         super().__init__(level=logging.INFO)
         self.messages: list[str] = []
+        self._name = name
 
     def emit(self, record: logging.LogRecord) -> None:
         self.messages.append(record.getMessage())
 
     def __enter__(self) -> "LogRecords":
-        logger = logging.getLogger(client_module.__name__)
+        logger = logging.getLogger(self._name)
         self._previous = logger.level
         logger.setLevel(logging.INFO)
         logger.addHandler(self)
         return self
 
     def __exit__(self, *_: object) -> None:
-        logger = logging.getLogger(client_module.__name__)
+        logger = logging.getLogger(self._name)
         logger.removeHandler(self)
         logger.setLevel(self._previous)
 
@@ -1254,7 +1255,7 @@ def test_what_failed_while_the_device_was_silent_is_read_as_soon_as_it_answers_a
 def test_an_outage_and_its_recovery_are_logged_once_each() -> None:
     client, device, clock = _connected()
     client.subscribe(TEMP, Recorder())
-    with LogRecords() as records:
+    with LogRecords("event_connect") as records:
         _silence(device)
         for _ in range(3):
             clock.advance(60)
@@ -1263,7 +1264,8 @@ def test_an_outage_and_its_recovery_are_logged_once_each() -> None:
         for _ in range(3):
             clock.advance(60)
             asyncio.run(client.poll())
-    assert [m for m in records.messages if "answer" in m] == ["TEST stopped answering", "TEST answers again"]
+    assert [m for m in records.messages if "answer" in m] == ["TEST stopped answering 60 s ago",
+                                                                  "TEST answers again, after 180 s"]
 
 
 def test_writes_left_unanswered_for_the_grace_mark_the_device_unreachable_and_an_answered_one_reachable() -> None:

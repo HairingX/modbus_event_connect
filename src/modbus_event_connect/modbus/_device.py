@@ -338,25 +338,20 @@ class ModbusDevice:
     async def _send(self, request: Request) -> Response | None:
         """Puts one request on the connection, or returns `None` while the breaker is open. Once
         its pause is over, one probe request goes through; others wait for its answer."""
-        probe = self._breaker.is_open
-        if not self._breaker.allows(self._clock.monotonic()):
+        attempt = self._breaker.attempt(self._clock.monotonic())
+        if attempt is None:
             return None
-        started = self._clock.monotonic()
-        sent = False
-        try:
+        with attempt:
+            started = self._clock.monotonic()
             response = await self._connection.request(request)
-            sent = True
-        finally:
-            if probe and not sent:
-                self._breaker.released()
-        self._requests += 1
-        self._latency_total += self._clock.monotonic() - started
-        # A gateway only answers 0x0B after waiting out its own timeout on the bus, so a device
-        # behind it that stopped answering costs every other device that time, like a timeout.
-        if response.no_answer or response.exception_code == ExceptionCode.GATEWAY_TARGET_FAILED:
-            self._breaker.unanswered(self._clock.monotonic())
-        else:
-            self._breaker.answered()
+            self._requests += 1
+            self._latency_total += self._clock.monotonic() - started
+            # A gateway only answers 0x0B after waiting out its own timeout on the bus, so a device
+            # behind it that stopped answering costs every other device that time, like a timeout.
+            if response.no_answer or response.exception_code == ExceptionCode.GATEWAY_TARGET_FAILED:
+                attempt.unanswered(self._clock.monotonic())
+            else:
+                attempt.answered()
         return response
 
     def _backing_off(self) -> bool:

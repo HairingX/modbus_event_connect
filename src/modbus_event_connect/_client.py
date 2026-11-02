@@ -6,10 +6,9 @@ import logging
 import math
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from enum import Enum, auto
 from typing import Any
 
-from event_connect import DEFAULT_TIMING, Reachability, Write, changed, stale
+from event_connect import DEFAULT_TIMING, Reachability, Status, StatusBoard, StatusCallback, Write, changed, stale
 
 from ._clock import Clock, SystemClock
 from ._conversion import decode, encode
@@ -31,17 +30,6 @@ from ._value import DataValue, Quality, Value
 from ._writes import WriteQueue
 
 _LOGGER = logging.getLogger(__name__)
-
-class Status(Enum):
-    """What the client itself knows about its device, apart from the device's points."""
-    CONNECTED = auto()
-    """True while the device answers."""
-    WRITE_PENDING = auto()
-    """True from the first queued write until the last one has finished."""
-
-
-StatusCallback = Callable[[Status, DataValue[bool] | None, DataValue[bool]], None]
-"""Called with the status, its previous value (None the first time) and the new value."""
 
 PointsCallback = Callable[[frozenset[Key[Any]], frozenset[Key[Any]]], None]
 """Called with the keys the unit has gained and the keys it has lost, once its points changed."""
@@ -126,17 +114,14 @@ class Client:
         self._checks_requested: float | None = None
         """When `refresh(PollRate.SCAN)` asked for the checks, which runs them without the schedule."""
         self._consecutive_failures: dict[str, int] = {}
-        self._reported_offline = False
         self._reachability = Reachability(self._clock, DEFAULT_TIMING.offline_after)
-        self._status: dict[Status, DataValue[bool]] = {
-            status: DataValue(False, Quality.GOOD, self._clock.now()) for status in Status}
-        self._status_callbacks: dict[Status, list[StatusCallback]] = {status: [] for status in Status}
+        self._statuses = StatusBoard(self._clock)
 
         self._poll_lock = asyncio.Lock()
         self._writes = WriteQueue(device, clock=self._clock, sleep=sleep, retry_for=write_retry_for,
                                   retry_pause=write_retry_pause, answered=self._update_reachability,
                                   written=self._taken,
-                                  pending=lambda pending: self._set_status(Status.WRITE_PENDING, pending))
+                                  pending=lambda pending: self._statuses.set(Status.WRITE_PENDING, pending))
 
     # ================================================================================= scan
 
@@ -163,8 +148,8 @@ class Client:
         """Cancel pending pulses and let go of the device."""
         self._writes.cancel_pulses()
         await self._device.disconnect()
-        self._reported_offline = False
-        self._set_status(Status.CONNECTED, False)
+        self._reachability = Reachability(self._clock, self._reachability_grace(), name=self._reachability.name)
+        self._statuses.set(Status.CONNECTED, False)
 
     async def _scan(self, handshake: Identity) -> None:
         """
@@ -326,7 +311,7 @@ class Client:
                               "reported", key, key.type.__name__, model.name, resolved.points[key].key.type.__name__)
         for key in resolved.points:
             self._update_polling(key)
-        self._reachability = Reachability(self._clock, model.offline_after)
+        self._reachability = Reachability(self._clock, model.offline_after, name=model.name)
         self._update_reachability(True)
 
     # ========================================================================= the picture
@@ -392,7 +377,7 @@ class Client:
 
     def status(self, status: Status) -> DataValue[bool]:
         """The current value of `status`: True or False, from the moment the client exists."""
-        return self._status[status]
+        return self._statuses.value(status)
 
     def consecutive_failures(self, key: str) -> int:
         """Consecutive failed reads of `key`."""
@@ -443,14 +428,7 @@ class Client:
 
         Returns the unsubscriber.
         """
-        callbacks = self._status_callbacks[status]
-        callbacks.append(callback)
-        _tell_status(callback, status, None, self._status[status])
-
-        def unsubscribe() -> None:
-            if callback in callbacks:
-                callbacks.remove(callback)
-        return unsubscribe
+        return self._statuses.subscribe(status, callback)
 
     def subscribe_points(self, callback: PointsCallback) -> Callable[[], None]:
         """Call `callback` whenever the points this unit has change, with the keys gained and lost.
@@ -701,31 +679,17 @@ class Client:
                 self._require_scheduler().refresh(keys, after=trigger.after or 0.0, until_stable=trigger.until_stable)
 
     def _update_reachability(self, answered: bool) -> None:
-        """Update reachability from whether the device answered, logging each change once.
+        """Update reachability from whether the device answered.
 
         The device counts as not answering only once it has been silent for the model's
         `offline_after`, so one lost answer does not make it unavailable.
         """
-        was_silent = self._reachability.silent
-        reachable = self._reachability.answered() if answered else self._reachability.unanswered()
-        if answered and was_silent and self._scheduler is not None:
-            # Reads that failed while it was silent wait for no regular read now that it answers.
-            failed = [key for key, count in self._consecutive_failures.items() if count]
-            if failed:
-                self._scheduler.refresh(failed, force=True)
-        if reachable == self._status[Status.CONNECTED].value:
-            return
-        self._set_status(Status.CONNECTED, reachable)
-        name = self._resolved.model.name if self._resolved is not None else "The device"
-        if not reachable:
-            self._reported_offline = True
-            _LOGGER.info("%s stopped answering", name)
-            return
-        if self._scheduler is not None:
-            self._scheduler.reset()
-        if self._reported_offline:
-            self._reported_offline = False
-            _LOGGER.info("%s answers again", name)
+        reachable = (self._reachability.answered(self._scheduler) if answered
+                     else self._reachability.unanswered())
+        self._statuses.set(Status.CONNECTED, reachable)
+
+    def _reachability_grace(self) -> float:
+        return self._resolved.model.offline_after if self._resolved is not None else DEFAULT_TIMING.offline_after
 
     # ============================================================================= writing
 
@@ -838,15 +802,6 @@ class Client:
         if point.readable:
             self._scheduler.set_polled(key, self._should_poll(point) and self._is_available(key))
 
-    def _set_status(self, status: Status, value: bool) -> None:
-        current = self._status[status]
-        if current.value == value:
-            return
-        data = DataValue(value, Quality.GOOD, self._clock.now())
-        self._status[status] = data
-        for callback in list(self._status_callbacks[status]):
-            _tell_status(callback, status, current, data)
-
 
 class _ScanContext:
     """What a scan step may do: read without side effects, and record availability."""
@@ -914,11 +869,3 @@ def _union(marks: Iterable[Mapping[str, str]]) -> dict[str, str]:
         for key, reason in marked.items():
             found.setdefault(key, reason)
     return found
-
-
-def _tell_status(callback: StatusCallback, status: Status, old: DataValue[Any] | None, new: DataValue[Any]) -> None:
-    """Call one status subscriber; its error is logged and kept from the others."""
-    try:
-        callback(status, old, new)
-    except Exception:
-        _LOGGER.exception("a subscriber to %s raised", status)
