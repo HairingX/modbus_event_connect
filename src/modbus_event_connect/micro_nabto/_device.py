@@ -1,9 +1,10 @@
 """One micro_nabto device implementing `Device`: points in, `ReadResult` / `WriteResult` out."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -18,6 +19,14 @@ _LOGGER = logging.getLogger(__name__)
 
 MAX_REGISTERS_PER_READ = 64
 """Registers per read request; a CTS 402 answered 108, so this leaves room."""
+
+REREAD_ZEROS_FOR = 7.5
+"""Seconds an answer of only zeros, where values were, is read again for before the zeros are
+taken: short of the 10 s between two fast polls, as a Nilan gateway was seen answering a new
+session's first reads with zeros, and values 10 s later."""
+
+_FIRST_PAUSE = 0.5
+"""The pause before the second reading again; each pause after it is twice the one before."""
 
 _MAX_OBJECT = 0xFF
 _MAX_ADDRESS: Mapping[tuple[str, type[Access]], int] = {
@@ -44,12 +53,17 @@ class MicroNabtoOptions(ProtocolOptions):
     later_answer_wait: float | None = None
     """Seconds a read sent again and answered with only zeros, where values were, is kept open
     for a later answer; None leaves the connection's. One given to the connection overrides it."""
+    reread_zeros_for: float | None = None
+    """Seconds of pauses an answer of only zeros, where values were, is read again over before the
+    zeros are taken; None leaves `REREAD_ZEROS_FOR`. One given to the device overrides it."""
 
     def __post_init__(self) -> None:
         if self.max_registers < 1:
             raise ValueError(f"max_registers must be at least 1, got {self.max_registers}")
         if self.later_answer_wait is not None and self.later_answer_wait < 0:
             raise ValueError(f"later_answer_wait cannot be negative, got {self.later_answer_wait}")
+        if self.reread_zeros_for is not None and self.reread_zeros_for < 0:
+            raise ValueError(f"reread_zeros_for cannot be negative, got {self.reread_zeros_for}")
 
     def problems(self, point: Point[Any]) -> list[str]:
         found: list[str] = []
@@ -87,12 +101,28 @@ class _Batch:
 class MicroNabtoDevice:
     """A micro_nabto device; datapoints and setpoints are read in batches, setpoints written."""
 
-    def __init__(self, connection: MicroNabtoConnection, *, owns_connection: bool = False) -> None:
+    def __init__(self, connection: MicroNabtoConnection, *, owns_connection: bool = False,
+                 reread_zeros_for: float | None = None,
+                 sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
         """Args:
             owns_connection: whether `disconnect()` also closes the connection.
+            reread_zeros_for: seconds of pauses an answer of only zeros, where values were, is
+                read again over before the zeros are taken; None leaves it to the model, and to
+                `REREAD_ZEROS_FOR`.
+            sleep: waits out a pause between two readings again.
+
+        Raises:
+            ValueError: `reread_zeros_for` is negative.
         """
+        if reread_zeros_for is not None and reread_zeros_for < 0:
+            raise ValueError(f"reread_zeros_for cannot be negative, got {reread_zeros_for}")
         self._connection = connection
         self._owns_connection = owns_connection
+        self._reread_zeros_for = reread_zeros_for
+        self._sleep = sleep
+        self._zero_rereads = 0
+        self._zeros_replaced = 0
+        self._longest_until_values = 0.0
         self._options: MicroNabtoOptions | None = None
         self._outcomes: Counter[Outcome] = Counter()
         self._isolated = 0
@@ -102,14 +132,25 @@ class MicroNabtoDevice:
 
     @classmethod
     def udp(cls, email: str, *, host: str | None = None, device_id: str | None = None,
-            **kwargs: Any) -> MicroNabtoDevice:
+            reread_zeros_for: float | None = None, **kwargs: Any) -> MicroNabtoDevice:
         """A device on a connection of its own; `kwargs` go to `MicroNabtoConnection`."""
-        return cls(MicroNabtoConnection(email, host=host, device_id=device_id, **kwargs), owns_connection=True)
+        return cls(MicroNabtoConnection(email, host=host, device_id=device_id, **kwargs), owns_connection=True,
+                   reread_zeros_for=reread_zeros_for)
 
     @property
     def options(self) -> MicroNabtoOptions | None:
         """The model's options; None until `configure()`."""
         return self._options
+
+    @property
+    def reread_zeros_for(self) -> float:
+        """Seconds of pauses an answer of only zeros is read again over: the device's when given,
+        else the model's, else `REREAD_ZEROS_FOR`."""
+        if self._reread_zeros_for is not None:
+            return self._reread_zeros_for
+        if self._options is not None and self._options.reread_zeros_for is not None:
+            return self._options.reread_zeros_for
+        return REREAD_ZEROS_FOR
 
     async def connect(self) -> Identity | None:
         """Establish the session. The identity is what the device says in the handshake."""
@@ -179,6 +220,10 @@ class MicroNabtoDevice:
             "outcomes": {outcome.name: self._outcomes[outcome] for outcome in Outcome},
             "isolated_reads": self._isolated,
             "answers_of_only_zeros": self._only_zeros,
+            "reread_zeros_for": self.reread_zeros_for,
+            "zero_rereads": self._zero_rereads,
+            "zeros_replaced": self._zeros_replaced,
+            "longest_until_values": self._longest_until_values,
             **self._connection.diagnostics(),
         }
 
@@ -205,7 +250,8 @@ class MicroNabtoDevice:
     async def _checked(self, build: Callable[[Sequence[tuple[int, int]]], bytes], parse: _Parse,
                        space: type[Access], items: Sequence[tuple[int, int]], values: list[int]) -> list[int]:
         """The values to take for an answer: an answer of only zeros where values were is logged,
-        and the registers read again at once; that answer is taken, whatever it holds."""
+        and the registers read again at once, then after growing pauses until values come or the
+        pauses would pass `reread_zeros_for`; the last answer is taken, values or zeros."""
         registers = [(space, obj, address) for obj, address in items]
         span = f"{space.__name__} {items[0][1]} to {items[-1][1]}"
         exchange = self._connection.last_exchange
@@ -217,17 +263,35 @@ class MicroNabtoDevice:
         if not self._only_zeros_where_values_were(registers, values):
             return values
         self._only_zeros += 1
+        budget = self.reread_zeros_for
         _LOGGER.warning("micro_nabto: %s answered only zeros, where they held values; reading them again "
-                        "at once; %s", span, self._last_exchange())
-        answer = await self._connection.request(build(items))
-        again = parse(answer) if answer is not None else None
-        if again is None or len(again) != len(values):
-            _LOGGER.warning("micro_nabto: %s read again: no answer that fits, so the zeros are taken", span)
-            return values
-        _LOGGER.warning("micro_nabto: %s read again: %s; %s", span,
-                        "values, which are taken" if any(again) else "only zeros again, which are taken",
-                        self._last_exchange())
-        return again
+                        "for up to %.1f s; %s", span, budget, self._last_exchange())
+        first = exchange.at if exchange is not None else 0.0
+        pause, paused, rereads = 0.0, 0.0, 0
+        while True:
+            if pause:
+                await self._sleep(pause)
+            answer = await self._connection.request(build(items))
+            rereads += 1
+            self._zero_rereads += 1
+            again = parse(answer) if answer is not None else None
+            if again is None or len(again) != len(values):
+                _LOGGER.warning("micro_nabto: %s read again %d time(s): no answer that fits, so the zeros "
+                                "are taken", span, rereads)
+                return values
+            took = self._connection.last_exchange.at - first if self._connection.last_exchange else 0.0
+            if any(again):
+                self._zeros_replaced += 1
+                self._longest_until_values = max(self._longest_until_values, took)
+                _LOGGER.warning("micro_nabto: %s read again %d time(s) over %.1f s: values, which are taken; %s",
+                                span, rereads, took, self._last_exchange())
+                return again
+            pause = pause * 2 if pause else _FIRST_PAUSE
+            if paused + pause > budget:
+                _LOGGER.warning("micro_nabto: %s read again %d time(s) over %.1f s: only zeros, which are "
+                                "taken; %s", span, rereads, took, self._last_exchange())
+                return again
+            paused += pause
 
     def _note_values(self, space: type[Access], items: Sequence[tuple[int, int]], values: Sequence[int]) -> None:
         """Remember the values taken, and log when registers that were taken as only zeros hold

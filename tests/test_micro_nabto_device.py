@@ -51,11 +51,21 @@ def _simulated(*, clock: FakeClock | None = None, emails: frozenset[str] = froze
 
 
 def _device(simulated: SimulatedMicroNabtoDevice, *, clock: FakeClock | None = None,
-            email: str = EMAIL) -> MicroNabtoDevice:
+            email: str = EMAIL, pauses: list[float] | None = None,
+            reread_zeros_for: float | None = None) -> MicroNabtoDevice:
+    """A device whose pauses between readings again are recorded in `pauses`, and pass on
+    `clock` rather than in real time."""
     host, port = simulated.address
+
+    async def sleep(seconds: float) -> None:
+        if pauses is not None:
+            pauses.append(seconds)
+        if clock is not None:
+            clock.advance(seconds)
+        await asyncio.sleep(0)
     device = MicroNabtoDevice(MicroNabtoConnection(email, host=host, port=port, timeout=0.05, retries=1,
                                                    answer_wait=0.5, clock=clock),
-                              owns_connection=True)
+                              owns_connection=True, reread_zeros_for=reread_zeros_for, sleep=sleep)
     device.configure(MicroNabtoOptions(later_answer_wait=0.2))
     return device
 
@@ -226,6 +236,7 @@ async def test_the_warning_says_when_the_answer_of_only_zeros_came_to_a_request_
             await device.read([_dp(1), _dp(2)])
         assert "sent 2 time(s)" in _warnings(caplog)
         assert "for a later answer and none came" in _warnings(caplog) and "reading them again" in _warnings(caplog)
+        assert "read again 5 time(s)" in _warnings(caplog) and "only zeros, which are taken" in _warnings(caplog)
         diagnostics = device.diagnostics()
         assert (diagnostics["later_answer_waits"], diagnostics["later_answers_taken"]) == (1, 0)
 
@@ -243,7 +254,7 @@ async def test_the_warnings_say_how_old_the_session_was_and_when_values_came_bac
         with caplog.at_level(logging.WARNING, logger="modbus_event_connect.micro_nabto"):
             await device.read(points)
             assert "request 3 of a session 5.0 s old" in _warnings(caplog)
-            assert "read again: only zeros again, which are taken" in _warnings(caplog)
+            assert "read again 5 time(s) over 7.5 s: only zeros, which are taken" in _warnings(caplog)
             await device.read(points)                                    # still zeros: no warning
             assert _warnings(caplog).count("micro_nabto") == 2
             simulated.datapoint_registers.update({(0, 1): 1, (0, 2): 2})
@@ -262,9 +273,72 @@ async def test_an_answer_of_only_zeros_is_read_again_at_once_and_its_values_take
         with caplog.at_level(logging.WARNING, logger="modbus_event_connect.micro_nabto"):
             answers = await device.read(points)
         assert [a.registers for a in answers.values()] == [(1,), (2,), (3,)]
-        assert "reading them again at once" in _warnings(caplog)
-        assert "read again: values, which are taken" in _warnings(caplog)
+        assert "reading them again for up to 7.5 s" in _warnings(caplog)
+        assert "read again 1 time(s) over" in _warnings(caplog) and "values, which are taken" in _warnings(caplog)
         assert device.diagnostics()["answers_of_only_zeros"] == 1
+
+
+async def test_zeros_are_read_again_after_growing_pauses_until_values_come(
+        caplog: pytest.LogCaptureFixture) -> None:
+    clock, pauses = FakeClock(), list[float]()
+    async with _simulated(clock=clock) as simulated:
+        device = _device(simulated, clock=clock, pauses=pauses)
+        assert await device.connect() is not None
+        points = [_dp(1), _dp(2), _dp(3)]
+        await device.read(points)
+        simulated.zero_answers = 3                       # the read and its first two readings again
+        with caplog.at_level(logging.WARNING, logger="modbus_event_connect.micro_nabto"):
+            answers = await device.read(points)
+        assert [a.registers for a in answers.values()] == [(1,), (2,), (3,)]
+        assert pauses == [0.5, 1.0]
+        assert "read again 3 time(s) over 1.5 s: values, which are taken" in _warnings(caplog)
+        diagnostics = device.diagnostics()
+        assert (diagnostics["zero_rereads"], diagnostics["zeros_replaced"], diagnostics["longest_until_values"]) \
+            == (3, 1, 1.5)
+
+
+async def test_zeros_that_stay_are_taken_once_the_next_pause_would_pass_reread_zeros_for(
+        caplog: pytest.LogCaptureFixture) -> None:
+    pauses = list[float]()
+    async with _simulated() as simulated:
+        device = _device(simulated, pauses=pauses)
+        assert await device.connect() is not None
+        points = [_dp(1), _dp(2)]
+        await device.read(points)
+        _zeroed(simulated, 1, 2)
+        with caplog.at_level(logging.WARNING, logger="modbus_event_connect.micro_nabto"):
+            answers = await device.read(points)
+        assert {a.registers for a in answers.values()} == {(0,)}
+        assert pauses == [0.5, 1.0, 2.0, 4.0]
+        assert "read again 5 time(s)" in _warnings(caplog) and "only zeros, which are taken" in _warnings(caplog)
+        assert device.diagnostics()["zeros_replaced"] == 0
+
+
+async def test_with_no_time_to_reread_zeros_they_are_read_again_once_at_once() -> None:
+    pauses = list[float]()
+    async with _simulated() as simulated:
+        device = _device(simulated, pauses=pauses, reread_zeros_for=0)
+        assert await device.connect() is not None
+        await device.read([_dp(1), _dp(2)])
+        _zeroed(simulated, 1, 2)
+        await device.read([_dp(1), _dp(2)])
+        assert pauses == [] and device.diagnostics()["zero_rereads"] == 1
+
+
+async def test_the_time_to_reread_zeros_is_the_devices_then_the_models_then_seven_and_a_half_seconds() -> None:
+    connection = MicroNabtoConnection(EMAIL, host="device.invalid")
+    device = MicroNabtoDevice(connection)
+    assert device.reread_zeros_for == 7.5
+    device.configure(MicroNabtoOptions(reread_zeros_for=3.0))
+    assert device.reread_zeros_for == 3.0
+    given = MicroNabtoDevice(connection, reread_zeros_for=1.0)
+    given.configure(MicroNabtoOptions(reread_zeros_for=3.0))
+    assert given.reread_zeros_for == 1.0 and given.diagnostics()["reread_zeros_for"] == 1.0
+    assert MicroNabtoDevice.udp(EMAIL, host="device.invalid", reread_zeros_for=2.0).reread_zeros_for == 2.0
+    with pytest.raises(ValueError):
+        MicroNabtoDevice(connection, reread_zeros_for=-1.0)
+    with pytest.raises(ValueError):
+        MicroNabtoOptions(reread_zeros_for=-1.0)
 
 
 async def test_a_later_answer_with_values_to_a_request_sent_again_is_taken_over_zeros(
