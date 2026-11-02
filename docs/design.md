@@ -434,7 +434,8 @@ point has a time at which it becomes due for reading.**
 |---|---|
 | the point's poll rate | due when its value is older than the poll rate's interval |
 | a write that disturbs it | due at write + `after`, whatever its poll rate |
-| a failed read | due `retry_after` later, twice as long after each further failure, never after its next regular read |
+| a failed read | due at its next regular read, or when the protocol asks for it sooner |
+| the device answers after a silence | what failed meanwhile due now |
 | a trigger | due now |
 | reconnect | everything due now |
 | `refresh(...)` from the consumer | the selected points due now |
@@ -702,7 +703,10 @@ blinds  = BlindClient(gateway, unit_id=3)
   (no path to the device) is a configuration error.
 - **Automatic backoff:** a device that keeps timing out is polled less often for a while, so its
   timeouts do not starve every other device on the bus. On a shared RS-485 bus this is what
-  keeps one dead fan from freezing the lights.
+  keeps one dead fan from freezing the lights. It is a `CircuitBreaker`, and busy retries a
+  `Retry`, which a model states in `ModbusOptions`. The client adds no retry of its own: one on
+  top of the device's backoff would only ask again when the breaker refuses, and each refusal
+  would push the next attempt further out.
 
 Every device behind a gateway shares its bus, and each request occupies it for all of them. On
 a slow serial bus this is where poll rates (5.2) stop being an optimisation and become necessary.
@@ -760,7 +764,7 @@ Assistant's log tells it without debug and a unit without the fault never logs i
   and how many requests went unanswered.
 - **A handshake refused** for anything but the email, with uNabto's status: 0x8009 is a device
   with no session free, as one is while old sessions have yet to time out. It is tried again
-  after `backoff_for`. Only 0x8004 is a refused email, `AuthenticationError`.
+  after the pause of `handshake`, a `CircuitBreaker` a model states in `MicroNabtoOptions`. Only 0x8004 is a refused email, `AuthenticationError`.
 - **An answer of only zeros** to a read of more than one register, where those registers held
   values: the registers by count and address, the points, the requests of the read it belongs
   to, the five requests before it with what each answered, the library's version, and the
@@ -779,7 +783,7 @@ too; the warnings carry what tells them apart. The answer is not taken at once:
 - **Otherwise**, the registers are read again at once, which a single bad answer does not
   survive. If they are zeros again, the points answer `BUSY` with `retry_after`: the client keeps
   their last values, as `STALE`, and reads them again half a second after the zeros, then once a
-  second. Nothing waits: other points, writes and refreshes go on, and any reading of those
+  second, as `RereadZeros`, which a model states in `MicroNabtoOptions`, says. Nothing waits: other points, writes and refreshes go on, and any reading of those
   registers in between counts, without moving the time. The first values end it, and the warning
   says how long after the zeros they came and what each reading before them answered, so the
   device's time is known to within a second.
@@ -787,7 +791,8 @@ too; the warnings carry what tells them apart. The answer is not taken at once:
   registers are read in two halves. Values from the halves are taken, and the warning says the
   request was too many registers for the device; a model then sets `max_registers`, which holds
   however many points it gains. Zeros from the halves are taken as what the unit reads. A model
-  sets the time in `MicroNabtoOptions`, and whoever creates the device can override both.
+  sets the time in `MicroNabtoOptions`, and whoever creates the device can override both. A
+  model whose device answers zeros only where they are takes them at once with `TAKE_ZEROS`.
 
 ---
 
@@ -817,7 +822,7 @@ A library that gets these wrong is worse than none.
 | `0x0B`: the gateway's device did not answer | `NO_ANSWER`, counted towards backoff |
 | No answer at all | `NO_ANSWER`; the value goes `STALE`; reachability follows answers, never the socket |
 | One bad address refuses a whole request | the request is halved until the refusal is pinned down: a few absent addresses among many cost few requests, though a request where every address is absent costs about twice as many as reading each alone |
-| A micro_nabto read answered with only zeros where values were | a later answer to a read sent again is taken if it holds values; otherwise read again at once, then the last values kept as STALE and the registers read again every second, without holding anything up, until values come or, at `reread_zeros_for`, two halves are read and their answer taken; logged as warnings |
+| A micro_nabto read answered with only zeros where values were | a later answer to a read sent again is taken if it holds values; otherwise read again at once, then the last values kept as STALE and the registers read again as `RereadZeros` says, without holding anything up, until values come or, at `reread_zeros_for`, two halves are read and their answer taken; logged as warnings |
 | Devices accept different request sizes | `max_registers` / `max_bits` per model |
 | Four address spaces | one access class each; never batched together |
 | Word order and byte order | per point |

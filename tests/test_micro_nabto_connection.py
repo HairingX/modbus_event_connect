@@ -6,7 +6,9 @@ import pytest
 
 from modbus_event_connect._errors import AuthenticationError
 from modbus_event_connect.micro_nabto import _wire as wire
+from modbus_event_connect import CircuitBreaker, Exponential, Fixed
 from modbus_event_connect.micro_nabto._connection import (
+    HANDSHAKE,
     DiscoveredDevice,
     MicroNabtoConnection,
     discover,
@@ -241,6 +243,36 @@ async def test_after_a_failed_handshake_requests_fail_at_once_until_retry_after(
         clock.advance(10.5)
         device.silent = False
         assert await _read(connection, 1) == [1001]
+
+
+async def test_a_failed_handshake_pauses_longer_each_time_by_its_rule() -> None:
+    clock = FakeClock()
+    async with _device(clock=clock) as device:
+        device.silent = True
+        address, port = device.address
+        connection = MicroNabtoConnection(EMAIL, host=address, port=port, timeout=0.05, retries=1, clock=clock,
+                                          handshake=CircuitBreaker(after=1, pause=Exponential(10.0)))
+        assert await connection.open() is None
+        clock.advance(10)
+        assert await _read(connection, 1) is None
+        reached = device.datagrams
+        clock.advance(19)
+        assert await _read(connection, 1) is None
+        assert device.datagrams == reached, "a handshake was tried before the second, longer pause was over"
+        assert connection.diagnostics()["handshake_pauses"] == 2
+
+
+def test_the_handshake_rule_is_the_connections_then_the_models_then_ten_seconds() -> None:
+    connection = MicroNabtoConnection(EMAIL, host="device.invalid")
+    assert connection.handshake == HANDSHAKE == CircuitBreaker(after=1, pause=Fixed(10.0))
+    of_model = CircuitBreaker(after=1, pause=Fixed(30.0))
+    connection.use_model_handshake(of_model)
+    assert connection.handshake == of_model
+    given = MicroNabtoConnection(EMAIL, host="device.invalid", backoff_for=5.0)
+    given.use_model_handshake(of_model)
+    assert given.handshake == CircuitBreaker(after=1, pause=Fixed(5.0))
+    with pytest.raises(ValueError):
+        MicroNabtoConnection(EMAIL, host="device.invalid", backoff_for=5.0, handshake=of_model)
 
 
 async def test_a_request_the_device_has_received_is_not_sent_again_while_it_answers() -> None:

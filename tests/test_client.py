@@ -1222,19 +1222,33 @@ def test_one_unanswered_read_does_not_make_the_device_unreachable() -> None:
     assert client.silent_for == 29.0
 
 
-def test_a_failed_read_is_tried_again_a_second_later() -> None:
+def test_a_failed_read_waits_for_the_next_regular_read_while_the_device_is_silent() -> None:
     client, device, clock = _connected()
-    client.subscribe(SERIAL, Recorder())
+    client.subscribe(TEMP, Recorder())
+    _silence(device)
+    clock.advance(60)
+    asyncio.run(client.poll())
+    device.reads.clear()
+    clock.advance(1)
+    asyncio.run(client.poll())
+    assert device.read_keys() == set()
+
+
+def test_what_failed_while_the_device_was_silent_is_read_as_soon_as_it_answers_again() -> None:
+    client, device, clock = _connected()
     client.subscribe(TEMP, Recorder())
     _silence(device)
     clock.advance(60)
     asyncio.run(client.poll())
     for key, registers in REGISTERS.items():
         device.answer(key, *registers)
+    clock.advance(10)
     device.reads.clear()
-    clock.advance(1)
     asyncio.run(client.poll())
-    assert "temp" in device.read_keys()
+    assert device.read_keys() == {"alarm_summary"}
+    assert client.seconds_until_next_poll() == 0.0
+    asyncio.run(client.poll())
+    assert "temp" in device.read_keys() and client.consecutive_failures(TEMP) == 0
 
 
 def test_an_outage_and_its_recovery_are_logged_once_each() -> None:

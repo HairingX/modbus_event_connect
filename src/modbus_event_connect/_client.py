@@ -297,8 +297,7 @@ class Client:
 
     def _commit(self, model: Model, resolved: ResolvedModel, marks: dict[_Scope, dict[str, str]],
                 reads: dict[_Scope, dict[str, tuple[Quality, Value]]]) -> None:
-        scheduler = Scheduler(self._clock, model.poll_intervals, min_poll_interval=model.min_poll_interval,
-                              retry_after=model.retry_after)
+        scheduler = Scheduler(self._clock, model.poll_intervals, min_poll_interval=model.min_poll_interval)
         scheduler.set_points(resolved.points.values())
         for target, seconds in self._interval_overrides.items():
             if isinstance(target, PollRate) or target in resolved.points:
@@ -673,9 +672,7 @@ class Client:
                     self._checks_requested = now if self._checks_requested is None else min(self._checks_requested, now)
             success = answer.outcome is Outcome.OK and data.quality is not Quality.STALE
             self._consecutive_failures[point.key] = 0 if success else self.consecutive_failures(point.key) + 1
-            scheduler.record(point.key, data, success=success)
-            if answer.retry_after is not None:
-                scheduler.refresh([point.key], after=answer.retry_after, force=True)
+            scheduler.record(point.key, data, success=success, retry_after=answer.retry_after)
             self._store(point, data, previous)
 
     def _data_value(self, point: Point[Any], answer: ReadResult, previous: DataValue[Any] | None) -> DataValue[Any]:
@@ -709,7 +706,13 @@ class Client:
         The device counts as not answering only once it has been silent for the model's
         `offline_after`, so one lost answer does not make it unavailable.
         """
+        was_silent = self._reachability.silent
         reachable = self._reachability.answered() if answered else self._reachability.unanswered()
+        if answered and was_silent and self._scheduler is not None:
+            # Reads that failed while it was silent wait for no regular read now that it answers.
+            failed = [key for key, count in self._consecutive_failures.items() if count]
+            if failed:
+                self._scheduler.refresh(failed, force=True)
         if reachable == self._status[Status.CONNECTED].value:
             return
         self._set_status(Status.CONNECTED, reachable)

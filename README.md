@@ -186,6 +186,31 @@ checks for whether the unit has changed. `poll()` then reads only what `refresh(
 for, and a read that finds a point gone still has its part of the unit checked.
 `set_scheduled_polling(True)` reads at once what has become due meanwhile.
 
+## Riding out failures
+
+How a device is asked again when it is busy, and when it is no longer asked, are its protocol's,
+assembled from standard parts - waits (`Fixed`, `Exponential`, `Steps`, `Jitter`), stops
+(`Attempts`, `Within`, combined with `|`), `Retry` and `CircuitBreaker` - that every protocol
+shares. A model states them in its options; whoever creates the device can override the model.
+
+| Option | What it does | Default |
+|---|---|---|
+| `ModbusOptions(busy=Retry(...))` | how a read answered "busy" (0x06) is tried again | `BUSY`: 4 times more, after 0.2 s, doubling |
+| `ModbusOptions(breaker=CircuitBreaker(...))` | after how many unanswered requests the device is no longer asked, and for how long | `BREAKER`: after 3, for 60 s, then one probe |
+| `MicroNabtoOptions(zeros=RereadZeros(...))` | how an answer of only zeros, where values were, is read again before the zeros are taken | `RereadZeros()`: at once, after 0.5 s, then every second; in two halves at 7.5 s |
+| `MicroNabtoOptions(zeros=TAKE_ZEROS)` | zeros are taken as they come | |
+| `MicroNabtoOptions(handshake=CircuitBreaker(...))` | how long requests fail at once after a failed handshake | `HANDSHAKE`: 10 s |
+
+```python
+from modbus_event_connect import CircuitBreaker, Exponential, Fixed, Steps
+from modbus_event_connect.micro_nabto import MicroNabtoOptions, RereadZeros
+
+patient = MicroNabtoOptions(
+    zeros=RereadZeros(within=15.0, wait=Steps(0.5, then=Fixed(2.0))),
+    handshake=CircuitBreaker(after=1, pause=Exponential(10.0, max=300.0)),
+)
+```
+
 ## Writing
 
 ```python
@@ -220,11 +245,13 @@ again after an outage.
   model's `offline_after`, 30 seconds unless it says otherwise, so one lost answer does not make it
   unavailable. Meanwhile its values are `STALE`, and `client.silent` and `client.silent_for` say
   whether the latest request went unanswered, and for how long the device has been silent.
-- A read that fails is tried again `retry_after` seconds later, 1 unless the model says otherwise,
-  then twice as long after each further failure, never later than the point's next regular read.
+- A read that fails waits for its next regular read; the protocol rides out a busy or silent
+  device itself, as its model's options say (see "Riding out failures"), and nothing is added on
+  top of that.
 - `client.subscribe_status(Status.CONNECTED, callback)` tells you when that changes. A status is
   not a point, so a model's keys never collide with it.
-- When the device answers again, every polled point is read at once.
+- When the device answers after a silence, whatever failed meanwhile is read at once; once it
+  counted as not answering, every polled point is.
 - `await client.disconnect()` lets go of the device.
 
 ## What this unit has
@@ -452,7 +479,6 @@ for a setting people think of in hours gets `transform=Transforms.MINUTES_AS_HOU
 | `deadband=0.2` | changes smaller than this are not reported |
 | `Model(poll_intervals=...)` | this device's own seconds per poll rate |
 | `Model(min_poll_interval=5)` | the shortest interval this device copes with; apps cannot go below it |
-| `Model(retry_after=1.0)` | seconds before a failed read is tried again, doubling after each further failure |
 | `Model(offline_after=30.0)` | seconds without an answer before the device counts as not answering |
 
 Pick the rate from how fast the value changes, not from how often it is looked at:

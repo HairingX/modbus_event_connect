@@ -7,6 +7,7 @@ import pytest
 from pymodbus.exceptions import ModbusIOException
 
 from modbus_event_connect._data_type import DataType
+from modbus_event_connect import Attempts, CircuitBreaker, Fixed, Retry, Steps
 from modbus_event_connect._device import (
     Device,
     EncodedWrite,
@@ -404,6 +405,27 @@ async def test_without_busy_retries_busy_is_answered_at_once() -> None:
     assert rig.sleeps.waits == []
 
 
+async def test_a_model_states_how_its_device_is_tried_again_when_busy() -> None:
+    options = ModbusOptions(numbering=plain(first_address=1), busy=Retry(Steps(1, 3), Attempts(3)))
+    rig = Rig(SimulatedModbusDevice(holding_registers={0: 42}, busy_for=100), options=options)
+    await rig.device.read([u16("p", HoldingRegister(0))])
+    assert rig.sleeps.waits == [1, 3]
+
+
+async def test_a_device_given_its_own_busy_rule_keeps_it_over_the_models() -> None:
+    options = ModbusOptions(numbering=plain(first_address=1), busy=Retry(Fixed(1), Attempts(3)))
+    rig = Rig(SimulatedModbusDevice(holding_registers={0: 42}, busy_for=100), options=options, busy_retries=0)
+    await rig.device.read([u16("p", HoldingRegister(0))])
+    assert rig.sleeps.waits == []
+
+
+def test_a_rule_given_both_as_a_part_and_as_numbers_is_refused() -> None:
+    with pytest.raises(ValueError):
+        ModbusDevice(SimulatedModbusGateway({}), busy=Retry(Fixed(1), Attempts(2)), busy_retries=1)
+    with pytest.raises(ValueError):
+        ModbusDevice(SimulatedModbusGateway({}), breaker=CircuitBreaker(), backoff_for=5)
+
+
 # ================================================================================ writing
 
 
@@ -590,6 +612,35 @@ async def test_a_device_backs_off_after_consecutive_no_answers() -> None:
     assert len(rig.unit.requests) == 3
 
 
+async def test_a_model_states_when_its_device_is_no_longer_asked() -> None:
+    options = ModbusOptions(numbering=plain(first_address=1), breaker=CircuitBreaker(after=1, pause=Fixed(5)))
+    rig = Rig(silent(), options=options)
+    await read0(rig)
+    assert rig.device.diagnostics()["backing_off_for"] == 5
+    rig.clock.advance(5)
+    await read0(rig)
+    assert len(rig.unit.requests) == 2
+
+
+async def test_a_device_given_its_own_breaker_keeps_it_over_the_models() -> None:
+    options = ModbusOptions(numbering=plain(first_address=1), breaker=CircuitBreaker(after=1))
+    rig = Rig(silent(), options=options, backoff_after=3)
+    await read0(rig)
+    assert rig.device.diagnostics()["backing_off"] is False
+
+
+async def test_a_cancelled_probe_lets_the_next_one_through() -> None:
+    rig = Rig(silent(), backoff_after=1, backoff_for=10, delay=0.05)
+    await read0(rig)
+    rig.clock.advance(10)
+    probe = asyncio.ensure_future(read0(rig))
+    await asyncio.sleep(0.01)
+    probe.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await probe
+    assert "not sent" not in (await read0(rig)).detail
+
+
 async def test_a_device_backing_off_answers_no_answer_without_touching_the_connection() -> None:
     rig = Rig(silent(), backoff_after=3, backoff_for=60)
     for _ in range(3):
@@ -727,7 +778,7 @@ def test_tcp_owns_a_pymodbus_connection_and_passes_it_the_link_settings() -> Non
     connection = device._connection
     assert isinstance(connection, ModbusTcpConnection) and device._owns_connection
     assert (connection._timeout, connection._frame_gap, connection._clock) == (1.5, 0.02, clock)
-    assert (device.unit_id, device._busy_retries, device._clock) == (4, 1, clock)
+    assert (device.unit_id, device.busy.stop, device._clock) == (4, Attempts(2), clock)
     assert connection.client is None                               # nothing opened yet
 
 

@@ -98,9 +98,6 @@ class Model:
     scan_steps: tuple[ScanStep, ...] = ()
     poll_intervals: Mapping[PollRate, float | None] = DEFAULT_INTERVALS
     min_poll_interval: float = 0.0
-    retry_after: float = 1.0
-    """Seconds before a failed read is tried again, doubled at each further failure up to the
-    point's interval; 0 waits for the next regular read."""
     offline_after: float = 30.0
     """Seconds the device may go without answering before it counts as not answering."""
 
@@ -108,7 +105,7 @@ class Model:
                  options: ProtocolOptions, read_back_after: float,
                  identity_points: Sequence[Point[Any]] = (), scan_steps: Sequence[ScanStep] = (),
                  poll_intervals: Mapping[PollRate, float | None] = DEFAULT_INTERVALS,
-                 min_poll_interval: float = 0.0, retry_after: float = 1.0,
+                 min_poll_interval: float = 0.0,
                  offline_after: float = 30.0) -> None:
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "manufacturer", manufacturer)
@@ -119,7 +116,6 @@ class Model:
         object.__setattr__(self, "read_back_after", read_back_after)
         object.__setattr__(self, "poll_intervals", poll_intervals)
         object.__setattr__(self, "min_poll_interval", min_poll_interval)
-        object.__setattr__(self, "retry_after", retry_after)
         object.__setattr__(self, "offline_after", offline_after)
 
     def read_back_delay(self, point: Point[Any]) -> float:
@@ -271,10 +267,8 @@ def _model_problems(model: Model) -> list[str]:
         problems.append(f"read_back_after must be a finite number >= 0, got {model.read_back_after}")
     if model.min_poll_interval < 0:
         problems.append(f"min_poll_interval must be >= 0, got {model.min_poll_interval}")
-    for name in ("retry_after", "offline_after"):
-        seconds: float = getattr(model, name)
-        if not (math.isfinite(seconds) and seconds >= 0):
-            problems.append(f"{name} must be a finite number >= 0, got {seconds}")
+    if not (math.isfinite(model.offline_after) and model.offline_after >= 0):
+        problems.append(f"offline_after must be a finite number >= 0, got {model.offline_after}")
     for poll_rate, interval in model.poll_intervals.items():
         if interval is None:
             continue

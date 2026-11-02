@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from collections import Counter, deque
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from importlib import metadata
 from typing import Any
 
@@ -14,6 +14,7 @@ from ._connection import MicroNabtoConnection, describe
 from .._data_type import DataTypeKind
 from .._device import EncodedWrite, Identity, Outcome, ProtocolOptions, ReadResult, WriteResult
 from .._point import Access, Point
+from .._resilience import CircuitBreaker, Fixed, Steps, Wait
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -25,9 +26,6 @@ REREAD_ZEROS_FOR = 7.5
 the 10 s between two fast polls, as a Nilan gateway was seen answering a new session's first
 reads with zeros, and values 10 s later."""
 
-_FIRST_RETRY = 0.5
-_RETRY_EVERY = 1.0
-"""Readings again after zeros: at once, then this long after them, then once every second."""
 _HISTORY = 5
 """Requests a warning about zeros names from before them."""
 _ENDINGS = ("values_at_once", "values_after_waiting", "values_in_halves", "zeros_taken")
@@ -50,6 +48,30 @@ _READS: Mapping[type[Access], tuple[Callable[[Sequence[tuple[int, int]]], bytes]
 
 
 @dataclass(frozen=True)
+class RereadZeros:
+    """How registers answered with only zeros, where they held values, are read again before the
+    zeros are taken; until then their last values are kept."""
+    within: float = REREAD_ZEROS_FOR
+    """Seconds after the zeros until they are taken."""
+    wait: Wait = Steps(0.5, then=Fixed(1.0))
+    """When to read them again: the first time this long after the zeros, each next time this long
+    after the time before."""
+    at_once: bool = True
+    """Whether they are read again at once, before anything else."""
+    halves: bool = True
+    """Whether, at `within`, they are read in two halves, whose values are taken if they bring
+    any: a device may answer only zeros when asked for too many registers at once."""
+
+    def __post_init__(self) -> None:
+        if not self.within >= 0:
+            raise ValueError(f"within cannot be negative, got {self.within}")
+
+
+TAKE_ZEROS = RereadZeros(within=0.0, at_once=False, halves=False)
+"""Zeros are taken as they come: for a device known to answer zeros only where they are."""
+
+
+@dataclass(frozen=True)
 class MicroNabtoOptions(ProtocolOptions):
     """What a model states about its device in micro_nabto terms."""
     max_registers: int = MAX_REGISTERS_PER_READ
@@ -59,7 +81,13 @@ class MicroNabtoOptions(ProtocolOptions):
     for a later answer; None leaves the connection's. One given to the connection overrides it."""
     reread_zeros_for: float | None = None
     """Seconds after an answer of only zeros, where values were, until the zeros are taken; None
-    leaves `REREAD_ZEROS_FOR`. One given to the device overrides it."""
+    leaves `zeros`'. One given to the device overrides it."""
+    zeros: RereadZeros | None = None
+    """How an answer of only zeros, where values were, is read again; None leaves `RereadZeros()`.
+    One given to the device overrides it."""
+    handshake: CircuitBreaker | None = None
+    """How long requests fail at once after a failed handshake; None leaves the connection's. One
+    given to the connection overrides it."""
 
     def __post_init__(self) -> None:
         if self.max_registers < 1:
@@ -117,11 +145,13 @@ class MicroNabtoDevice:
     """A micro_nabto device; datapoints and setpoints are read in batches, setpoints written."""
 
     def __init__(self, connection: MicroNabtoConnection, *, owns_connection: bool = False,
-                 reread_zeros_for: float | None = None) -> None:
+                 reread_zeros_for: float | None = None, zeros: RereadZeros | None = None) -> None:
         """Args:
             owns_connection: whether `disconnect()` also closes the connection.
             reread_zeros_for: seconds after an answer of only zeros, where values were, until the
-                zeros are taken; None leaves it to the model, and to `REREAD_ZEROS_FOR`.
+                zeros are taken; None leaves it to `zeros`.
+            zeros: how an answer of only zeros, where values were, is read again; None leaves it
+                to the model, and to `RereadZeros()`.
 
         Raises:
             ValueError: `reread_zeros_for` is negative.
@@ -130,7 +160,7 @@ class MicroNabtoDevice:
             raise ValueError(f"reread_zeros_for cannot be negative, got {reread_zeros_for}")
         self._connection = connection
         self._owns_connection = owns_connection
-        self._reread_zeros_for = reread_zeros_for
+        self._own_zeros = _zeros(zeros, reread_zeros_for)
         self._episodes: dict[_Register, _Episode] = {}
         self._endings: Counter[str] = Counter()
         self._zero_rereads = 0
@@ -148,10 +178,11 @@ class MicroNabtoDevice:
 
     @classmethod
     def udp(cls, email: str, *, host: str | None = None, device_id: str | None = None,
-            reread_zeros_for: float | None = None, **kwargs: Any) -> MicroNabtoDevice:
+            reread_zeros_for: float | None = None, zeros: RereadZeros | None = None,
+            **kwargs: Any) -> MicroNabtoDevice:
         """A device on a connection of its own; `kwargs` go to `MicroNabtoConnection`."""
         return cls(MicroNabtoConnection(email, host=host, device_id=device_id, **kwargs), owns_connection=True,
-                   reread_zeros_for=reread_zeros_for)
+                   reread_zeros_for=reread_zeros_for, zeros=zeros)
 
     @property
     def options(self) -> MicroNabtoOptions | None:
@@ -159,14 +190,21 @@ class MicroNabtoDevice:
         return self._options
 
     @property
+    def zeros(self) -> RereadZeros:
+        """How an answer of only zeros, where values were, is read again: the device's when given,
+        else the model's, else `RereadZeros()`."""
+        if self._own_zeros is not None:
+            return self._own_zeros
+        if self._options is not None:
+            of_model = _zeros(self._options.zeros, self._options.reread_zeros_for)
+            if of_model is not None:
+                return of_model
+        return RereadZeros()
+
+    @property
     def reread_zeros_for(self) -> float:
-        """Seconds after an answer of only zeros until the zeros are taken: the device's when
-        given, else the model's, else `REREAD_ZEROS_FOR`."""
-        if self._reread_zeros_for is not None:
-            return self._reread_zeros_for
-        if self._options is not None and self._options.reread_zeros_for is not None:
-            return self._options.reread_zeros_for
-        return REREAD_ZEROS_FOR
+        """Seconds after an answer of only zeros until the zeros are taken."""
+        return self.zeros.within
 
     async def connect(self) -> Identity | None:
         """Establish the session. The identity is what the device says in the handshake."""
@@ -180,9 +218,11 @@ class MicroNabtoDevice:
         if options is None:
             self._options: MicroNabtoOptions | None = None
             self._connection.use_model_later_answer_wait(None)
+            self._connection.use_model_handshake(None)
         elif isinstance(options, MicroNabtoOptions):
             self._options = options
             self._connection.use_model_later_answer_wait(options.later_answer_wait)
+            self._connection.use_model_handshake(options.handshake)
         else:
             raise TypeError(f"a micro_nabto device needs MicroNabtoOptions, not {type(options).__name__}")
 
@@ -300,11 +340,11 @@ class MicroNabtoDevice:
                        values: list[int]) -> tuple[list[int], float | None]:
         """The values to take for an answer, or the seconds after which to read it again.
 
-        Registers answered with only zeros, where they held values, are read again at once. If the
-        zeros stay, they are not taken: the seconds until the next reading again are returned, half
-        a second after the zeros and then once a second, while values are taken whenever a reading
-        of these registers brings them. At `reread_zeros_for` after the zeros the registers are read
-        in two halves, and their values taken, or else the zeros.
+        Registers answered with only zeros, where they held values, are read again as `zeros`
+        says: at once, then, while the zeros are not taken, the seconds until the next reading
+        again are returned, and values are taken whenever a reading brings them. At its `within`
+        after the zeros the registers are read in two halves, and their values taken, or else the
+        zeros.
         """
         space = batch.space
         registers = [(space, obj, address) for obj, address in items]
@@ -319,6 +359,7 @@ class MicroNabtoDevice:
                 self._end(episode, "values_after_waiting")
             return values, None
         now = self._connection.clock.monotonic()
+        rule = self.zeros
         # While the device is known to answer zeros, one register read alone is no exception.
         zeros = (self._zeros_where_values_were(registers, values) if episode is not None
                  else self._only_zeros_where_values_were(registers, values))
@@ -328,7 +369,14 @@ class MicroNabtoDevice:
                 _LOGGER.warning("micro_nabto: %s answered values %.1f s after the zeros of %s; before them: %s; %s",
                                 span, took, episode.span, ", ".join(episode.readings), self._last_exchange())
             return values, None
-        if episode is None:
+        if episode is None and not rule.at_once:
+            self._only_zeros += 1
+            episode = _Episode(span, exchange.at if exchange is not None else now)
+            episode.readings.append("0.0 s only zeros")
+            _LOGGER.warning("micro_nabto: %s answered only zeros, where they held values; addresses %s; "
+                            "this read: %s; before it: %s; %s; %s", span, _addresses(items),
+                            _requests(self._this_read), self._history(now), _library(), self._last_exchange())
+        elif episode is None:
             self._only_zeros += 1
             episode = _Episode(span, exchange.at if exchange is not None else now)
             _LOGGER.warning("micro_nabto: %s answered only zeros, where they held values; reading them again "
@@ -344,17 +392,22 @@ class MicroNabtoDevice:
                 return again, None
             now = self._connection.clock.monotonic()
             episode.readings.append(f"{now - episode.started:.1f} s {'only zeros' if answered else 'no answer'}")
-            if self.reread_zeros_for > now - episode.started:
+            if rule.within > now - episode.started:
                 _LOGGER.warning("micro_nabto: %s read again at once: %s; the last values are kept, and the "
-                                "registers read again every second for up to %.1f s after the zeros",
-                                span, "only zeros" if answered else "no answer", self.reread_zeros_for)
+                                "registers read again for up to %.1f s after the zeros",
+                                span, "only zeros" if answered else "no answer", rule.within)
         else:
             episode.readings.append(f"{now - episode.started:.1f} s only zeros")
         for register in registers:
             self._episodes[register] = episode
         elapsed = now - episode.started
-        if elapsed < self.reread_zeros_for:
-            return values, _next_retry(elapsed, self.reread_zeros_for)
+        if elapsed < rule.within:
+            return values, _next_retry(rule.wait, elapsed, rule.within)
+        if not rule.halves:
+            took = self._end(episode, "zeros_taken")
+            _LOGGER.warning("micro_nabto: %s answered only zeros for %.1f s (%s): the zeros are taken; %s",
+                            span, took, ", ".join(episode.readings), self._last_exchange())
+            return values, None
         return await self._last_try(episode, space, span, items, registers, values), None
 
     async def _last_try(self, episode: _Episode, space: type[Access], span: str, items: Sequence[tuple[int, int]],
@@ -468,13 +521,25 @@ class MicroNabtoDevice:
             result[point.key] = raw
 
 
-def _next_retry(elapsed: float, until: float) -> float:
-    """Seconds from `elapsed` after the zeros until the next reading again: half a second after
-    them, then once a second, and last at `until`."""
-    step = _FIRST_RETRY
+def _zeros(zeros: RereadZeros | None, within: float | None) -> RereadZeros | None:
+    """`zeros`, or `RereadZeros()` where only `within` is given, taking `within` when given."""
+    if within is None:
+        return zeros
+    return replace(zeros or RereadZeros(), within=within)
+
+
+def _next_retry(wait: Wait, elapsed: float, until: float) -> float:
+    """Seconds from `elapsed` after the zeros until the next reading again: the times `wait` gives,
+    counted from the zeros, and last at `until`."""
+    tries = 1
+    step = wait.delay(tries)
     while step <= elapsed and step < until:
-        step += _RETRY_EVERY
-    return min(step, until) - elapsed
+        tries += 1
+        gap = wait.delay(tries)
+        if gap <= 0:
+            return 0.0
+        step += gap
+    return max(0.0, min(step, until) - elapsed)
 
 
 def _addresses(items: Sequence[tuple[int, int]]) -> str:

@@ -321,20 +321,18 @@ def test_a_device_read_back_delay_must_be_a_finite_number_of_seconds(seconds: fl
     assert any("read_back_after must be" in msg for msg in problems(model, {}))
 
 
-@pytest.mark.parametrize("name", ["retry_after", "offline_after"])
 @pytest.mark.parametrize("seconds", [-1.0, float("inf"), float("nan")])
-def test_a_retry_wait_and_a_grace_must_be_finite_numbers_of_seconds(name: str, seconds: float) -> None:
-    timing = {"retry_after": seconds} if name == "retry_after" else {"offline_after": seconds}
+def test_a_grace_must_be_a_finite_number_of_seconds(seconds: float) -> None:
     model = Model(name="X", manufacturer="Y", sections=[Section([Point(Key("a", int), read=HoldingRegister(1))])],
                   options=ModbusOptions(numbering=plain(first_address=1)), read_back_after=1.0,
-                  retry_after=timing.get("retry_after", 1.0), offline_after=timing.get("offline_after", 30.0))
-    assert any(f"{name} must be" in msg for msg in problems(model, {}))
+                  offline_after=seconds)
+    assert any("offline_after must be" in msg for msg in problems(model, {}))
 
 
-def test_a_model_retries_a_failed_read_after_a_second_and_waits_half_a_minute_before_an_outage() -> None:
+def test_a_model_waits_half_a_minute_before_an_outage() -> None:
     model = Model(name="X", manufacturer="Y", sections=[Section([Point(Key("a", int), read=HoldingRegister(1))])],
                   options=ModbusOptions(numbering=plain(first_address=1)), read_back_after=1.0)
-    assert (model.retry_after, model.offline_after) == (1.0, 30.0)
+    assert model.offline_after == 30.0
 
 
 @pytest.mark.parametrize("seconds,refused", [(0.0, True), (1.0, False)])
