@@ -236,7 +236,7 @@ async def test_the_warning_says_when_the_answer_of_only_zeros_came_to_a_request_
             await device.read([_dp(1), _dp(2)])
         assert "sent 2 time(s)" in _warnings(caplog)
         assert "for a later answer and none came" in _warnings(caplog) and "reading them again" in _warnings(caplog)
-        assert "read again 5 time(s)" in _warnings(caplog) and "only zeros, which are taken" in _warnings(caplog)
+        assert "only zeros, which are taken" in _warnings(caplog)
         diagnostics = device.diagnostics()
         assert (diagnostics["later_answer_waits"], diagnostics["later_answers_taken"]) == (1, 0)
 
@@ -254,7 +254,7 @@ async def test_the_warnings_say_how_old_the_session_was_and_when_values_came_bac
         with caplog.at_level(logging.WARNING, logger="modbus_event_connect.micro_nabto"):
             await device.read(points)
             assert "request 3 of a session 5.0 s old" in _warnings(caplog)
-            assert "read again 5 time(s) over 7.5 s: only zeros, which are taken" in _warnings(caplog)
+            assert "read again whole until 7.5 s after the zeros: only zeros, which are taken" in _warnings(caplog)
             await device.read(points)                                    # still zeros: no warning
             assert _warnings(caplog).count("micro_nabto") == 2
             simulated.datapoint_registers.update({(0, 1): 1, (0, 2): 2})
@@ -273,9 +273,26 @@ async def test_an_answer_of_only_zeros_is_read_again_at_once_and_its_values_take
         with caplog.at_level(logging.WARNING, logger="modbus_event_connect.micro_nabto"):
             answers = await device.read(points)
         assert [a.registers for a in answers.values()] == [(1,), (2,), (3,)]
-        assert "reading them again for up to 7.5 s" in _warnings(caplog)
-        assert "read again 1 time(s) over" in _warnings(caplog) and "values, which are taken" in _warnings(caplog)
+        assert "reading them again in two halves at once, then whole for up to 7.5 s" in _warnings(caplog)
+        assert "read again in two halves: values, which are taken" in _warnings(caplog)
         assert device.diagnostics()["answers_of_only_zeros"] == 1
+
+
+async def test_zeros_to_a_read_too_large_for_the_device_are_replaced_by_reading_it_in_halves(
+        caplog: pytest.LogCaptureFixture) -> None:
+    pauses = list[float]()
+    async with _simulated() as simulated:
+        device = _device(simulated, pauses=pauses)
+        assert await device.connect() is not None
+        points = [_dp(1), _dp(2), _dp(3), _dp(4)]
+        await device.read(points)
+        simulated.zeros_above = 2
+        with caplog.at_level(logging.WARNING, logger="modbus_event_connect.micro_nabto"):
+            answers = await device.read(points)
+        assert [a.registers for a in answers.values()] == [(1,), (2,), (3,), (4,)]
+        assert pauses == [] and "read again in two halves: values, which are taken" in _warnings(caplog)
+        diagnostics = device.diagnostics()
+        assert (diagnostics["zeros_replaced"], diagnostics["zeros_replaced_by_halves"]) == (1, 1)
 
 
 async def test_zeros_are_read_again_after_growing_pauses_until_values_come(
@@ -286,15 +303,15 @@ async def test_zeros_are_read_again_after_growing_pauses_until_values_come(
         assert await device.connect() is not None
         points = [_dp(1), _dp(2), _dp(3)]
         await device.read(points)
-        simulated.zero_answers = 3                       # the read and its first two readings again
+        simulated.zero_answers = 3          # the read, its first half, and the first whole read again
         with caplog.at_level(logging.WARNING, logger="modbus_event_connect.micro_nabto"):
             answers = await device.read(points)
         assert [a.registers for a in answers.values()] == [(1,), (2,), (3,)]
         assert pauses == [0.5, 1.0]
-        assert "read again 3 time(s) over 1.5 s: values, which are taken" in _warnings(caplog)
+        assert "read again whole 1.5 s after the zeros: values, which are taken" in _warnings(caplog)
         diagnostics = device.diagnostics()
-        assert (diagnostics["zero_rereads"], diagnostics["zeros_replaced"], diagnostics["longest_until_values"]) \
-            == (3, 1, 1.5)
+        assert (diagnostics["zero_rereads"], diagnostics["zeros_replaced"], diagnostics["zeros_replaced_by_halves"],
+                diagnostics["longest_until_values"]) == (3, 1, 0, 1.5)
 
 
 async def test_zeros_that_stay_are_taken_once_the_next_pause_would_pass_reread_zeros_for(
@@ -310,11 +327,11 @@ async def test_zeros_that_stay_are_taken_once_the_next_pause_would_pass_reread_z
             answers = await device.read(points)
         assert {a.registers for a in answers.values()} == {(0,)}
         assert pauses == [0.5, 1.0, 2.0, 4.0]
-        assert "read again 5 time(s)" in _warnings(caplog) and "only zeros, which are taken" in _warnings(caplog)
-        assert device.diagnostics()["zeros_replaced"] == 0
+        assert "only zeros, which are taken" in _warnings(caplog)
+        assert (device.diagnostics()["zero_rereads"], device.diagnostics()["zeros_replaced"]) == (5, 0)
 
 
-async def test_with_no_time_to_reread_zeros_they_are_read_again_once_at_once() -> None:
+async def test_with_no_time_to_reread_zeros_they_are_read_again_only_at_once() -> None:
     pauses = list[float]()
     async with _simulated() as simulated:
         device = _device(simulated, pauses=pauses, reread_zeros_for=0)

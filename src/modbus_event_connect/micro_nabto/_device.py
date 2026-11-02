@@ -122,6 +122,7 @@ class MicroNabtoDevice:
         self._sleep = sleep
         self._zero_rereads = 0
         self._zeros_replaced = 0
+        self._zeros_replaced_by_halves = 0
         self._longest_until_values = 0.0
         self._options: MicroNabtoOptions | None = None
         self._outcomes: Counter[Outcome] = Counter()
@@ -223,6 +224,7 @@ class MicroNabtoDevice:
             "reread_zeros_for": self.reread_zeros_for,
             "zero_rereads": self._zero_rereads,
             "zeros_replaced": self._zeros_replaced,
+            "zeros_replaced_by_halves": self._zeros_replaced_by_halves,
             "longest_until_values": self._longest_until_values,
             **self._connection.diagnostics(),
         }
@@ -245,13 +247,32 @@ class MicroNabtoDevice:
     def _only_zeros_where_values_were(self, registers: Sequence[_Register], values: Sequence[int]) -> bool:
         """Whether `values` are all 0, of more than one register, where those last held something else:
         a Nilan gateway was reported answering a whole read so now and then."""
-        return len(values) > 1 and not any(values) and any(self._last.get(r, 0) for r in registers)
+        return len(values) > 1 and self._zeros_where_values_were(registers, values)
+
+    def _zeros_where_values_were(self, registers: Sequence[_Register], values: Sequence[int]) -> bool:
+        return not any(values) and any(self._last.get(r, 0) for r in registers)
+
+    async def _read_in_halves(self, build: Callable[[Sequence[tuple[int, int]]], bytes], parse: _Parse,
+                              registers: Sequence[_Register], items: Sequence[tuple[int, int]]) -> list[int] | None:
+        """`items` read in two requests, or None where an answer does not fit or either half is
+        still only zeros where values were."""
+        middle = len(items) // 2
+        values: list[int] = []
+        for start, end in ((0, middle), (middle, len(items))):
+            answer = await self._connection.request(build(items[start:end]))
+            self._zero_rereads += 1
+            found = parse(answer) if answer is not None else None
+            if found is None or len(found) != end - start or self._zeros_where_values_were(registers[start:end], found):
+                return None
+            values += found
+        return values
 
     async def _checked(self, build: Callable[[Sequence[tuple[int, int]]], bytes], parse: _Parse,
                        space: type[Access], items: Sequence[tuple[int, int]], values: list[int]) -> list[int]:
         """The values to take for an answer: an answer of only zeros where values were is logged,
-        and the registers read again at once, then after growing pauses until values come or the
-        pauses would pass `reread_zeros_for`; the last answer is taken, values or zeros."""
+        and the registers read again at once in two halves, then whole after growing pauses until
+        values come or the pauses would pass `reread_zeros_for`; the last answer is taken, values
+        or zeros."""
         registers = [(space, obj, address) for obj, address in items]
         span = f"{space.__name__} {items[0][1]} to {items[-1][1]}"
         exchange = self._connection.last_exchange
@@ -265,33 +286,44 @@ class MicroNabtoDevice:
         self._only_zeros += 1
         budget = self.reread_zeros_for
         _LOGGER.warning("micro_nabto: %s answered only zeros, where they held values; reading them again "
-                        "for up to %.1f s; %s", span, budget, self._last_exchange())
+                        "in two halves at once, then whole for up to %.1f s; %s", span, budget, self._last_exchange())
+        # A gateway that cannot answer so many registers at once answers the halves; one that
+        # holds no values yet answers zeros to them too, and is given time.
+        halves = await self._read_in_halves(build, parse, registers, items)
+        if halves is not None:
+            self._zeros_replaced += 1
+            self._zeros_replaced_by_halves += 1
+            _LOGGER.warning("micro_nabto: %s read again in two halves: values, which are taken; %s",
+                            span, self._last_exchange())
+            return halves
         first = exchange.at if exchange is not None else 0.0
-        pause, paused, rereads = 0.0, 0.0, 0
-        while True:
-            if pause:
-                await self._sleep(pause)
+        pause, paused = _FIRST_PAUSE, 0.0
+        while paused + pause <= budget:
+            paused += pause
+            await self._sleep(pause)
             answer = await self._connection.request(build(items))
-            rereads += 1
             self._zero_rereads += 1
             again = parse(answer) if answer is not None else None
             if again is None or len(again) != len(values):
-                _LOGGER.warning("micro_nabto: %s read again %d time(s): no answer that fits, so the zeros "
-                                "are taken", span, rereads)
+                _LOGGER.warning("micro_nabto: %s read again after %.1f s: no answer that fits, so the zeros "
+                                "are taken", span, paused)
                 return values
-            took = self._connection.last_exchange.at - first if self._connection.last_exchange else 0.0
             if any(again):
+                took = self._since(first)
                 self._zeros_replaced += 1
                 self._longest_until_values = max(self._longest_until_values, took)
-                _LOGGER.warning("micro_nabto: %s read again %d time(s) over %.1f s: values, which are taken; %s",
-                                span, rereads, took, self._last_exchange())
+                _LOGGER.warning("micro_nabto: %s read again whole %.1f s after the zeros: values, which are "
+                                "taken; %s", span, took, self._last_exchange())
                 return again
-            pause = pause * 2 if pause else _FIRST_PAUSE
-            if paused + pause > budget:
-                _LOGGER.warning("micro_nabto: %s read again %d time(s) over %.1f s: only zeros, which are "
-                                "taken; %s", span, rereads, took, self._last_exchange())
-                return again
-            paused += pause
+            values = again
+            pause *= 2
+        _LOGGER.warning("micro_nabto: %s read again whole until %.1f s after the zeros: only zeros, which are "
+                        "taken; %s", span, self._since(first), self._last_exchange())
+        return values
+
+    def _since(self, at: float) -> float:
+        exchange = self._connection.last_exchange
+        return exchange.at - at if exchange is not None else 0.0
 
     def _note_values(self, space: type[Access], items: Sequence[tuple[int, int]], values: Sequence[int]) -> None:
         """Remember the values taken, and log when registers that were taken as only zeros hold

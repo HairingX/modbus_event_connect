@@ -78,6 +78,9 @@ class SimulatedMicroNabtoDevice:
         sending's answer as usual: what a Nilan gateway was suspected of doing."""
         self.zero_answers = 0
         """Reads still to answer with zeros where their values belong."""
+        self.zeros_above: int | None = None
+        """Answer every read of more registers than this with zeros where its values belong, as a
+        gateway that cannot answer a large read would; None answers every read."""
 
         self.datagrams = 0
         """Datagrams that reached the device, answered or not."""
@@ -212,6 +215,8 @@ class SimulatedMicroNabtoDevice:
         if self.zero_answers > 0 and zeros is not None:
             self.zero_answers -= 1
             answer = zeros
+        elif zeros is not None and self.zeros_above is not None and _registers_in(command[3], answer) > self.zeros_above:
+            answer = zeros
         packet = _answer_packet(client_id, server_id, sequence, answer)
         for _ in range(2 if self.duplicate else 1):
             if self.answer_delay > 0:
@@ -308,6 +313,11 @@ def _answer_packet(client_id: bytes, server_id: bytes, sequence: bytes, answer: 
               + b"\x36\x00" + (total - 16).to_bytes(2, "big") + b"\x00\x0a"
               + answer + bytes([padding]) * padding)
     return packet + (sum(packet) & 0xFFFF).to_bytes(2, "big")
+
+
+def _registers_in(code: int, answer: bytes) -> int:
+    """How many registers `answer` to a read holds."""
+    return (len(answer) - {_DATAPOINT_READ: 2, _SETPOINT_READ: 3}[code]) // 2
 
 
 def _only_zeros(code: int, answer: bytes) -> bytes | None:
