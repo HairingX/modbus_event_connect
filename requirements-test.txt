@@ -3,5 +3,6 @@
 pytest==9.1.1
 pytest-asyncio==1.4.0
 pyright==1.1.414
+pytest-cov==7.1.0
 # The newest pymodbus the package accepts, so a new release is tested in its own pull request.
 pymodbus==3.16.1
