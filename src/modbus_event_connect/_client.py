@@ -524,14 +524,16 @@ class Client:
     async def poll(self) -> None:
         """
         Read whatever is due, and read again what each scan read when that is due, to find out
-        whether the unit has changed. A call made during a pass waits for it instead of starting
-        another.
+        whether the unit has changed. A call made during a pass waits for it, then makes a pass
+        of its own only if something is still due.
 
         Raises:
             UnsupportedDeviceError: the unit changed, and no model matches it any more.
         """
         if self._poll_lock.locked():
             async with self._poll_lock:
+                pass
+            if not self._anything_due():
                 return
         async with self._poll_lock:
             before = self._available_points()
@@ -549,6 +551,12 @@ class Client:
                     await self._run_checks()
             finally:
                 self._tell_points(before)
+
+    def _anything_due(self) -> bool:
+        if self._scheduler is None:
+            return True
+        requested = self._checks_requested
+        return bool(self._scheduler.due()) or (requested is not None and requested <= self._clock.monotonic())
 
     async def _run_checks(self) -> None:
         """Read again what each due scan read, and scan again where that has changed."""
@@ -651,6 +659,8 @@ class Client:
             success = answer.outcome is Outcome.OK and data.quality is not Quality.STALE
             self._consecutive_failures[point.key] = 0 if success else self.consecutive_failures(point.key) + 1
             scheduler.record(point.key, data, success=success)
+            if answer.retry_after is not None:
+                scheduler.refresh([point.key], after=answer.retry_after, force=True)
             self._store(point, data, previous)
 
     def _data_value(self, point: Point[Any], answer: ReadResult, previous: DataValue[Any] | None) -> DataValue[Any]:

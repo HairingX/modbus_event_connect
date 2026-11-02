@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
+from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -104,6 +105,8 @@ class Exchange:
     """Whether an answer to the request was set aside for a later answer to it."""
     waited: float = 0.0
     """Seconds the request was kept open for a later answer; 0 when it was not."""
+    session_reason: str = ""
+    """Why the session was established, and how long after the answer before it."""
 
 
 class MicroNabtoConnection:
@@ -176,10 +179,26 @@ class MicroNabtoConnection:
         self._later_answer_waits = 0
         self._later_answers_taken = 0
         self._longest_later_answer_wait = 0.0
+        self._next_reason = "on connect"
+        self._session_reason = ""
+        self._silent_since: float | None = None
+        """When the answer came before the request that went unanswered; None while answering."""
+        self._unanswered = 0
+        self._silences = 0
+        self._longest_silence = 0.0
+        self._refusals: Counter[int] = Counter()
+        self._refusal_logged: int | None = None
+        self._answer_before = 0.0
+        """When the last answer before the session being established came."""
 
     @property
     def connected(self) -> bool:
         return self._server_id is not None
+
+    @property
+    def clock(self) -> Clock:
+        """The clock every time this connection measures is on."""
+        return self._clock
 
     @property
     def later_answer_wait(self) -> float:
@@ -213,6 +232,7 @@ class MicroNabtoConnection:
         """
         async with self._lock:
             self._backoff_until = None
+            self._next_reason = "on connect"
             return await self._establish()
 
     async def close(self) -> None:
@@ -235,7 +255,7 @@ class MicroNabtoConnection:
                 return None
             answer = await self._data(command, accept)
             if answer is None:
-                _LOGGER.info("micro_nabto: no answer; establishing the session anew")
+                self._note_unanswered()
                 if not await self._reestablish():
                     return None
                 answer = await self._data(command, accept)
@@ -257,14 +277,47 @@ class MicroNabtoConnection:
             "later_answer_waits": self._later_answer_waits,
             "later_answers_taken": self._later_answers_taken,
             "longest_later_answer_wait": self._longest_later_answer_wait,
+            "silences": self._silences,
+            "longest_silence": self._longest_silence,
+            "refusals": {f"0x{status:04x}": count for status, count in sorted(self._refusals.items())},
         }
+
+    def _note_unanswered(self) -> None:
+        """Log the first request a device leaves unanswered, once until it answers again."""
+        self._unanswered += 1
+        exchange = self._last_exchange
+        request = exchange.session_request if exchange is not None else 0
+        self._next_reason = f"after no answer to request {request}"
+        if self._silent_since is not None:
+            _LOGGER.debug("micro_nabto: no answer again, %d unanswered", self._unanswered)
+            return
+        self._silent_since = self._last_answer
+        self._silences += 1
+        age = f"{exchange.session_age:.1f}" if exchange is not None and exchange.session_age is not None else "?"
+        _LOGGER.warning("micro_nabto: no answer to request %d of a session %s s old (%s), sent %d time(s), "
+                        "%.1f s after the last answer; establishing the session anew",
+                        request, age, self._session_reason or "no session",
+                        exchange.sends if exchange is not None else 0,
+                        self._clock.monotonic() - self._last_answer)
+
+    def _note_answered(self) -> None:
+        if self._silent_since is None:
+            return
+        silent = self._clock.monotonic() - self._silent_since
+        self._longest_silence = max(self._longest_silence, silent)
+        _LOGGER.warning("micro_nabto: answering again, %.1f s after the last answer before it went silent; "
+                        "%d request(s) unanswered meanwhile", silent, self._unanswered)
+        self._silent_since = None
+        self._unanswered = 0
 
     # ------------------------------------------------------------------------ session
 
     async def _ready(self) -> bool:
         if self._server_id is not None:
-            if self._clock.monotonic() - self._last_answer <= self._session_idle:
+            idle = self._clock.monotonic() - self._last_answer
+            if idle <= self._session_idle:
                 return True
+            self._next_reason = f"after {idle:.1f} s unused"
             return await self._reestablish()
         if self._backoff_until is not None and self._clock.monotonic() < self._backoff_until:
             return False
@@ -278,6 +331,7 @@ class MicroNabtoConnection:
             return False
 
     async def _establish(self) -> Identity | None:
+        self._answer_before = self._last_answer
         self._server_id = None
         if self._transport is None:
             self._transport = await _open_endpoint(self._receive)
@@ -298,9 +352,17 @@ class MicroNabtoConnection:
         if not isinstance(connected, wire.ConnectReply):
             return None
         if not connected.accepted:
-            raise AuthenticationError("the device refused the handshake; is the email paired with it?")
+            if connected.status in (wire.REFUSED_ACCESS, 0):
+                raise AuthenticationError("the device refused the handshake; is the email paired with it?")
+            self._refused(connected.status)
+            return None
         self._server_id = connected.server_id
-        self._session_started = self._clock.monotonic()
+        now = self._clock.monotonic()
+        before = f", {now - self._answer_before:.1f} s after the last answer" if self._answer_before else ""
+        self._session_reason = f"started {self._next_reason}{before}"
+        self._next_reason = "after the session ended"
+        self._refusal_logged = None
+        self._session_started = now
         self._session_requests = 0
         answer = await self._data(wire.ping())
         found = wire.identity(answer) if answer is not None else None
@@ -356,6 +418,7 @@ class MicroNabtoConnection:
                 if not future.done():
                     future.cancel()
             self._answered += 1
+            self._note_answered()
             self._last_answer = self._clock.monotonic()
             self._latency_total += self._last_answer - started
             self._max_latency = max(self._max_latency, self._last_answer - started)
@@ -377,6 +440,16 @@ class MicroNabtoConnection:
         self._exchanged(sequence, self._retries + 1, acknowledged, started, None)
         return None
 
+    def _refused(self, status: int) -> None:
+        """Count a handshake the device refused for a reason other than the email, and log it
+        once a status until a session is established."""
+        self._refusals[status] += 1
+        if self._refusal_logged == status:
+            return
+        self._refusal_logged = status
+        _LOGGER.warning("micro_nabto: the device refused the session with status 0x%04x (%s); trying again "
+                        "in %.0f s", status, wire.CONNECT_STATUSES.get(status, "unknown"), self._backoff_for)
+
     async def _later_answer(self, sequence: int) -> wire.DataReply | None:
         """Another answer to the request with `sequence`, if one comes within `later_answer_wait`."""
         loop = asyncio.get_running_loop()
@@ -396,7 +469,7 @@ class MicroNabtoConnection:
         now = self._clock.monotonic()
         age = now - self._session_started if self._session_started is not None else None
         self._last_exchange = Exchange(sequence, sends, acknowledged, now - started, answer,
-                                       now, age, self._session_requests, set_aside, waited)
+                                       now, age, self._session_requests, set_aside, waited, self._session_reason)
 
     def _send(self, datagram: bytes) -> None:
         if self._transport is not None and self._address is not None and not self._transport.is_closing():
@@ -425,7 +498,8 @@ def describe(exchange: Exchange) -> str:
     """`exchange` in one line for a log, its answer in hex: only for an answer that cannot carry
     the email, as a ping's does."""
     answer = exchange.answer.hex(" ") if exchange.answer is not None else "none"
-    session = (f"request {exchange.session_request} of a session {exchange.session_age:.1f} s old"
+    reason = f" ({exchange.session_reason})" if exchange.session_reason else ""
+    session = (f"request {exchange.session_request} of a session {exchange.session_age:.1f} s old{reason}"
                if exchange.session_age is not None else "no session")
     return (f"{session}, sequence {exchange.sequence}, sent {exchange.sends} time(s), "
             f"{'acknowledged' if exchange.acknowledged else 'not acknowledged'} first, "
