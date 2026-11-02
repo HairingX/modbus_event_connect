@@ -659,6 +659,8 @@ class Client:
             success = answer.outcome is Outcome.OK and data.quality is not Quality.STALE
             self._consecutive_failures[point.key] = 0 if success else self.consecutive_failures(point.key) + 1
             scheduler.record(point.key, data, success=success)
+            if answer.retry_after is not None:
+                scheduler.refresh([point.key], after=answer.retry_after, force=True)
             self._store(point, data, previous)
 
     def _data_value(self, point: Point[Any], answer: ReadResult, previous: DataValue[Any] | None) -> DataValue[Any]:

@@ -53,6 +53,12 @@ def test_a_connect_reply_without_the_accepted_status_is_a_refusal() -> None:
     assert isinstance(answer, wire.ConnectReply) and not answer.accepted
 
 
+def test_a_connect_reply_carries_the_status_it_was_refused_with() -> None:
+    busy = CONNECT_REPLY[:20] + wire.BUSY.to_bytes(4, "big") + CONNECT_REPLY[24:]
+    answer = wire.reply(busy, CLIENT)
+    assert isinstance(answer, wire.ConnectReply) and (answer.accepted, answer.status) == (False, wire.BUSY)
+
+
 def test_the_receipt_sent_ahead_of_an_answer_says_the_device_has_the_request() -> None:
     """uNabto's NOTIFY payload with NOTIFY_MICRO_ACK: "the Micro has received the request, but the
     answer isn't ready yet"."""

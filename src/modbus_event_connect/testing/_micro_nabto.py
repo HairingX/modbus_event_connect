@@ -78,6 +78,11 @@ class SimulatedMicroNabtoDevice:
         sending's answer as usual: what a Nilan gateway was suspected of doing."""
         self.zero_answers = 0
         """Reads still to answer with zeros where their values belong."""
+        self.zeros_until: float | None = None
+        """Answer every read with zeros where its values belong until this time on `clock`, as a
+        gateway that holds no values yet would; None answers with values."""
+        self.busy_handshakes = 0
+        """Handshakes still to refuse with uNabto's BUSY, as a device with no session free does."""
         self.zeros_above: int | None = None
         """Answer every read of more registers than this with zeros where its values belong, as a
         gateway that cannot answer a large read would; None answers every read."""
@@ -172,14 +177,17 @@ class SimulatedMicroNabtoDevice:
     def _connect(self, data: bytes, addr: tuple[str, int]) -> None:
         client_id, sequence = data[:4], data[12:14]
         email = _email(data)
-        if email is not None and email in self.emails:
+        if self.busy_handshakes > 0:
+            self.busy_handshakes -= 1
+            server_id, status = bytes(4), wire.BUSY.to_bytes(4, "big")
+        elif email is not None and email in self.emails:
             server_id = self._next_server_id.to_bytes(4, "big")
             self._next_server_id += 1
             self._sessions[client_id] = _Session(server_id, email, self.clock.monotonic())
             self.handshakes.append(client_id)
             status = wire.ACCEPTED
         else:
-            server_id, status = bytes(4), bytes(4)
+            server_id, status = bytes(4), wire.REFUSED_ACCESS.to_bytes(4, "big")
         body = (b"\x34\x00\x00\x0c" + status + server_id
                 + b"\x3b\x00\x00\x0d" + bytes(4) + b"\x3c\x00\x00\x03\x3c")
         self._send(_header(client_id, bytes(4), _U_CONNECT, sequence, 16 + len(body)) + body, addr)
@@ -216,6 +224,8 @@ class SimulatedMicroNabtoDevice:
             self.zero_answers -= 1
             answer = zeros
         elif zeros is not None and self.zeros_above is not None and _registers_in(command[3], answer) > self.zeros_above:
+            answer = zeros
+        elif zeros is not None and self.zeros_until is not None and now < self.zeros_until:
             answer = zeros
         packet = _answer_packet(client_id, server_id, sequence, answer)
         for _ in range(2 if self.duplicate else 1):

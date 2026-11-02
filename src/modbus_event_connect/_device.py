@@ -45,10 +45,15 @@ class ReadResult:
     exception_code: int = 0
     """The protocol's own code, for logs and diagnostics. The core never branches on it."""
     detail: str = ""
+    retry_after: float | None = None
+    """Seconds after which the device asks for the point to be read again, sooner than its poll
+    rate would; None leaves it to the poll rate."""
 
     def __post_init__(self) -> None:
         if (self.outcome is Outcome.OK) != bool(self.registers):
             raise ValueError("registers are present exactly when the outcome is OK")
+        if self.retry_after is not None and self.retry_after < 0:
+            raise ValueError(f"retry_after cannot be negative, got {self.retry_after}")
 
 
 @dataclass(frozen=True)
