@@ -772,6 +772,12 @@ async def test_connect_reports_an_unreachable_link_as_none() -> None:
     assert await ModbusDevice(gateway, 1).connect() is None
 
 
+def test_a_tcp_device_must_be_told_whether_to_reconnect() -> None:
+    unstated: dict[str, Any] = {}
+    with pytest.raises(TypeError, match="reconnect"):
+        ModbusDevice.tcp(HOST, **unstated)
+
+
 def test_tcp_owns_a_pymodbus_connection_and_passes_it_the_link_settings() -> None:
     clock = FakeClock()
     device = ModbusDevice.tcp(HOST, 1502, unit_id=4, timeout=1.5, frame_gap=0.02, reconnect=False, clock=clock,
@@ -840,7 +846,7 @@ class LeakyClient:
 
 
 async def test_nothing_a_device_reports_names_its_host() -> None:
-    device = configured(ModbusDevice.tcp(HOST, 1502, clock=FakeClock(), sleep=Sleeps()))
+    device = configured(ModbusDevice.tcp(HOST, 1502, reconnect=True, clock=FakeClock(), sleep=Sleeps()))
     assert isinstance(device._connection, ModbusTcpConnection)
     device._connection._client = LeakyClient()                      # no network
     raw = (await device.read([u16("a", HoldingRegister(0))]))["a"]
@@ -871,7 +877,8 @@ class SilentClient:
 
 async def test_a_silent_device_is_reconnected_to_only_until_the_backoff_and_once_per_probe() -> None:
     clock = FakeClock()
-    device = configured(ModbusDevice.tcp(HOST, clock=clock, sleep=Sleeps(), backoff_after=3, backoff_for=60))
+    device = configured(ModbusDevice.tcp(HOST, reconnect=True, clock=clock, sleep=Sleeps(), backoff_after=3,
+                                         backoff_for=60))
     assert isinstance(device._connection, ModbusTcpConnection)
     client = SilentClient()
     device._connection._client = client                             # no network

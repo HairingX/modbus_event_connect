@@ -65,7 +65,7 @@ class Live:
 @pytest_asyncio.fixture(scope="module", loop_scope="module")  # pyright: ignore[reportUntypedFunctionDecorator, reportUnknownMemberType]
 async def live() -> AsyncGenerator[Live, None]:
     assert HOST is not None   # guarded by the skip above
-    connection = ModbusTcpConnection(HOST, PORT)
+    connection = ModbusTcpConnection(HOST, PORT, reconnect=True)
     read = connection.request
 
     async def only_reads(request: Request) -> Response:

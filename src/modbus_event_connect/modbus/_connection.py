@@ -113,19 +113,19 @@ class ModbusTcpConnection:
     """Modbus TCP through pymodbus's `AsyncModbusTcpClient`, natively async; holds its own lock
     to measure the frame gap from the end of the previous answer.
 
-    The link is opened by `open()`, and by a request that finds it closed unless `reconnect` is
-    off; never in the background. There is one link at a time.
+    The link is opened by `open()`, and by a request that finds it closed when `reconnect` says
+    so; never in the background. There is one link at a time.
     """
 
-    def __init__(self, host: str, port: int = 502, *, timeout: float = 3.0, frame_gap: float = 0.0,
-                 reconnect: bool = True, client: Any = None, clock: Clock | None = None,
+    def __init__(self, host: str, port: int = 502, *, reconnect: bool, timeout: float = 3.0,
+                 frame_gap: float = 0.0, client: Any = None, clock: Clock | None = None,
                  sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
         """Args:
+            reconnect: whether a request opens a link that is not open, as one the device
+                dropped or a timeout closed. If not, only `open()` opens it, and a request on a
+                closed link is no answer.
             timeout: seconds to wait for an answer; a lost answer is reported, not retried.
             frame_gap: seconds kept between the end of one answer and the next request.
-            reconnect: whether a request opens a link that is not open, as one the device
-                dropped or a timeout closed. Off, only `open()` opens it, and a request on a
-                closed link is no answer.
             client: a pymodbus client to use in place of one made from `host` and `port`, with
                 its settings as given. One that reconnects by itself opens links this connection
                 does not know of."""

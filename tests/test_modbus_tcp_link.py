@@ -64,7 +64,7 @@ async def server() -> AsyncIterator[Server]:
 
 
 async def test_a_link_the_device_dropped_is_reopened_once_and_closed_with_the_connection(server: Server) -> None:
-    conn = ModbusTcpConnection("127.0.0.1", server.port, timeout=1.0)
+    conn = ModbusTcpConnection("127.0.0.1", server.port, timeout=1.0, reconnect=True)
     assert (await conn.request(READ)).ok
     server.drop()
     await asyncio.sleep(0.02)

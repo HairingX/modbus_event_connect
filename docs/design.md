@@ -685,7 +685,7 @@ The Modbus unit id is a field of every request, not a property of the connection
 already takes it per call; only our transport pins it at construction.
 
 ```python
-gateway = ModbusTcpConnection(host, port)        # one link; the host owns and closes it
+gateway = ModbusTcpConnection(host, port, reconnect=True)  # one link; the host owns and closes it
 lamps   = LampClient(gateway, unit_id=1)
 fan     = FanClient(gateway, unit_id=2)
 blinds  = BlindClient(gateway, unit_id=3)
@@ -693,8 +693,9 @@ blinds  = BlindClient(gateway, unit_id=3)
 
 - The **connection** sends one request at a time, keeps an optional pause between frames (RS-485
   gateways need it), and reopens a link that was lost when the next request needs it - never in
-  the background, so there is only ever one link. `reconnect=False` leaves a lost link closed
-  until the host opens it again; when it is asked again is the device's `CircuitBreaker`.
+  the background, so there is only ever one link. Whoever makes the connection states whether it
+  does: `reconnect` has no default, as leaving a lost link closed until the host opens it again
+  is as reasonable a choice as reopening it. When a device is asked again is its `CircuitBreaker`.
 - Every request returns its **status with its response**, never through a "last call"
   property: on a shared connection that would describe whichever request finished last.
 - Reachability, `OFFLINE` and failure counts belong to each device. A device behind a gateway

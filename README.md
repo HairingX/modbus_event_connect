@@ -67,7 +67,7 @@ def on_change(key, old, new):
     print(f"{key}: {new.value} ({new.quality.name})")
 
 async def main():
-    client = Client(ModbusDevice.tcp("<device-ip>"), THERMOSTAT)
+    client = Client(ModbusDevice.tcp("<device-ip>", reconnect=True), THERMOSTAT)
     await client.connect()                  # reads every point once
     client.subscribe(TEMPERATURE, on_change)
     await client.write(TARGET, 21.5)
@@ -95,11 +95,12 @@ least as often as your fastest poll rate.
 from modbus_event_connect.modbus import ModbusDevice, ModbusTcpConnection
 from modbus_event_connect.micro_nabto import MicroNabtoDevice
 
-# Modbus TCP, one device
-device = ModbusDevice.tcp("<device-ip>", unit_id=1)
+# Modbus TCP, one device. reconnect=True: a lost link is opened again when it is next needed;
+# with False, only the host opens it again, as connect() does.
+device = ModbusDevice.tcp("<device-ip>", unit_id=1, reconnect=True)
 
 # Several Modbus devices behind one gateway, sharing its connection
-gateway = ModbusTcpConnection("<gateway-ip>")
+gateway = ModbusTcpConnection("<gateway-ip>", reconnect=True)
 heating = ModbusDevice(gateway, unit_id=1)
 blinds = ModbusDevice(gateway, unit_id=3)
 
