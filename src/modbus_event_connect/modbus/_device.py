@@ -54,7 +54,7 @@ BUSY = Retry(Exponential(0.2), Attempts(5))
 BREAKER = CircuitBreaker(after=3, pause=Fixed(60.0))
 """After 3 requests in a row left unanswered, the device is not asked for 60 s, then probed."""
 
-_CONNECTION_KEYWORDS = ("timeout", "frame_gap")
+_CONNECTION_KEYWORDS = ("timeout", "frame_gap", "reconnect")
 """`ModbusDevice.tcp()` keywords that belong to the connection rather than the device."""
 
 
@@ -145,8 +145,8 @@ class ModbusDevice:
 
     @classmethod
     def tcp(cls, host: str, port: int = 502, unit_id: int = 1, **kwargs: Any) -> ModbusDevice:
-        """A device on a Modbus TCP connection of its own. `timeout` and `frame_gap` go to the
-        connection, `clock` to both, everything else to the device."""
+        """A device on a Modbus TCP connection of its own. `timeout`, `frame_gap` and `reconnect` go
+        to the connection, `clock` to both, everything else to the device."""
         connection_kwargs: dict[str, Any] = {k: kwargs.pop(k) for k in _CONNECTION_KEYWORDS if k in kwargs}
         if "clock" in kwargs:
             connection_kwargs["clock"] = kwargs["clock"]

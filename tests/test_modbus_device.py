@@ -774,10 +774,12 @@ async def test_connect_reports_an_unreachable_link_as_none() -> None:
 
 def test_tcp_owns_a_pymodbus_connection_and_passes_it_the_link_settings() -> None:
     clock = FakeClock()
-    device = ModbusDevice.tcp(HOST, 1502, unit_id=4, timeout=1.5, frame_gap=0.02, clock=clock, busy_retries=1)
+    device = ModbusDevice.tcp(HOST, 1502, unit_id=4, timeout=1.5, frame_gap=0.02, reconnect=False, clock=clock,
+                              busy_retries=1)
     connection = device._connection
     assert isinstance(connection, ModbusTcpConnection) and device._owns_connection
-    assert (connection._timeout, connection._frame_gap, connection._clock) == (1.5, 0.02, clock)
+    assert (connection._timeout, connection._frame_gap, connection._reconnect, connection._clock) == \
+           (1.5, 0.02, False, clock)
     assert (device.unit_id, device.busy.stop, device._clock) == (4, Attempts(2), clock)
     assert connection.client is None                               # nothing opened yet
 

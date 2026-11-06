@@ -692,7 +692,9 @@ blinds  = BlindClient(gateway, unit_id=3)
 ```
 
 - The **connection** sends one request at a time, keeps an optional pause between frames (RS-485
-  gateways need it), and reconnects.
+  gateways need it), and reopens a link that was lost when the next request needs it - never in
+  the background, so there is only ever one link. `reconnect=False` leaves a lost link closed
+  until the host opens it again; when it is asked again is the device's `CircuitBreaker`.
 - Every request returns its **status with its response**, never through a "last call"
   property: on a shared connection that would describe whichever request finished last.
 - Reachability, `OFFLINE` and failure counts belong to each device. A device behind a gateway

@@ -74,3 +74,35 @@ async def test_a_link_the_device_dropped_is_reopened_once_and_closed_with_the_co
     await conn.close()
     await server.settle()
     assert server.links == set()
+
+
+async def test_with_reconnect_a_request_reopens_a_link_the_device_dropped(server: Server) -> None:
+    conn = ModbusTcpConnection("127.0.0.1", server.port, timeout=1.0, reconnect=True)
+    assert await conn.open()
+    server.drop()
+    await server.settle()
+    assert (await conn.request(READ)).ok
+    assert len(server.links) == 1
+    await conn.close()
+
+
+async def test_without_reconnect_a_dropped_link_stays_closed_until_opened(server: Server) -> None:
+    conn = ModbusTcpConnection("127.0.0.1", server.port, timeout=1.0, reconnect=False)
+    assert await conn.open()
+    assert (await conn.request(READ)).ok
+    server.drop()
+    await server.settle()
+    response = await conn.request(READ)
+    assert response.no_answer and response.detail == "the connection is closed"
+    await server.settle()
+    assert server.links == set()
+    assert await conn.open()
+    assert (await conn.request(READ)).ok
+    await conn.close()
+
+
+async def test_without_reconnect_a_link_never_opened_is_not_opened_by_a_request(server: Server) -> None:
+    conn = ModbusTcpConnection("127.0.0.1", server.port, timeout=1.0, reconnect=False)
+    assert (await conn.request(READ)).no_answer
+    await server.settle()
+    assert server.links == set()

@@ -113,16 +113,19 @@ class ModbusTcpConnection:
     """Modbus TCP through pymodbus's `AsyncModbusTcpClient`, natively async; holds its own lock
     to measure the frame gap from the end of the previous answer.
 
-    The link is opened by `open()` or by a request that finds it closed, and never in the
-    background: there is one link at a time, and a closed one stays closed until it is wanted.
+    The link is opened by `open()`, and by a request that finds it closed unless `reconnect` is
+    off; never in the background. There is one link at a time.
     """
 
     def __init__(self, host: str, port: int = 502, *, timeout: float = 3.0, frame_gap: float = 0.0,
-                 client: Any = None, clock: Clock | None = None,
+                 reconnect: bool = True, client: Any = None, clock: Clock | None = None,
                  sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
         """Args:
             timeout: seconds to wait for an answer; a lost answer is reported, not retried.
             frame_gap: seconds kept between the end of one answer and the next request.
+            reconnect: whether a request opens a link that is not open, as one the device
+                dropped or a timeout closed. Off, only `open()` opens it, and a request on a
+                closed link is no answer.
             client: a pymodbus client to use in place of one made from `host` and `port`, with
                 its settings as given. One that reconnects by itself opens links this connection
                 does not know of."""
@@ -134,6 +137,7 @@ class ModbusTcpConnection:
         self._port = port
         self._timeout = timeout
         self._frame_gap = frame_gap
+        self._reconnect = reconnect
         self._client: Any = client
         self._clock: Clock = clock if clock is not None else SystemClock()
         self._sleep = sleep
@@ -160,8 +164,11 @@ class ModbusTcpConnection:
 
     async def request(self, request: Request) -> Response:
         async with self._lock:
-            if not self.connected and not await self._open():
-                return Response(ok=False, no_answer=True, detail="the connection could not be opened")
+            if not self.connected:
+                if not self._reconnect:
+                    return Response(ok=False, no_answer=True, detail="the connection is closed")
+                if not await self._open():
+                    return Response(ok=False, no_answer=True, detail="the connection could not be opened")
             await self._keep_frame_gap()
             try:
                 return await self._send(request)
