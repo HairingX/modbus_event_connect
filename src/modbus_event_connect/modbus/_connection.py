@@ -111,14 +111,21 @@ class ModbusConnection(Protocol):
 
 class ModbusTcpConnection:
     """Modbus TCP through pymodbus's `AsyncModbusTcpClient`, natively async; holds its own lock
-    to measure the frame gap from the end of the previous answer."""
+    to measure the frame gap from the end of the previous answer.
+
+    The link is opened by `open()` or by a request that finds it closed, and never in the
+    background: there is one link at a time, and a closed one stays closed until it is wanted.
+    """
 
     def __init__(self, host: str, port: int = 502, *, timeout: float = 3.0, frame_gap: float = 0.0,
                  client: Any = None, clock: Clock | None = None,
                  sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
         """Args:
             timeout: seconds to wait for an answer; a lost answer is reported, not retried.
-            frame_gap: seconds kept between the end of one answer and the next request."""
+            frame_gap: seconds kept between the end of one answer and the next request.
+            client: a pymodbus client to use in place of one made from `host` and `port`, with
+                its settings as given. One that reconnects by itself opens links this connection
+                does not know of."""
         if timeout <= 0:
             raise ValueError(f"timeout must be positive, got {timeout}")
         if frame_gap < 0:
@@ -166,9 +173,10 @@ class ModbusTcpConnection:
     def _ensure_client(self) -> Any:
         if self._client is None:
             from pymodbus.client import AsyncModbusTcpClient
-            # retries=0: see `timeout` in __init__.
+            # retries=0: see `timeout` in __init__. reconnect_delay=0: pymodbus would otherwise
+            # reopen a dropped link by itself, racing the next request to open a second one.
             self._client = AsyncModbusTcpClient(self._host, port=self._port, timeout=self._timeout,
-                                                retries=0)
+                                                retries=0, reconnect_delay=0)
         return self._client
 
     async def _open(self) -> bool:
