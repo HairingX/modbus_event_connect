@@ -23,6 +23,7 @@ import pytest
 import pytest_asyncio
 
 from conftest import live_or_skip, live_setting
+from modbus_event_connect import Fixed, Retry
 from modbus_event_connect._client import Client
 from modbus_event_connect._data_type import DataType
 from modbus_event_connect._device import Outcome
@@ -65,7 +66,7 @@ class Live:
 @pytest_asyncio.fixture(scope="module", loop_scope="module")  # pyright: ignore[reportUntypedFunctionDecorator, reportUnknownMemberType]
 async def live() -> AsyncGenerator[Live, None]:
     assert HOST is not None   # guarded by the skip above
-    connection = ModbusTcpConnection(HOST, PORT, reconnect=True)
+    connection = ModbusTcpConnection(HOST, PORT)
     read = connection.request
 
     async def only_reads(request: Request) -> Response:
@@ -73,7 +74,7 @@ async def live() -> AsyncGenerator[Live, None]:
             raise AssertionError("a write was attempted; these tests are read-only")
         return await read(request)
     setattr(connection, "request", only_reads)
-    device = ModbusDevice(connection, UNIT_ID, owns_connection=True)
+    device = ModbusDevice(connection, UNIT_ID, owns_connection=True, reconnect=Retry(Fixed(60.0)))
     client = Client(device, LIVE_MODEL, read_only=True)
     try:
         await client.connect()

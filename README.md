@@ -59,7 +59,7 @@ any release.
 
 ```python
 import asyncio
-from modbus_event_connect import Client
+from modbus_event_connect import Client, Exponential, Retry
 from modbus_event_connect.modbus import ModbusDevice
 from my_devices import TARGET, TEMPERATURE, THERMOSTAT   # a model and its keys, see Part 2
 
@@ -67,7 +67,7 @@ def on_change(key, old, new):
     print(f"{key}: {new.value} ({new.quality.name})")
 
 async def main():
-    client = Client(ModbusDevice.tcp("<device-ip>", reconnect=True), THERMOSTAT)
+    client = Client(ModbusDevice.tcp("<device-ip>", reconnect=Retry(Exponential(2.0, max=10.0))), THERMOSTAT)
     await client.connect()                  # reads every point once
     client.subscribe(TEMPERATURE, on_change)
     await client.write(TARGET, 21.5)
@@ -92,21 +92,21 @@ least as often as your fastest poll rate.
 ## Connecting
 
 ```python
+from modbus_event_connect import Exponential, Fixed, Retry
 from modbus_event_connect.modbus import ModbusDevice, ModbusTcpConnection
 from modbus_event_connect.micro_nabto import MicroNabtoDevice
 
-# Modbus TCP, one device. reconnect=True: a lost link is opened again when it is next needed;
-# with False, only the host opens it again, as connect() does.
-device = ModbusDevice.tcp("<device-ip>", unit_id=1, reconnect=True)
+# Modbus TCP, one device, asked again 2, 4 and 8 s after it stopped answering, then every 10 s
+device = ModbusDevice.tcp("<device-ip>", unit_id=1, reconnect=Retry(Exponential(2.0, max=10.0)))
 
-# Several Modbus devices behind one gateway, sharing its connection
-gateway = ModbusTcpConnection("<gateway-ip>", reconnect=True)
-heating = ModbusDevice(gateway, unit_id=1)
-blinds = ModbusDevice(gateway, unit_id=3)
+# Several Modbus devices behind one gateway, sharing its connection, each with its own reconnect
+gateway = ModbusTcpConnection("<gateway-ip>")
+heating = ModbusDevice(gateway, unit_id=1, reconnect=Retry(Exponential(10.0, max=120.0)))
+blinds = ModbusDevice(gateway, unit_id=3, reconnect=Retry(Exponential(10.0, max=120.0)))
 
 # micro_nabto; with device_id, the device is found again if its address changes
 ventilation = MicroNabtoDevice.udp("<email-paired-with-the-device>", host="<device-ip>",
-                                   device_id="<device-id>")
+                                   device_id="<device-id>", reconnect=Retry(Fixed(5.0)))
 ```
 
 Behind a gateway, a device that stops answering does not slow down the others.
@@ -189,27 +189,52 @@ for, and a read that finds a point gone still has its part of the unit checked.
 
 ## Riding out failures
 
-How a device is asked again when it is busy, and when it is no longer asked, are its protocol's,
-assembled from standard parts - waits (`Fixed`, `Exponential`, `Steps`, `Jitter`), stops
-(`Attempts`, `Within`, combined with `|`), `Retry` and `CircuitBreaker` - that every protocol
-shares. A model states them in its options; whoever creates the device can override the model.
+How a device is asked again is assembled from standard parts that every protocol shares: waits
+(`Fixed`, `Exponential`, `Steps`, `Jitter`), stops (`Attempts`, `Within`, combined with `|`) and
+`Retry`, which puts a wait and a stop together.
+
+**Reconnecting** is stated by whoever creates the device, as `reconnect`, and nowhere else: how
+soon a silent device should be asked again depends on how it is reached, not on what it is. It
+has no default. A Modbus device is not asked again once 3 requests in a row went unanswered, and
+a micro_nabto device once a handshake failed, until `reconnect` says; asking again reopens a
+closed link. `None` asks again only on `connect()`. Before each try, `await reconnect.ready()` is
+asked: a subclass of `Retry` can check something first, and a try it refuses waits another pause.
+
+| `reconnect=` | Asks again |
+|---|---|
+| `Retry(Exponential(2.0, max=10.0))` | after 2, 4 and 8 s, then every 10 s |
+| `Retry(Fixed(60.0))` | every minute |
+| `Retry(Exponential(2.0, max=10.0), Attempts(8))` | as the first, and gives up after 8 tries |
+| `Retry(Steps(2.0, 5.0, then=Fixed(60.0)), Within(3600.0))` | after 2 and 5 s, then every minute, for an hour |
+| `None` | only on `connect()` |
+
+What a model states is about the device itself:
 
 | Option | What it does | Default |
 |---|---|---|
 | `ModbusOptions(busy=Retry(...))` | how a read answered "busy" (0x06) is tried again | `BUSY`: 4 times more, after 0.2 s, doubling |
-| `ModbusOptions(breaker=CircuitBreaker(...))` | after how many unanswered requests the device is no longer asked, and for how long | `BREAKER`: after 3, for 60 s, then one probe |
 | `MicroNabtoOptions(zeros=RereadZeros(...))` | how an answer of only zeros, where values were, is read again before the zeros are taken | `RereadZeros()`: at once, after 0.5 s, then every second; in two halves at 7.5 s |
 | `MicroNabtoOptions(zeros=TAKE_ZEROS)` | zeros are taken as they come | |
-| `MicroNabtoOptions(handshake=CircuitBreaker(...))` | how long requests fail at once after a failed handshake | `HANDSHAKE`: 10 s |
 
 ```python
-from modbus_event_connect import CircuitBreaker, Exponential, Fixed, Steps
+from dataclasses import dataclass
+
+from modbus_event_connect import Exponential, Fixed, Retry, Steps
 from modbus_event_connect.micro_nabto import MicroNabtoOptions, RereadZeros
 
-patient = MicroNabtoOptions(
-    zeros=RereadZeros(within=15.0, wait=Steps(0.5, then=Fixed(2.0))),
-    handshake=CircuitBreaker(after=1, pause=Exponential(10.0, max=300.0)),
-)
+patient = MicroNabtoOptions(zeros=RereadZeros(within=15.0, wait=Steps(0.5, then=Fixed(2.0))))
+
+
+@dataclass(frozen=True)
+class WhenOnline(Retry):
+    """Asks again only while the application says the network is up."""
+    online: bool = True
+
+    async def ready(self) -> bool:
+        return self.online
+
+
+reconnect = WhenOnline(Exponential(2.0, max=10.0))
 ```
 
 ## Writing
@@ -610,7 +635,7 @@ def test_models_are_valid():
 async def test_temperature_is_read():
     device = SimulatedModbusDevice(input_registers={1: 0, 2: 1234, 10: 215},
                                    holding_registers={20: 210})
-    client = Client(ModbusDevice(SimulatedModbusGateway({1: device})), THERMOSTAT)
+    client = Client(ModbusDevice(SimulatedModbusGateway({1: device}), reconnect=None), THERMOSTAT)
     await client.connect()
     assert client.value(TEMPERATURE).value == 21.5
 ```

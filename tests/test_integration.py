@@ -9,7 +9,7 @@ from typing import Any, TypeVar
 
 import pytest
 
-from modbus_event_connect import Status
+from modbus_event_connect import Fixed, Retry, Status
 from modbus_event_connect._client import Client
 from modbus_event_connect._data_type import DataType
 from modbus_event_connect._errors import CannotConnectError, InvalidValueError, ReadOnlyError
@@ -121,8 +121,7 @@ def _stack(units: dict[int, SimulatedModbusDevice] | None = None, *, unit_id: in
            delay: float = 0.0, write_retry_for: float = 0.0) -> tuple[Client, SimulatedModbusGateway, FakeClock, ModbusDevice]:
     gateway = SimulatedModbusGateway(units if units is not None else {1: _unit()}, delay=delay)
     clock = FakeClock()
-    device = ModbusDevice(gateway, unit_id=unit_id, clock=clock, sleep=_no_wait,
-                          backoff_after=2, backoff_for=30.0)
+    device = ModbusDevice(gateway, unit_id=unit_id, clock=clock, sleep=_no_wait, reconnect=Retry(Fixed(30.0)))
     client = Client(device, MODEL, clock=clock, read_only=read_only, sleep=_no_wait, write_retry_for=write_retry_for)
     return client, gateway, clock, device
 
@@ -431,7 +430,7 @@ def test_two_devices_share_one_gateway_without_mixing_up() -> None:
     second.input_registers[4] = 190
     gateway = SimulatedModbusGateway({1: first, 2: second}, delay=0.001)
     clock = FakeClock()
-    clients = [Client(ModbusDevice(gateway, unit_id=u, clock=clock, sleep=_no_wait), MODEL, clock=clock)
+    clients = [Client(ModbusDevice(gateway, unit_id=u, clock=clock, sleep=_no_wait, reconnect=Retry(Fixed(30.0))), MODEL, clock=clock)
                for u in (1, 2)]
 
     async def scenario() -> None:
@@ -490,7 +489,7 @@ def test_a_slow_device_does_not_block_the_event_loop() -> None:
     """Everything else on the host's loop must keep running while the bus is slow."""
     gateway = SimulatedModbusGateway({1: _unit()}, delay=0.05)
     clock = FakeClock()
-    client = Client(ModbusDevice(gateway, unit_id=1, clock=clock, sleep=_no_wait), MODEL, clock=clock)
+    client = Client(ModbusDevice(gateway, unit_id=1, clock=clock, sleep=_no_wait, reconnect=Retry(Fixed(30.0))), MODEL, clock=clock)
 
     async def scenario() -> int:
         stop = asyncio.Event()
@@ -524,7 +523,7 @@ def test_after_an_outage_of_15_s_a_value_read_every_10_s_is_back_20_s_after_it_b
     """A device's own backoff decides when it is asked again; nothing on top of it may delay that."""
     gateway = SimulatedModbusGateway({1: _unit()})
     clock = FakeClock()
-    device = ModbusDevice(gateway, unit_id=1, clock=clock, sleep=_no_wait)
+    device = ModbusDevice(gateway, unit_id=1, clock=clock, sleep=_no_wait, reconnect=Retry(Fixed(30.0)))
     client = Client(device, MODEL, clock=clock, sleep=_no_wait)
     asyncio.run(client.connect())
     client.subscribe(TEMP, _nothing)

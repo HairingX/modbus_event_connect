@@ -29,6 +29,7 @@ import pytest
 import pytest_asyncio
 
 from conftest import live_or_skip, live_setting
+from modbus_event_connect import Fixed, Retry
 from modbus_event_connect._client import Client
 from modbus_event_connect._data_type import DataType
 from modbus_event_connect._device import Outcome
@@ -88,7 +89,7 @@ def _count(live: Live, name: str) -> int:
 @pytest_asyncio.fixture(scope="module", loop_scope="module")  # pyright: ignore[reportUntypedFunctionDecorator, reportUnknownMemberType]
 async def live() -> AsyncGenerator[Live, None]:
     assert HOST is not None and EMAIL is not None   # guarded by the skip above
-    connection = MicroNabtoConnection(EMAIL, host=HOST, port=PORT, device_id=DEVICE_ID)
+    connection = MicroNabtoConnection(EMAIL, host=HOST, port=PORT, device_id=DEVICE_ID, reconnect=Retry(Fixed(10.0)))
 
     read = connection.request
 
