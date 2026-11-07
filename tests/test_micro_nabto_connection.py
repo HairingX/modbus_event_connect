@@ -18,8 +18,6 @@ from modbus_event_connect.testing._clock import FakeClock
 from modbus_event_connect.testing._micro_nabto import SimulatedMicroNabtoDevice
 
 EMAIL = "user@example.invalid"
-EVERY_TEN_SECONDS = Retry(Fixed(10.0))
-"""Trying a failed handshake again every 10 s: what a test takes for granted unless it tests another."""
 IDENTITY = {"device_number": 7, "device_model": 1140, "slave_device_number": 72270, "slave_device_model": 1}
 
 
@@ -31,11 +29,11 @@ def _device(*, clock: FakeClock | None = None, session_timeout: float | None = N
 
 def _connection(device: SimulatedMicroNabtoDevice, *, email: str = EMAIL, host: bool = True,
                 device_id: bool = False, clock: FakeClock | None = None,
-                session_idle: float = 12.0) -> MicroNabtoConnection:
+                session_idle: float = 12.0, reconnect: Retry | None = None) -> MicroNabtoConnection:
     address, port = device.address
     return MicroNabtoConnection(email, host=address if host else None, port=port,
                                 device_id=device.device_id if device_id else None,
-                                timeout=0.05, retries=1, reconnect=EVERY_TEN_SECONDS, session_idle=session_idle,
+                                timeout=0.05, retries=1, reconnect=reconnect, session_idle=session_idle,
                                 discovery_target=device.address, clock=clock)
 
 
@@ -65,14 +63,14 @@ async def test_a_silent_device_gives_no_identity() -> None:
 
 async def test_a_connection_is_made_without_an_event_loop() -> None:
     def build() -> MicroNabtoConnection:
-        return MicroNabtoConnection(EMAIL, host="device.invalid", reconnect=EVERY_TEN_SECONDS)
+        return MicroNabtoConnection(EMAIL, host="device.invalid", reconnect=None)
     connection = await asyncio.to_thread(build)
     assert not connection.connected
 
 
 def test_a_connection_needs_a_host_or_a_device_id() -> None:
     with pytest.raises(ValueError):
-        MicroNabtoConnection(EMAIL, reconnect=EVERY_TEN_SECONDS)
+        MicroNabtoConnection(EMAIL, reconnect=None)
 
 
 # ============================================================ one connection, one device each
@@ -160,16 +158,16 @@ async def test_a_new_session_counts_its_requests_and_its_age_afresh() -> None:
 
 
 def test_the_wait_for_a_later_answer_is_the_connections_then_the_models_then_five_seconds() -> None:
-    connection = MicroNabtoConnection(EMAIL, host="device.invalid", reconnect=EVERY_TEN_SECONDS)
+    connection = MicroNabtoConnection(EMAIL, host="device.invalid", reconnect=None)
     assert connection.later_answer_wait == 5.0
     connection.use_model_later_answer_wait(2.0)
     assert connection.later_answer_wait == 2.0
-    given = MicroNabtoConnection(EMAIL, host="device.invalid", reconnect=EVERY_TEN_SECONDS, later_answer_wait=7.0)
+    given = MicroNabtoConnection(EMAIL, host="device.invalid", reconnect=None, later_answer_wait=7.0)
     given.use_model_later_answer_wait(2.0)
     assert given.later_answer_wait == 7.0
     assert given.diagnostics()["later_answer_wait"] == 7.0
     with pytest.raises(ValueError):
-        MicroNabtoConnection(EMAIL, host="device.invalid", reconnect=EVERY_TEN_SECONDS, later_answer_wait=-1.0)
+        MicroNabtoConnection(EMAIL, host="device.invalid", reconnect=None, later_answer_wait=-1.0)
 
 
 async def test_diagnostics_give_the_longest_answer_too() -> None:
@@ -238,7 +236,7 @@ async def test_after_a_failed_handshake_requests_fail_at_once_until_retry_after(
     clock = FakeClock()
     async with _device(clock=clock) as device:
         device.silent = True
-        connection = _connection(device, clock=clock)
+        connection = _connection(device, clock=clock, reconnect=Retry(Fixed(10.0)))
         assert await connection.open() is None
         reached = device.datagrams
         assert await _read(connection, 1) is None
@@ -396,7 +394,7 @@ async def test_an_answer_that_never_comes_after_the_receipt_is_none() -> None:
 
 def test_the_wait_for_an_answer_cannot_be_shorter_than_the_timeout() -> None:
     with pytest.raises(ValueError):
-        MicroNabtoConnection(EMAIL, host="192.0.2.1", timeout=1.0, answer_wait=0.5, reconnect=EVERY_TEN_SECONDS)
+        MicroNabtoConnection(EMAIL, host="192.0.2.1", timeout=1.0, answer_wait=0.5, reconnect=None)
 
 
 async def test_a_duplicated_answer_is_not_taken_for_the_next() -> None:
@@ -466,7 +464,7 @@ async def test_a_cancelled_handshake_probe_lets_the_next_one_through() -> None:
     clock = FakeClock()
     async with _device(clock=clock) as device:
         device.silent = True
-        connection = _connection(device, clock=clock)
+        connection = _connection(device, clock=clock, reconnect=Retry(Fixed(10.0)))
         assert await connection.open() is None
         clock.advance(10)
         probe = asyncio.ensure_future(_read(connection, 1))

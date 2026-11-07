@@ -65,12 +65,7 @@ class Sleeps:
         self.waits.append(seconds)
 
 
-EVERY_MINUTE = Retry(Fixed(60.0))
-"""Asking a silent device again a minute after each try: what a test takes for granted unless it
-tests another."""
-
-
-def modbus_device(connection: ModbusConnection, unit_id: int = 1, *, reconnect: Retry | None = EVERY_MINUTE,
+def modbus_device(connection: ModbusConnection, unit_id: int = 1, *, reconnect: Retry | None = None,
                   **kwargs: Any) -> ModbusDevice:
     return ModbusDevice(connection, unit_id, reconnect=reconnect, **kwargs)
 
@@ -745,7 +740,7 @@ async def test_a_device_backing_off_answers_no_answer_without_touching_the_conne
 
 
 async def test_a_probe_after_the_backoff_that_gets_no_answer_backs_off_again_at_once() -> None:
-    rig = Rig(silent())
+    rig = Rig(silent(), reconnect=Retry(Fixed(60.0)))
     await unanswered(rig)
     rig.clock.advance(60)
     assert (await read0(rig)).outcome is Outcome.NO_ANSWER      # the probe
@@ -756,7 +751,7 @@ async def test_a_probe_after_the_backoff_that_gets_no_answer_backs_off_again_at_
 
 
 async def test_an_answered_probe_ends_the_backoff() -> None:
-    rig = Rig(silent())
+    rig = Rig(silent(), reconnect=Retry(Fixed(60.0)))
     await unanswered(rig)
     rig.unit.faults.clear()
     rig.clock.advance(60)
@@ -865,11 +860,11 @@ async def test_connect_reports_an_unreachable_link_as_none() -> None:
 def test_tcp_owns_a_pymodbus_connection_and_passes_it_the_link_settings() -> None:
     clock = FakeClock()
     device = ModbusDevice.tcp(HOST, 1502, unit_id=4, timeout=1.5, frame_gap=0.02, clock=clock, busy_retries=1,
-                              reconnect=EVERY_MINUTE)
+                              reconnect=None)
     connection = device._connection
     assert isinstance(connection, ModbusTcpConnection) and device._owns_connection
     assert (connection._timeout, connection._frame_gap, connection._clock) == (1.5, 0.02, clock)
-    assert (device.unit_id, device.busy.stop, device._clock, device.reconnect) == (4, Attempts(2), clock, EVERY_MINUTE)
+    assert (device.unit_id, device.busy.stop, device._clock, device.reconnect) == (4, Attempts(2), clock, None)
     assert connection.client is None                               # nothing opened yet
 
 
@@ -929,7 +924,7 @@ class LeakyClient:
 
 
 async def test_nothing_a_device_reports_names_its_host() -> None:
-    device = configured(ModbusDevice.tcp(HOST, 1502, clock=FakeClock(), sleep=Sleeps(), reconnect=EVERY_MINUTE))
+    device = configured(ModbusDevice.tcp(HOST, 1502, clock=FakeClock(), sleep=Sleeps(), reconnect=None))
     assert isinstance(device._connection, ModbusTcpConnection)
     device._connection._client = LeakyClient()                      # no network
     raw = (await device.read([u16("a", HoldingRegister(0))]))["a"]
@@ -960,7 +955,7 @@ class SilentClient:
 
 async def test_a_silent_device_is_reconnected_to_only_until_the_backoff_and_once_per_probe() -> None:
     clock = FakeClock()
-    device = configured(ModbusDevice.tcp(HOST, clock=clock, sleep=Sleeps(), reconnect=EVERY_MINUTE))
+    device = configured(ModbusDevice.tcp(HOST, clock=clock, sleep=Sleeps(), reconnect=Retry(Fixed(60.0))))
     assert isinstance(device._connection, ModbusTcpConnection)
     client = SilentClient()
     device._connection._client = client                             # no network
