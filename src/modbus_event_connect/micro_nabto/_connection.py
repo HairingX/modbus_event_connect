@@ -13,12 +13,9 @@ from . import _wire as wire
 from .._clock import Clock, SystemClock
 from .._device import Identity
 from .._errors import AuthenticationError
-from .._resilience import Breaker, CircuitBreaker, Fixed
+from .._resilience import NO_RETRY, Breaker, CircuitBreaker, Retry
 
 _LOGGER = logging.getLogger(__name__)
-
-HANDSHAKE = CircuitBreaker(after=1, pause=Fixed(10.0))
-"""After a failed handshake, requests fail at once for 10 s; then one tries a handshake again."""
 
 _SEQUENCE_MAX = 0xFFFF
 _Receive = Callable[[bytes, tuple[str, int]], None]
@@ -122,33 +119,31 @@ class MicroNabtoConnection:
     is therefore established anew before the next request. An unanswered request is sent again
     `retries` times; if the device stays silent, the session is established anew, at an
     address found by `device_id` if it has changed, and the request tried once more. After a
-    failed handshake, requests fail at once for as long as `handshake` says.
+    failed handshake, requests fail at once until `reconnect` says to try one again.
     """
 
     def __init__(self, email: str, *, host: str | None = None, device_id: str | None = None,
-                 port: int = wire.DEVICE_PORT, timeout: float = 1.0, retries: int = 2,
-                 answer_wait: float = 5.0, backoff_for: float | None = None, session_idle: float = 12.0,
-                 later_answer_wait: float | None = None, handshake: CircuitBreaker | None = None,
+                 reconnect: Retry | None, port: int = wire.DEVICE_PORT, timeout: float = 1.0,
+                 retries: int = 2, answer_wait: float = 5.0, session_idle: float = 12.0,
+                 later_answer_wait: float | None = None,
                  discovery_target: tuple[str, int] = wire.BROADCAST, clock: Clock | None = None) -> None:
         """Args:
             email: the account paired with the device; it is never logged.
             host, device_id: where to reach the device; with only `device_id`, it is discovered.
+            reconnect: when a handshake is tried again after one failed; its `ready()` is asked
+                before each try. None tries one again only on `open()`.
             timeout: seconds to wait for each answer.
             answer_wait: seconds to wait for an answer once the device has said it has the
                 request; it is not sent again meanwhile.
             later_answer_wait: seconds a request sent again, answered with what its sender
                 refuses, is kept open for a later answer; None leaves it to the model, and to
                 `LATER_ANSWER_WAIT` without one.
-            handshake: how long requests fail at once after a failed handshake; None leaves it
-                to the model, and to `HANDSHAKE` without one.
-            backoff_for: `handshake` as a fixed pause after each failed handshake.
         """
         if host is None and device_id is None:
             raise ValueError("a connection needs a host, a device_id, or both")
-        if timeout <= 0 or session_idle <= 0 or retries < 0 or (backoff_for is not None and backoff_for < 0) \
-                or answer_wait < timeout:
-            raise ValueError("timeout and session_idle must be positive; retries and backoff_for "
-                             "cannot be negative; answer_wait cannot be shorter than timeout")
+        if timeout <= 0 or session_idle <= 0 or retries < 0 or answer_wait < timeout:
+            raise ValueError("timeout and session_idle must be positive; retries cannot be "
+                             "negative; answer_wait cannot be shorter than timeout")
         if later_answer_wait is not None and later_answer_wait < 0:
             raise ValueError(f"later_answer_wait cannot be negative, got {later_answer_wait}")
         self._email = email
@@ -157,12 +152,7 @@ class MicroNabtoConnection:
         self._timeout = timeout
         self._retries = retries
         self._answer_wait = answer_wait
-        if backoff_for is not None:
-            if handshake is not None:
-                raise ValueError("give handshake or backoff_for, not both")
-            handshake = CircuitBreaker(after=1, pause=Fixed(backoff_for))
-        self._handshake_given = handshake
-        self._handshake_of_model: CircuitBreaker | None = None
+        self._reconnect = reconnect
         self._session_idle = session_idle
         self._discovery_target = discovery_target
         self._clock: Clock = clock if clock is not None else SystemClock()
@@ -173,7 +163,8 @@ class MicroNabtoConnection:
         self._lock = asyncio.Lock()
         self._sequence = 0
         self._waiting: tuple[int, asyncio.Future[wire.ConnectReply | wire.DataReply], asyncio.Event] | None = None
-        self._breaker: Breaker = self.handshake.breaker()
+        self._breaker: Breaker = CircuitBreaker(
+            after=1, retry=NO_RETRY if reconnect is None else reconnect).breaker()
         self._last_answer = 0.0
 
         self._exchanges = 0
@@ -229,17 +220,9 @@ class MicroNabtoConnection:
         self._later_answer_wait_of_model = seconds
 
     @property
-    def handshake(self) -> CircuitBreaker:
-        """How long requests fail at once after a failed handshake: as the connection was given
-        it, else as the model says, else `HANDSHAKE`."""
-        return self._handshake_given or self._handshake_of_model or HANDSHAKE
-
-    def use_model_handshake(self, handshake: CircuitBreaker | None) -> None:
-        """Take the model's `handshake`, which one given to the connection overrides."""
-        before = self.handshake
-        self._handshake_of_model = handshake
-        if self.handshake != before:
-            self._breaker = self.handshake.breaker()
+    def reconnect(self) -> Retry | None:
+        """When a handshake is tried again after one failed; None only on `open()`."""
+        return self._reconnect
 
     @property
     def last_exchange(self) -> Exchange | None:
@@ -257,7 +240,7 @@ class MicroNabtoConnection:
             AuthenticationError: the device refused the email.
         """
         async with self._lock:
-            self._breaker = self.handshake.breaker()
+            self._breaker.reset()
             self._next_reason = "on connect"
             return await self._establish()
 
@@ -356,8 +339,10 @@ class MicroNabtoConnection:
             return False
 
     async def _establish(self) -> Identity | None:
-        """Establish a session as the handshake's breaker allows; None if it holds the handshake
-        back, or the device did not answer."""
+        """Establish a session as `reconnect` allows; None if it holds the handshake back, or the
+        device did not answer."""
+        if not await self._ready_to_try():
+            return None
         attempt = self._breaker.attempt(self._clock.monotonic())
         if attempt is None:
             return None
@@ -365,9 +350,32 @@ class MicroNabtoConnection:
             identity = await self._try_establish()
             if identity is None:
                 attempt.unanswered(self._clock.monotonic())
+                self._log_pause()
             else:
                 attempt.answered()
         return identity
+
+    async def _ready_to_try(self) -> bool:
+        """Whether a handshake that is due may be tried, as `reconnect.ready()` says; True when
+        none is held back."""
+        breaker = self._breaker
+        if self._reconnect is None or not breaker.is_open or breaker.open_for(self._clock.monotonic()) > 0:
+            return True
+        if await self._reconnect.ready():
+            return True
+        breaker.postpone(self._clock.monotonic())
+        _LOGGER.debug("micro_nabto: reconnect not ready; trying a handshake again in %.1f s",
+                      breaker.open_for(self._clock.monotonic()))
+        return False
+
+    def _log_pause(self) -> None:
+        breaker = self._breaker
+        if breaker.gave_up:
+            _LOGGER.debug("micro_nabto: handshake %d failed; not tried again until connected",
+                          breaker.openings)
+        else:
+            _LOGGER.debug("micro_nabto: handshake %d failed; trying again in %.1f s",
+                          breaker.openings, breaker.open_for(self._clock.monotonic()))
 
     async def _try_establish(self) -> Identity | None:
         self._answer_before = self._last_answer

@@ -7,7 +7,7 @@ from enum import Enum, auto
 from typing import Any, ClassVar, Literal
 
 from .._device import ProtocolOptions
-from .._resilience import CircuitBreaker, Retry
+from .._resilience import Retry
 from .._point import Access, Point
 
 MAX_ADDRESS = 0xFFFF
@@ -180,9 +180,6 @@ class ModbusOptions(ProtocolOptions):
     bit_write: BitWrite = BitWrite.MASK
     busy: Retry | None = None
     """How a read answered "busy" (0x06) is tried again; None leaves the device's."""
-    breaker: CircuitBreaker | None = None
-    """When the device is no longer asked, after requests left unanswered, and for how long; None
-    leaves the device's."""
 
     def __post_init__(self) -> None:
         if not 1 <= self.max_registers <= MAX_REGISTERS_PER_READ:

@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from modbus_event_connect import Status
+from modbus_event_connect import Fixed, Retry, Status
 from modbus_event_connect._client import Client
 from modbus_event_connect._data_type import DataType
 from modbus_event_connect._device import Device, EncodedWrite, Identity, Outcome
@@ -52,10 +52,10 @@ def _simulated(*, clock: FakeClock | None = None, emails: frozenset[str] = froze
 
 
 def _device(simulated: SimulatedMicroNabtoDevice, *, clock: FakeClock | None = None,
-            email: str = EMAIL) -> MicroNabtoDevice:
+            email: str = EMAIL, reconnect: Retry | None = None) -> MicroNabtoDevice:
     host, port = simulated.address
     device = MicroNabtoDevice(MicroNabtoConnection(email, host=host, port=port, timeout=0.05, retries=1,
-                                                   answer_wait=0.5, clock=clock),
+                                                   answer_wait=0.5, clock=clock, reconnect=reconnect),
                               owns_connection=True)
     device.configure(MicroNabtoOptions(later_answer_wait=0.2))
     return device
@@ -83,7 +83,7 @@ async def _connected(simulated: SimulatedMicroNabtoDevice) -> MicroNabtoDevice:
 # ================================================================================ contract
 
 def test_a_micro_nabto_device_is_a_device_protocol() -> None:
-    assert isinstance(MicroNabtoDevice.udp(EMAIL, host="device.invalid"), Device)
+    assert isinstance(MicroNabtoDevice.udp(EMAIL, host="device.invalid", reconnect=None), Device)
 
 
 async def test_connect_returns_the_identity_from_the_handshake() -> None:
@@ -101,7 +101,8 @@ async def test_connect_to_a_silent_device_returns_none() -> None:
 async def test_a_device_reads_nothing_before_it_knows_the_models_options() -> None:
     async with _simulated() as simulated:
         host, port = simulated.address
-        device = MicroNabtoDevice(MicroNabtoConnection(EMAIL, host=host, port=port, timeout=0.05, retries=1),
+        device = MicroNabtoDevice(MicroNabtoConnection(EMAIL, host=host, port=port, timeout=0.05, retries=1,
+                                                       reconnect=None),
                                   owns_connection=True)
         assert device.options is None
         with pytest.raises(RuntimeError):
@@ -347,14 +348,16 @@ def test_max_registers_must_be_positive() -> None:
 async def test_a_device_leaves_a_given_connection_open_and_closes_its_own() -> None:
     async with _simulated() as simulated:
         host, port = simulated.address
-        connection = MicroNabtoConnection(EMAIL, host=host, port=port, timeout=0.05, retries=1)
+        connection = MicroNabtoConnection(EMAIL, host=host, port=port, timeout=0.05, retries=1,
+                                          reconnect=None)
         given = MicroNabtoDevice(connection)
         assert await given.connect() is not None
         await given.disconnect()
         assert connection.connected
         await connection.close()
 
-        own = MicroNabtoDevice.udp(EMAIL, host=host, port=port, timeout=0.05, retries=1)
+        own = MicroNabtoDevice.udp(EMAIL, host=host, port=port, timeout=0.05, retries=1,
+                                   reconnect=None)
         assert await own.connect() is not None
         await own.disconnect()
         assert not own._connection.connected
@@ -382,8 +385,8 @@ def _select(identity: Identity) -> Model | None:
 
 
 def _client(simulated: SimulatedMicroNabtoDevice, *, clock: FakeClock | None = None, read_only: bool = False,
-            email: str = EMAIL) -> Client:
-    return Client(_device(simulated, clock=clock, email=email), _select, clock=clock, read_only=read_only,
+            email: str = EMAIL, reconnect: Retry | None = None) -> Client:
+    return Client(_device(simulated, clock=clock, email=email, reconnect=reconnect), _select, clock=clock, read_only=read_only,
                   write_retry_for=15.0, write_retry_pause=0.01)
 
 
@@ -442,7 +445,7 @@ async def test_a_written_setpoint_reaches_the_device() -> None:
 async def test_a_silent_device_makes_the_client_unavailable_until_it_answers_again() -> None:
     clock = FakeClock()
     async with _simulated(clock=clock) as simulated:
-        client = _client(simulated, clock=clock)
+        client = _client(simulated, clock=clock, reconnect=Retry(Fixed(10.0)))
         await client.connect()
         client.subscribe(Key("temp_outside", float), _nothing)
         simulated.silent = True

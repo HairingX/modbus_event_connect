@@ -88,7 +88,7 @@ def _count(live: Live, name: str) -> int:
 @pytest_asyncio.fixture(scope="module", loop_scope="module")  # pyright: ignore[reportUntypedFunctionDecorator, reportUnknownMemberType]
 async def live() -> AsyncGenerator[Live, None]:
     assert HOST is not None and EMAIL is not None   # guarded by the skip above
-    connection = MicroNabtoConnection(EMAIL, host=HOST, port=PORT, device_id=DEVICE_ID)
+    connection = MicroNabtoConnection(EMAIL, host=HOST, port=PORT, device_id=DEVICE_ID, reconnect=None)
 
     read = connection.request
 

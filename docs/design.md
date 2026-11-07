@@ -703,10 +703,12 @@ blinds  = BlindClient(gateway, unit_id=3)
   (no path to the device) is a configuration error.
 - **Automatic backoff:** a device that keeps timing out is polled less often for a while, so its
   timeouts do not starve every other device on the bus. On a shared RS-485 bus this is what
-  keeps one dead fan from freezing the lights. It is a `CircuitBreaker`, and busy retries a
-  `Retry`, which a model states in `ModbusOptions`. The client adds no retry of its own: one on
-  top of the device's backoff would only ask again when the breaker refuses, and each refusal
-  would push the next attempt further out.
+  keeps one dead fan from freezing the lights. After 3 unanswered requests in a row, the device
+  is asked again when its `reconnect`, a `Retry`, says; whoever creates the device states it, as
+  how soon to ask depends on how the device is reached. Busy retries are a `Retry` a model
+  states in `ModbusOptions`. The client adds no retry of its own: one on top of the device's
+  backoff would only ask again when it refuses, and each refusal would push the next attempt
+  further out.
 
 Every device behind a gateway shares its bus, and each request occupies it for all of them. On
 a slow serial bus this is where poll rates (5.2) stop being an optimisation and become necessary.
@@ -764,7 +766,7 @@ Assistant's log tells it without debug and a unit without the fault never logs i
   and how many requests went unanswered.
 - **A handshake refused** for anything but the email, with uNabto's status: 0x8009 is a device
   with no session free, as one is while old sessions have yet to time out. It is tried again
-  after the pause of `handshake`, a `CircuitBreaker` a model states in `MicroNabtoOptions`. Only 0x8004 is a refused email, `AuthenticationError`.
+  when the connection's `reconnect` says. Only 0x8004 is a refused email, `AuthenticationError`.
 - **An answer of only zeros** to a read of more than one register, where those registers held
   values: the registers by count and address, the points, the requests of the read it belongs
   to, the five requests before it with what each answered, the library's version, and the

@@ -14,7 +14,7 @@ from ._connection import MicroNabtoConnection, describe
 from .._data_type import DataTypeKind
 from .._device import EncodedWrite, Identity, Outcome, ProtocolOptions, ReadResult, WriteResult
 from .._point import Access, Point
-from .._resilience import CircuitBreaker, Fixed, Steps, Wait
+from .._resilience import Fixed, Retry, Steps, Wait
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -85,9 +85,6 @@ class MicroNabtoOptions(ProtocolOptions):
     zeros: RereadZeros | None = None
     """How an answer of only zeros, where values were, is read again; None leaves `RereadZeros()`.
     One given to the device overrides it."""
-    handshake: CircuitBreaker | None = None
-    """How long requests fail at once after a failed handshake; None leaves the connection's. One
-    given to the connection overrides it."""
 
     def __post_init__(self) -> None:
         if self.max_registers < 1:
@@ -178,11 +175,11 @@ class MicroNabtoDevice:
 
     @classmethod
     def udp(cls, email: str, *, host: str | None = None, device_id: str | None = None,
-            reread_zeros_for: float | None = None, zeros: RereadZeros | None = None,
+            reconnect: Retry | None, reread_zeros_for: float | None = None, zeros: RereadZeros | None = None,
             **kwargs: Any) -> MicroNabtoDevice:
-        """A device on a connection of its own; `kwargs` go to `MicroNabtoConnection`."""
-        return cls(MicroNabtoConnection(email, host=host, device_id=device_id, **kwargs), owns_connection=True,
-                   reread_zeros_for=reread_zeros_for, zeros=zeros)
+        """A device on a connection of its own; `reconnect` and `kwargs` go to `MicroNabtoConnection`."""
+        return cls(MicroNabtoConnection(email, host=host, device_id=device_id, reconnect=reconnect, **kwargs),
+                   owns_connection=True, reread_zeros_for=reread_zeros_for, zeros=zeros)
 
     @property
     def options(self) -> MicroNabtoOptions | None:
@@ -218,11 +215,9 @@ class MicroNabtoDevice:
         if options is None:
             self._options: MicroNabtoOptions | None = None
             self._connection.use_model_later_answer_wait(None)
-            self._connection.use_model_handshake(None)
         elif isinstance(options, MicroNabtoOptions):
             self._options = options
             self._connection.use_model_later_answer_wait(options.later_answer_wait)
-            self._connection.use_model_handshake(options.handshake)
         else:
             raise TypeError(f"a micro_nabto device needs MicroNabtoOptions, not {type(options).__name__}")
 

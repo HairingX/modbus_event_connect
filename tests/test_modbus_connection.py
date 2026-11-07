@@ -365,7 +365,7 @@ async def test_the_client_is_created_on_first_use_with_the_settings(monkeypatch:
     await conn.close()                            # closing before first use creates nothing
     assert made == []
     assert (await conn.request(holding(1))).ok
-    assert made == [((HOST,), {"port": 1502, "timeout": 2.5, "retries": 0})]
+    assert made == [((HOST,), {"port": 1502, "timeout": 2.5, "retries": 0, "reconnect_delay": 0})]
     await conn.request(holding(1))
     assert len(made) == 1
 

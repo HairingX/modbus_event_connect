@@ -20,10 +20,9 @@ from ._connection import (
     Request,
     Response,
 )
-from ._device import BREAKER, BUSY, ModbusDevice
+from ._device import BUSY, ModbusDevice
 
 __all__ = [
-    "BREAKER",
     "BUSY",
     "BitWrite",
     "Coil",

@@ -73,7 +73,7 @@ async def live() -> AsyncGenerator[Live, None]:
             raise AssertionError("a write was attempted; these tests are read-only")
         return await read(request)
     setattr(connection, "request", only_reads)
-    device = ModbusDevice(connection, UNIT_ID, owns_connection=True)
+    device = ModbusDevice(connection, UNIT_ID, owns_connection=True, reconnect=None)
     client = Client(device, LIVE_MODEL, read_only=True)
     try:
         await client.connect()

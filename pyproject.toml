@@ -33,7 +33,7 @@ classifiers = [
 ]
 requires-python = ">=3.14"
 dependencies = [
-    "event_connect>=0.3.1,<0.4",
+    "event_connect>=0.4,<0.5",
     "pymodbus>=3.6,<4",
 ]
 
@@ -46,6 +46,7 @@ Releases = "https://github.com/HairingX/modbus_event_connect/releases"
 [tool.hairingx-workflows]
 transition = "Moved onto the shared workflows with tests that do not yet cover every line."
 coverage = 97
+libraries = ["event_connect"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
