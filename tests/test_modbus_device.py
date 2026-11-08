@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 from pymodbus.exceptions import ModbusIOException
 
+from event_connect import Key
 from modbus_event_connect._data_type import DataType
 from modbus_event_connect import Attempts, Exponential, Fixed, Retry, Steps
 from modbus_event_connect._device import (
@@ -17,7 +18,6 @@ from modbus_event_connect._device import (
     ProtocolOptions,
     ReadResult,
 )
-from modbus_event_connect._key import Key
 from modbus_event_connect._point import Point
 from modbus_event_connect.micro_nabto._access import DatapointRegister
 from modbus_event_connect.modbus._access import (
@@ -41,7 +41,7 @@ from modbus_event_connect.modbus._connection import (
     Response,
 )
 from modbus_event_connect.modbus._device import ModbusDevice
-from modbus_event_connect.testing._clock import FakeClock
+from event_connect.testing import FakeClock
 from modbus_event_connect.testing._modbus import (
     NO_ANSWER,
     SimulatedModbusDevice,

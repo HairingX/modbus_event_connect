@@ -5,19 +5,17 @@ from typing import Any
 
 import pytest
 
+from event_connect import AuthenticationError, Key, Quality, Timing
 from modbus_event_connect._client import Client
 from modbus_event_connect._data_type import DataType
 from modbus_event_connect._device import Identity, Outcome, ReadResult
-from modbus_event_connect._errors import AuthenticationError
-from modbus_event_connect._key import Key
 from modbus_event_connect._model import Model, Section
 from modbus_event_connect._point import Point
-from modbus_event_connect._value import Quality
 from modbus_event_connect.micro_nabto._access import DatapointRegister
 from modbus_event_connect.micro_nabto._connection import MicroNabtoConnection
 from modbus_event_connect.micro_nabto._device import TAKE_ZEROS, MicroNabtoDevice, MicroNabtoOptions, RereadZeros
 from modbus_event_connect import Exponential, Fixed, Retry, Steps
-from modbus_event_connect.testing._clock import FakeClock
+from event_connect.testing import FakeClock
 from modbus_event_connect.testing._micro_nabto import SimulatedMicroNabtoDevice
 
 EMAIL = "user@example.invalid"
@@ -309,7 +307,7 @@ async def test_an_email_the_device_does_not_know_is_still_refused() -> None:
 
 
 MODEL = Model(name="Unit", manufacturer="Example", sections=[Section(POINTS)], options=MicroNabtoOptions(),
-              read_back_after=1.0)
+              timing=Timing(read_back_after=1.0))
 
 
 def _select(identity: Identity) -> Model | None:

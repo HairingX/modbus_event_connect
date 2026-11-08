@@ -23,13 +23,12 @@ import pytest
 import pytest_asyncio
 
 from conftest import live_or_skip, live_setting
+from event_connect import Key, Quality, Timing
 from modbus_event_connect._client import Client
 from modbus_event_connect._data_type import DataType
 from modbus_event_connect._device import Outcome
-from modbus_event_connect._key import Key
 from modbus_event_connect._model import Model, Section
 from modbus_event_connect._point import Point
-from modbus_event_connect._value import Quality
 from modbus_event_connect.modbus._access import (
     HoldingRegister,
     InputRegister,
@@ -53,7 +52,7 @@ LIVE_MODEL = Model(name="live", manufacturer="any", sections=[Section([
     Point(Key("s16_scaled", float), read=InputRegister(104), data_type=DataType.INT16, scale=0.01, valid_raw=range(-0x8000, 0x7FFF)),
     Point(Key("text", str), read=HoldingRegister(10), data_type=DataType.string(16)),
     Point(Key("u32", int), read=HoldingRegister(28), data_type=DataType.UINT32),
-])], options=ModbusOptions(numbering=plain(first_address=1)), read_back_after=1.0)
+])], options=ModbusOptions(numbering=plain(first_address=1)), timing=Timing(read_back_after=1.0))
 
 
 @dataclass

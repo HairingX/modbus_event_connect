@@ -16,7 +16,7 @@ from modbus_event_connect.modbus._connection import (
     Request,
     Response,
 )
-from modbus_event_connect.testing._clock import FakeClock
+from event_connect.testing import FakeClock
 
 HOST = "modbus.invalid"
 

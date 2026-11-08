@@ -9,11 +9,10 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from event_connect import NO_RETRY, AuthenticationError, Breaker, CircuitBreaker, Clock, Retry, SystemClock
+
 from . import _wire as wire
-from .._clock import Clock, SystemClock
 from .._device import Identity
-from .._errors import AuthenticationError
-from .._resilience import NO_RETRY, Breaker, CircuitBreaker, Retry
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -289,7 +288,7 @@ class MicroNabtoConnection:
             "longest_later_answer_wait": self._longest_later_answer_wait,
             "silences": self._silences,
             "longest_silence": self._longest_silence,
-            "handshake_pauses": self._breaker.opened,
+            "handshake_pauses": self._breaker.openings,
             "refusals": {f"0x{status:04x}": count for status, count in sorted(self._refusals.items())},
         }
 

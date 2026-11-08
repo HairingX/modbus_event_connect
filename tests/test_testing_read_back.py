@@ -5,6 +5,7 @@ from collections.abc import Mapping, Sequence
 
 import pytest
 
+from event_connect import InvalidValueError, Key, Limits, ReadOnlyError, Timing
 from modbus_event_connect._client import Client
 from modbus_event_connect._device import (
     EncodedWrite,
@@ -14,12 +15,10 @@ from modbus_event_connect._device import (
     ReadResult,
     WriteResult,
 )
-from modbus_event_connect._errors import InvalidValueError, ReadOnlyError
-from modbus_event_connect._key import Key
 from modbus_event_connect._model import Model, Section
-from modbus_event_connect._point import Limits, Point
+from modbus_event_connect._point import Point
 from modbus_event_connect.modbus._access import HoldingRegister, InputRegister
-from modbus_event_connect.testing._clock import FakeClock
+from event_connect.testing import FakeClock
 from modbus_event_connect.testing._read_back import (
     ReadBackMeasurement,
     ReadBackTrial,
@@ -29,7 +28,7 @@ from modbus_event_connect.testing._read_back import (
 SETTING = Point(Key("setting", int), read=HoldingRegister(1), write=HoldingRegister(1))
 SENSOR = Point(Key("sensor", int), read=InputRegister(2))
 MODEL = Model(name="Lagging", manufacturer="Test", sections=[Section([SETTING, SENSOR])],
-              options=ProtocolOptions(), read_back_after=1.0)
+              options=ProtocolOptions(), timing=Timing(read_back_after=1.0))
 
 
 class LaggingDevice:
@@ -141,7 +140,7 @@ def test_a_value_the_point_refuses_is_found_before_anything_is_written() -> None
     """The point holds 0, below its limits, so it could not be written back at the end."""
     limited = Point(Key("limited", int), read=HoldingRegister(1), write=HoldingRegister(1), limits=Limits(min=5, max=30))
     model = Model(name="L", manufacturer="Test", sections=[Section([limited])], options=ProtocolOptions(),
-                  read_back_after=1.0)
+                  timing=Timing(read_back_after=1.0))
     clock = FakeClock()
     device = LaggingDevice(clock, 0)
     client = Client(device, model, clock=clock)

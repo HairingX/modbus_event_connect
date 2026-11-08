@@ -9,6 +9,8 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from event_connect import NO_RETRY, Attempts, Breaker, CircuitBreaker, Clock, Exponential, Retry, SystemClock
+
 from ._access import (
     MAX_REGISTERS_PER_WRITE,
     BitWrite,
@@ -27,10 +29,8 @@ from ._connection import (
     Request,
     Response,
 )
-from .._clock import Clock, SystemClock
 from .._device import EncodedWrite, Identity, Outcome, ProtocolOptions, ReadResult, WriteResult
 from .._point import Access, Point
-from .._resilience import NO_RETRY, Attempts, Breaker, CircuitBreaker, Exponential, Retry
 
 _READ_FUNCTION: Mapping[type[Access], FunctionCode] = {
     Coil: FunctionCode.READ_COILS,
@@ -256,7 +256,7 @@ class ModbusDevice:
             "consecutive_no_answers": self._breaker.unanswered_in_a_row,
             "backing_off": backing_off,
             "backing_off_for": self._breaker.open_for(self._clock.monotonic()),
-            "backoffs": self._breaker.opened,
+            "backoffs": self._breaker.openings,
             "gave_up": self._breaker.gave_up,
             "refused_while_backing_off": self._refused_while_backing_off,
             "average_latency": self._latency_total / self._requests if self._requests else None,

@@ -6,8 +6,9 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Any, ClassVar, Literal
 
+from event_connect import Retry
+
 from .._device import ProtocolOptions
-from .._resilience import Retry
 from .._point import Access, Point
 
 MAX_ADDRESS = 0xFFFF

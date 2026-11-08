@@ -7,26 +7,27 @@ from typing import Any, Callable
 import pytest
 
 from event_connect import _unit as unit_module
-from modbus_event_connect._clock import Clock, SystemClock
-from modbus_event_connect._data_type import DataType, DataTypeKind
-from modbus_event_connect._device import EncodedWrite, Outcome, ReadResult, WriteResult
-from modbus_event_connect._key import Key
-from modbus_event_connect._point import (
+from event_connect import (
     DEFAULT_INTERVALS,
-    Access,
     Change,
+    Clock,
+    DataValue,
+    Key,
     Labels,
     Limits,
-    Point,
     PollRate,
     Pulse,
+    Quality,
     Refresh,
+    SystemClock,
     Transform,
     Transforms,
+    Unit,
     WriteKind,
 )
-from modbus_event_connect._unit import Unit
-from modbus_event_connect._value import DataValue, Quality
+from modbus_event_connect._data_type import DataType, DataTypeKind
+from modbus_event_connect._device import EncodedWrite, Outcome, ReadResult, WriteResult
+from modbus_event_connect._point import Access, Point
 from modbus_event_connect.micro_nabto._access import DatapointRegister, SetpointRegister
 from modbus_event_connect.modbus._access import (
     Coil,
@@ -39,7 +40,7 @@ from modbus_event_connect.modbus._access import (
     modicon,
     plain,
 )
-from modbus_event_connect.testing._clock import FakeClock
+from event_connect.testing import FakeClock
 
 
 def _key(fields: dict[str, Any]) -> Key[Any]:
@@ -448,16 +449,6 @@ def test_a_write_refresh_waits_as_its_point_does_and_a_change_refresh_not_at_all
                   on_write=Refresh(["a"]), on_change=Refresh(["b"]))
     assert point.on_write is not None and point.on_write.after is None
     assert point.on_change is not None and point.on_change.after == 0.0
-
-
-def test_read_back_after_needs_a_write_side() -> None:
-    _refused("read_back_after describes writes", read=InputRegister(1), read_back_after=2.0)
-
-
-@pytest.mark.parametrize("seconds", [-1.0, float("inf"), float("nan")])
-def test_read_back_after_must_be_a_finite_number_of_seconds(seconds: float) -> None:
-    _refused("read_back_after must be", read=HoldingRegister(1), write=HoldingRegister(1),
-             read_back_after=seconds)
 
 
 def test_a_refresh_reacts_to_any_change_unless_told_otherwise() -> None:

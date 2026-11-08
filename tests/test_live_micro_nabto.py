@@ -29,13 +29,12 @@ import pytest
 import pytest_asyncio
 
 from conftest import live_or_skip, live_setting
+from event_connect import DataValue, Key, Quality, Timing
 from modbus_event_connect._client import Client
 from modbus_event_connect._data_type import DataType
 from modbus_event_connect._device import Outcome
-from modbus_event_connect._key import Key
 from modbus_event_connect._model import Model, Section
 from modbus_event_connect._point import Point
-from modbus_event_connect._value import DataValue, Quality
 from modbus_event_connect.micro_nabto import _wire as wire
 from modbus_event_connect.micro_nabto._access import DatapointRegister, SetpointRegister
 from modbus_event_connect.micro_nabto._connection import MicroNabtoConnection, discover
@@ -62,7 +61,7 @@ LIVE_MODEL = Model(
     sections=[Section([*(Point(Key(f"dp_{a}", float if a in TEMPERATURES else int), read=DatapointRegister(a), data_type=DataType.INT16 if a in TEMPERATURES else DataType.UINT16,
                            scale=0.1 if a in TEMPERATURES else 1.0) for a in DATAPOINTS),
                    *(Point(Key(f"sp_{a}", int), read=SetpointRegister(a), data_type=DataType.UINT16) for a in SETPOINTS)])],
-    options=MicroNabtoOptions(), read_back_after=1.0)
+    options=MicroNabtoOptions(), timing=Timing(read_back_after=1.0))
 
 
 SETPOINT_WRITE = 0x2B

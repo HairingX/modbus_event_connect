@@ -8,25 +8,43 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from event_connect import DEFAULT_TIMING, Passes, Reachability, Status, StatusBoard, StatusCallback, Write, changed, stale
-
-from ._clock import Clock, SystemClock
-from ._conversion import decode, encode
-from ._device import Device, Identity, Outcome, ReadResult
-from ._errors import (
+from event_connect import (
+    DEFAULT_TIMING,
     CannotConnectError,
+    Clock,
+    DataValue,
     InvalidValueError,
+    Key,
+    Labels,
     ModelError,
     NotConnectedError,
+    Passes,
+    PollRate,
+    Quality,
+    Reachability,
     ReadOnlyError,
+    Scheduler,
+    Selector,
+    Status,
+    StatusBoard,
+    StatusCallback,
+    Subscriptions,
+    SystemClock,
     UnsupportedDeviceError,
+    Value,
+    ValueCallback,
+    Write,
+    WriteKind,
+    changed,
+    is_key,
+    stale,
+    tell,
 )
-from ._events import Subscriptions, ValueCallback, tell
-from ._key import Key, is_key
+
+from ._conversion import decode, encode
+from ._device import Device, Identity, Outcome, ReadResult
 from ._model import InstanceScanStep, Model, ModelSelector, RepeatedSection, ResolvedModel, resolve
-from ._point import Labels, Point, PollRate, Selector, WriteKind
-from ._scheduler import Scheduler
-from ._value import DataValue, Quality, Value
+from ._point import Point
 from ._writes import WriteQueue
 
 _LOGGER = logging.getLogger(__name__)
@@ -282,7 +300,7 @@ class Client:
 
     def _commit(self, model: Model, resolved: ResolvedModel, marks: dict[_Scope, dict[str, str]],
                 reads: dict[_Scope, dict[str, tuple[Quality, Value]]]) -> None:
-        scheduler = Scheduler(self._clock, model.poll_intervals, min_poll_interval=model.min_poll_interval)
+        scheduler = model.timing.scheduler(self._clock)
         scheduler.set_points(resolved.points.values())
         for target, seconds in self._interval_overrides.items():
             if isinstance(target, PollRate) or target in resolved.points:
@@ -311,7 +329,7 @@ class Client:
                               "reported", key, key.type.__name__, model.name, resolved.points[key].key.type.__name__)
         for key in resolved.points:
             self._update_polling(key)
-        self._reachability = Reachability(self._clock, model.offline_after, name=model.name)
+        self._reachability = Reachability(self._clock, model.timing.offline_after, name=model.name)
         self._update_reachability(True)
 
     # ========================================================================= the picture
@@ -681,12 +699,14 @@ class Client:
         The device counts as not answering only once it has been silent for the model's
         `offline_after`, so one lost answer does not make it unavailable.
         """
-        reachable = (self._reachability.answered(self._scheduler) if answered
-                     else self._reachability.unanswered())
-        self._statuses.set(Status.CONNECTED, reachable)
+        if answered:
+            self._reachability.answered(self._scheduler)
+        else:
+            self._reachability.unanswered()
+        self._statuses.set(Status.CONNECTED, self._reachability.reachable)
 
     def _reachability_grace(self) -> float:
-        return self._resolved.model.offline_after if self._resolved is not None else DEFAULT_TIMING.offline_after
+        return self._resolved.model.timing.offline_after if self._resolved is not None else DEFAULT_TIMING.offline_after
 
     # ============================================================================= writing
 
@@ -750,15 +770,15 @@ class Client:
             self._store(point, self._as_written(point, value), self._values.get(point.key))
         scheduler = self._require_scheduler()
         resolved = self._require_model()
-        after = resolved.model.read_back_delay(point)
+        timing = resolved.model.timing
         if point.readable:
-            scheduler.refresh([point.key], after=after)
+            scheduler.refresh([point.key], after=timing.written_point_delay(point))
         effect = point.on_write
         if effect is not None:
             keys = [p.key for p in _select(resolved, effect.targets)
                     if p.readable and self._is_available(p.key)]
             if keys:
-                scheduler.refresh(keys, after=after, until_stable=effect.until_stable)
+                scheduler.refresh(keys, after=timing.on_write_delay(point), until_stable=effect.until_stable)
 
     # ============================================================================ internals
 

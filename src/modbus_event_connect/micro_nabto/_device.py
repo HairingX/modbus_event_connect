@@ -8,13 +8,14 @@ from dataclasses import dataclass, field, replace
 from importlib import metadata
 from typing import Any
 
+from event_connect import Fixed, Retry, Steps, Wait
+
 from . import _wire as wire
 from ._access import DatapointRegister, SetpointRegister
 from ._connection import MicroNabtoConnection, describe
 from .._data_type import DataTypeKind
 from .._device import EncodedWrite, Identity, Outcome, ProtocolOptions, ReadResult, WriteResult
 from .._point import Access, Point
-from .._resilience import Fixed, Retry, Steps, Wait
 
 _LOGGER = logging.getLogger(__name__)
 

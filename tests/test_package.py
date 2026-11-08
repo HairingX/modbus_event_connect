@@ -21,3 +21,18 @@ def test_every_link_in_its_description_works_where_the_description_is_shown() ->
     assert isinstance(description, str) and description
     links = re.findall(r"\]\(([^)]+)\)", description)
     assert links and all(link.startswith(("https://", "#")) for link in links), links
+
+
+def test_what_event_connect_gives_is_the_same_object_here() -> None:
+    import event_connect
+
+    shared = ("Key", "DataValue", "Quality", "Retry", "CircuitBreaker", "Clock", "Timing", "ModelError")
+    assert all(getattr(modbus_event_connect, name) is getattr(event_connect, name) for name in shared)
+
+
+def test_no_module_of_its_own_only_passes_event_connect_on() -> None:
+    import importlib.util
+
+    shells = ("_clock", "_events", "_key", "_scheduler", "_unit", "_value", "_resilience", "_errors",
+              "testing._clock")
+    assert [name for name in shells if importlib.util.find_spec(f"modbus_event_connect.{name}")] == []

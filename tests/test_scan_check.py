@@ -20,6 +20,7 @@ from modbus_event_connect import (
     RepeatedSection,
     Scan,
     Section,
+    Timing,
 )
 from modbus_event_connect._device import Identity, Outcome, ProtocolOptions, ReadResult, WriteResult
 from modbus_event_connect._data_type import DataType
@@ -127,8 +128,7 @@ def _model(scan: InstanceScanStep = scan_zone) -> Model:
         sections=[Section([Point(EXTRA, read=InputRegister(2))], when=_has_extra),
                   RepeatedSection(_zone, range(1, 4), label="zone", scan=scan)],
         scan_steps=[read_version],
-        options=ProtocolOptions(), read_back_after=1.0,
-        poll_intervals={PollRate.SCAN: SCAN_INTERVAL},
+        options=ProtocolOptions(), timing=Timing(read_back_after=1.0, poll_intervals={PollRate.SCAN: SCAN_INTERVAL}),
     )
 
 
@@ -242,8 +242,7 @@ def test_checks_follow_the_scan_interval_set_for_them() -> None:
 def test_a_model_without_a_scan_interval_is_never_checked() -> None:
     model = Model(name="ZONES", manufacturer="TEST",
                   sections=[RepeatedSection(_zone, range(1, 4), label="zone", scan=scan_zone)],
-                  options=ProtocolOptions(), read_back_after=1.0,
-                  poll_intervals={PollRate.SCAN: None})
+                  options=ProtocolOptions(), timing=Timing(read_back_after=1.0, poll_intervals={PollRate.SCAN: None}))
     client, device, clock, _ = _connected(model=model)
     assert client.seconds_until_next_poll() is None, "nothing is subscribed, and nothing is checked"
     device.reads.clear()

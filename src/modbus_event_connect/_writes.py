@@ -8,10 +8,11 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from ._clock import Clock
+from event_connect import Clock, WriteKind
+
 from ._conversion import encode
 from ._device import Device, EncodedWrite, Outcome, WriteResult
-from ._point import Point, WriteKind
+from ._point import Point
 
 _LOGGER = logging.getLogger(__name__)
 

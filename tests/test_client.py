@@ -8,6 +8,24 @@ from typing import Any, TypeVar
 
 import pytest
 
+from event_connect import (
+    CannotConnectError,
+    Change,
+    DataValue,
+    InvalidValueError,
+    Key,
+    Labels,
+    Limits,
+    NotConnectedError,
+    PollRate,
+    Pulse,
+    Quality,
+    ReadOnlyError,
+    Refresh,
+    Timing,
+    UnsupportedDeviceError,
+    WriteKind,
+)
 from modbus_event_connect import _client as client_module
 from modbus_event_connect import Status
 from modbus_event_connect._client import Client
@@ -20,26 +38,8 @@ from modbus_event_connect._device import (
     ReadResult,
     WriteResult,
 )
-from modbus_event_connect._errors import (
-    CannotConnectError,
-    InvalidValueError,
-    NotConnectedError,
-    ReadOnlyError,
-    UnsupportedDeviceError,
-)
-from modbus_event_connect._key import Key
 from modbus_event_connect._model import Model, RepeatedSection, Scan, Section
-from modbus_event_connect._point import (
-    Change,
-    Labels,
-    Limits,
-    Point,
-    PollRate,
-    Pulse,
-    Refresh,
-    WriteKind,
-)
-from modbus_event_connect._value import DataValue, Quality
+from modbus_event_connect._point import Point
 from modbus_event_connect import Write
 from modbus_event_connect.modbus._access import (
     Coil,
@@ -48,7 +48,7 @@ from modbus_event_connect.modbus._access import (
     ModbusOptions,
     plain,
 )
-from modbus_event_connect.testing._clock import FakeClock
+from event_connect.testing import FakeClock
 
 T = TypeVar("T")
 
@@ -193,7 +193,7 @@ MODEL = Model(
     sections=[Section(BASE), Section(COOLING, when=_has_cooling),
             RepeatedSection(_room, range(1, 4), label="room")],
     scan_steps=[_no_rooms_missing],
-    options=OPTIONS, read_back_after=1.0
+    options=OPTIONS, timing=Timing(read_back_after=1.0)
 )
 
 
@@ -327,7 +327,7 @@ def test_a_scan_read_neither_stores_nor_notifies() -> None:
 
     async def peek(context: Scan) -> None:
         seen.append(await context.read(("temp",)))
-    model = Model(name="T", manufacturer="T", sections=[Section(BASE)], scan_steps=[peek], options=ModbusOptions(numbering=plain(first_address=1)), read_back_after=1.0)
+    model = Model(name="T", manufacturer="T", sections=[Section(BASE)], scan_steps=[peek], options=ModbusOptions(numbering=plain(first_address=1)), timing=Timing(read_back_after=1.0))
     device = FakeDevice(REGISTERS)
     client = Client(device, model, clock=FakeClock())
     recorder = Recorder()
@@ -534,7 +534,7 @@ def test_a_point_named_like_a_status_is_an_ordinary_point() -> None:
     """A model's keys are its own: none is reserved for the client's status."""
     model = Model(name="TEST", manufacturer="TEST",
                   sections=[Section([Point(Key("status:connected", int), read=InputRegister(1))])],
-                  options=OPTIONS, read_back_after=1.0)
+                  options=OPTIONS, timing=Timing(read_back_after=1.0))
     client = Client(FakeDevice({"status:connected": (7,)}), model, clock=FakeClock())
     asyncio.run(client.connect())
     current = client.value(Key("status:connected", int))
@@ -639,7 +639,7 @@ def test_the_next_poll_is_counted_in_seconds_from_now() -> None:
 
 def test_with_nothing_to_poll_there_is_no_next_poll() -> None:
     model = Model(name="TEST", manufacturer="TEST", sections=[
-        Section([Point(SERIAL, read=InputRegister(10), data_type=DataType.UINT32, poll_rate=PollRate.STATIC)])], options=ModbusOptions(numbering=plain(first_address=1)), read_back_after=1.0)
+        Section([Point(SERIAL, read=InputRegister(10), data_type=DataType.UINT32, poll_rate=PollRate.STATIC)])], options=ModbusOptions(numbering=plain(first_address=1)), timing=Timing(read_back_after=1.0))
     client = Client(FakeDevice({"serial": (0, 1)}), model, clock=FakeClock())
     asyncio.run(client.connect())
     assert client.seconds_until_next_poll() is None
@@ -771,7 +771,7 @@ def test_a_write_is_read_back_after_its_delay() -> None:
     assert asyncio.run(client.write(RELAY, True)) is True
     asyncio.run(client.poll())
     assert "relay" not in device.read_keys()
-    clock.advance(MODEL.read_back_after)
+    clock.advance(MODEL.timing.read_back_after)
     asyncio.run(client.poll())
     relay = client.value(RELAY)
     assert relay is not None and relay.value is True
@@ -805,8 +805,8 @@ def test_without_scheduled_polling_a_write_is_still_read_back() -> None:
     client.subscribe(RELAY, Recorder())
     client.set_scheduled_polling(False)
     assert asyncio.run(client.write(RELAY, True)) is True
-    assert client.seconds_until_next_poll() == MODEL.read_back_after
-    clock.advance(MODEL.read_back_after)
+    assert client.seconds_until_next_poll() == MODEL.timing.read_back_after
+    clock.advance(MODEL.timing.read_back_after)
     asyncio.run(client.poll())
     assert device.read_keys() == {"relay"}
 
@@ -853,7 +853,7 @@ def test_what_the_scan_read_is_not_read_again() -> None:
         assert found["a"].value == 1, "a later step gets what an earlier one read"
     points = [Point(Key(key, int), read=InputRegister(n)) for n, key in enumerate(("a", "b", "c", "gone"), 1)]
     model = Model(name="S", manufacturer="S", sections=[Section(points)], scan_steps=[first, second],
-                  options=OPTIONS, read_back_after=1.0)
+                  options=OPTIONS, timing=Timing(read_back_after=1.0))
     device = FakeDevice({"a": (1,), "b": (2,), "c": (3,)})
     client = Client(device, model, clock=FakeClock())
     asyncio.run(client.connect())
@@ -871,21 +871,25 @@ def test_values_holds_only_keys_the_unit_has() -> None:
     assert set(client.values) <= set(client.points)
 
 
-def test_a_point_with_its_own_read_back_delay_is_read_back_after_it() -> None:
-    slow = Point(Key("slow", int), read=HoldingRegister(60), write=HoldingRegister(60), read_back_after=5.0)
-    model = Model(name="S", manufacturer="S", sections=[Section([slow])], options=OPTIONS, read_back_after=1.0)
-    device, clock = FakeDevice({"slow": (0,)}), FakeClock()
+def test_a_written_point_is_read_back_at_the_devices_delay_and_what_it_disturbs_at_its_refreshs() -> None:
+    fan = Point(Key("fan", int), read=HoldingRegister(60), write=HoldingRegister(60),
+                on_write=Refresh(["speed"], after=3.0))
+    speed = Point(Key("speed", int), read=InputRegister(61))
+    model = Model(name="S", manufacturer="S", sections=[Section([fan, speed])], options=OPTIONS,
+                  timing=Timing(read_back_after=1.0))
+    device, clock = FakeDevice({"fan": (0,), "speed": (0,)}), FakeClock()
     client = Client(device, model, clock=clock)
     asyncio.run(client.connect())
-    client.subscribe(Key("slow", int), Recorder())
-    asyncio.run(client.write(Key("slow", int), 7))
+    client.subscribe(Key("fan", int), Recorder())
+    client.subscribe(Key("speed", int), Recorder())
+    asyncio.run(client.write(Key("fan", int), 2))
     device.reads.clear()
     clock.advance(1.0)
     asyncio.run(client.poll())
-    assert "slow" not in device.read_keys(), "read back at the device's delay, not the point's"
-    clock.advance(4.0)
+    assert device.read_keys() == {"fan"}
+    clock.advance(2.0)
     asyncio.run(client.poll())
-    assert "slow" in device.read_keys()
+    assert device.read_keys() == {"fan", "speed"}
 
 
 def test_a_write_rereads_what_it_disturbs_until_it_settles() -> None:

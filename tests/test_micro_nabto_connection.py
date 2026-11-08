@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from modbus_event_connect._errors import AuthenticationError
+from event_connect import AuthenticationError
 from modbus_event_connect.micro_nabto import _wire as wire
 from modbus_event_connect import Attempts, Exponential, Fixed, Retry
 from modbus_event_connect.micro_nabto._connection import (
@@ -14,7 +14,7 @@ from modbus_event_connect.micro_nabto._connection import (
     MicroNabtoConnection,
     discover,
 )
-from modbus_event_connect.testing._clock import FakeClock
+from event_connect.testing import FakeClock
 from modbus_event_connect.testing._micro_nabto import SimulatedMicroNabtoDevice
 
 EMAIL = "user@example.invalid"

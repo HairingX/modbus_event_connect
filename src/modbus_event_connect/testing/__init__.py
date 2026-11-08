@@ -3,7 +3,8 @@
 A fake clock, simulated Modbus and micro_nabto devices, the model walker, the model as resolved
 for one identity, and a measurement of how long a real device takes to show a write.
 """
-from ._clock import FakeClock
+from event_connect.testing import FakeClock
+
 from ._micro_nabto import SimulatedMicroNabtoDevice
 from ._modbus import NO_ANSWER, SimulatedModbusDevice, SimulatedModbusGateway
 from ._models import assert_models_valid

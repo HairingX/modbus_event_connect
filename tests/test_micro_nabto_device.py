@@ -5,25 +5,28 @@ from typing import Any
 
 import pytest
 
+from event_connect import (
+    AuthenticationError,
+    DataValue,
+    Key,
+    Limits,
+    Quality,
+    ReadOnlyError,
+    Timing,
+    Unit,
+    UnsupportedDeviceError,
+)
 from modbus_event_connect import Fixed, Retry, Status
 from modbus_event_connect._client import Client
 from modbus_event_connect._data_type import DataType
 from modbus_event_connect._device import Device, EncodedWrite, Identity, Outcome
-from modbus_event_connect._errors import (
-    AuthenticationError,
-    ReadOnlyError,
-    UnsupportedDeviceError,
-)
-from modbus_event_connect._key import Key
 from modbus_event_connect._model import Model, Section
-from modbus_event_connect._point import Limits, Point
-from modbus_event_connect._unit import Unit
-from modbus_event_connect._value import DataValue, Quality
+from modbus_event_connect._point import Point
 from modbus_event_connect.micro_nabto._access import DatapointRegister, SetpointRegister
 from modbus_event_connect.micro_nabto._connection import MicroNabtoConnection
 from modbus_event_connect.micro_nabto._device import MicroNabtoDevice, MicroNabtoOptions
 from modbus_event_connect.modbus._access import HoldingRegister, ModbusOptions, plain
-from modbus_event_connect.testing._clock import FakeClock
+from event_connect.testing import FakeClock
 from modbus_event_connect.testing._micro_nabto import Command, SimulatedMicroNabtoDevice
 
 EMAIL = "user@example.invalid"
@@ -377,7 +380,7 @@ async def test_diagnostics_count_without_naming_the_address_or_the_email() -> No
 
 TEMP = Point(Key("temp_outside", float), read=DatapointRegister(27), data_type=DataType.INT16, scale=0.1, unit=Unit.CELSIUS)
 FAN = Point(Key("fan_level", int), read=SetpointRegister(30), write=SetpointRegister(30), data_type=DataType.UINT16, limits=Limits(min=0, max=200))
-CTS = Model(name="CTS", manufacturer="Example", sections=[Section([TEMP, FAN])], options=MicroNabtoOptions(), read_back_after=1.0)
+CTS = Model(name="CTS", manufacturer="Example", sections=[Section([TEMP, FAN])], options=MicroNabtoOptions(), timing=Timing(read_back_after=1.0))
 
 
 def _select(identity: Identity) -> Model | None:

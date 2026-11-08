@@ -3,17 +3,16 @@ against one device's identity produces the points that device actually has."""
 from __future__ import annotations
 
 import dataclasses
-import math
 from collections import Counter
 from collections.abc import Awaitable, Callable, Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Protocol
 
+from event_connect import DataValue, Labels, ModelError, Selector, SystemClock, Timing
+
 from ._device import Identity, ProtocolOptions
-from ._errors import ModelError
-from ._point import DEFAULT_INTERVALS, Labels, Point, PollRate, Selector
-from ._value import DataValue
+from ._point import Point
 
 # ============================================================================= sections
 
@@ -85,44 +84,29 @@ InstanceScanStep = Callable[[Scan, int], Awaitable[None]]
 
 @dataclass(frozen=True)
 class Model:
-    """A device, as data: sections of points, identity points, scan steps and protocol options."""
+    """A device, as data: sections of points, identity points, scan steps, protocol options and
+    timing."""
     name: str
     manufacturer: str
     sections: tuple[Section | RepeatedSection, ...]
     options: ProtocolOptions
     """How the device is reached, in its protocol's terms."""
-    read_back_after: float
-    """Seconds from a write until a read shows the written value, on this device."""
+    timing: Timing
+    """When its points are read, how long a write takes to show, and how long it may stay silent."""
     identity_points: tuple[Point[Any], ...] = ()
     """Read before the model resolves, to add to what the handshake says about the device."""
     scan_steps: tuple[ScanStep, ...] = ()
-    poll_intervals: Mapping[PollRate, float | None] = DEFAULT_INTERVALS
-    min_poll_interval: float = 0.0
-    offline_after: float = 30.0
-    """Seconds the device may go without answering before it counts as not answering."""
 
     def __init__(self, name: str, manufacturer: str, sections: Sequence[Section | RepeatedSection], *,
-                 options: ProtocolOptions, read_back_after: float,
-                 identity_points: Sequence[Point[Any]] = (), scan_steps: Sequence[ScanStep] = (),
-                 poll_intervals: Mapping[PollRate, float | None] = DEFAULT_INTERVALS,
-                 min_poll_interval: float = 0.0,
-                 offline_after: float = 30.0) -> None:
+                 options: ProtocolOptions, timing: Timing,
+                 identity_points: Sequence[Point[Any]] = (), scan_steps: Sequence[ScanStep] = ()) -> None:
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "manufacturer", manufacturer)
         object.__setattr__(self, "sections", tuple(sections))
         object.__setattr__(self, "identity_points", tuple(identity_points))
         object.__setattr__(self, "scan_steps", tuple(scan_steps))
         object.__setattr__(self, "options", options)
-        object.__setattr__(self, "read_back_after", read_back_after)
-        object.__setattr__(self, "poll_intervals", poll_intervals)
-        object.__setattr__(self, "min_poll_interval", min_poll_interval)
-        object.__setattr__(self, "offline_after", offline_after)
-
-    def read_back_delay(self, point: Point[Any]) -> float:
-        """Seconds after writing `point` before it, and what its write disturbs, are read."""
-        if point.on_write is not None and point.on_write.after is not None:
-            return point.on_write.after
-        return point.read_back_after if point.read_back_after is not None else self.read_back_after
+        object.__setattr__(self, "timing", timing)
 
 
 ModelSelector = Callable[[Identity], "Model | None"]
@@ -168,7 +152,7 @@ class _Resolution:
     points: dict[str, Point[Any]]
     instances: dict[str, tuple[int, ...]]
     problems: list[str]
-    """Parallel to `model.sections`: whether each section's `when` applied for this identity."""
+    """Everything wrong with the model against this identity; empty when nothing is."""
 
 
 def _section_label(index: int, section: Section | RepeatedSection) -> str:
@@ -263,20 +247,10 @@ def _model_problems(model: Model) -> list[str]:
         problems.append("the model name must not be empty")
     if not model.manufacturer:
         problems.append("the model manufacturer must not be empty")
-    if not (math.isfinite(model.read_back_after) and model.read_back_after >= 0):
-        problems.append(f"read_back_after must be a finite number >= 0, got {model.read_back_after}")
-    if model.min_poll_interval < 0:
-        problems.append(f"min_poll_interval must be >= 0, got {model.min_poll_interval}")
-    if not (math.isfinite(model.offline_after) and model.offline_after >= 0):
-        problems.append(f"offline_after must be a finite number >= 0, got {model.offline_after}")
-    for poll_rate, interval in model.poll_intervals.items():
-        if interval is None:
-            continue
-        if not interval > 0:
-            problems.append(f"the interval for {poll_rate.name} must be positive or None, got {interval}")
-        elif interval < model.min_poll_interval:
-            problems.append(f"the interval for {poll_rate.name} ({interval}) is below min_poll_interval "
-                            f"({model.min_poll_interval})")
+    try:
+        model.timing.scheduler(SystemClock())
+    except ValueError as err:
+        problems.append(f"timing: {err}")
     return problems
 
 
@@ -326,7 +300,7 @@ def _cross_problems(model: Model, all_points: Sequence[Point[Any]], points: Mapp
             if issue:
                 problems.append(f"{point.key!r}: {name} target {issue}")
         if point.on_write is not None and point.on_write.until_stable is not None \
-                and not model.read_back_delay(point) > 0:
+                and not model.timing.on_write_delay(point) > 0:
             problems.append(f"{point.key!r}: on_write re-reads until stable, which needs a positive "
                             f"read-back delay to re-read at")
     problems.extend(f"{point.key!r}: {issue}" for point in all_points for issue in model.options.problems(point))

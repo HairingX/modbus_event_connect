@@ -9,15 +9,26 @@ from typing import Any, TypeVar
 
 import pytest
 
+from event_connect import (
+    CannotConnectError,
+    DataValue,
+    InvalidValueError,
+    Key,
+    Labels,
+    PollRate,
+    Pulse,
+    Quality,
+    ReadOnlyError,
+    Refresh,
+    Timing,
+    Unit,
+    WriteKind,
+)
 from modbus_event_connect import Fixed, Retry, Status
 from modbus_event_connect._client import Client
 from modbus_event_connect._data_type import DataType
-from modbus_event_connect._errors import CannotConnectError, InvalidValueError, ReadOnlyError
-from modbus_event_connect._key import Key
 from modbus_event_connect._model import Model, RepeatedSection, Section
-from modbus_event_connect._point import Labels, Point, PollRate, Pulse, Refresh, WriteKind
-from modbus_event_connect._unit import Unit
-from modbus_event_connect._value import DataValue, Quality
+from modbus_event_connect._point import Point
 from modbus_event_connect.modbus import (
     Coil,
     DiscreteInput,
@@ -29,7 +40,7 @@ from modbus_event_connect.modbus import (
     plain,
 )
 from modbus_event_connect.testing import SimulatedModbusDevice, SimulatedModbusGateway
-from modbus_event_connect.testing._clock import FakeClock
+from event_connect.testing import FakeClock
 
 T = TypeVar("T")
 
@@ -87,7 +98,7 @@ MODEL = Model(
             Point(ALARM_2, read=DiscreteInput(3), data_type=DataType.BOOL, poll_rate=PollRate.STATIC, labels={"kind": "alarm"}),
         ]),
         RepeatedSection(_room, range(1, 4), label="room"),
-    ], read_back_after=1.0
+    ], timing=Timing(read_back_after=1.0)
 )
 
 
@@ -345,7 +356,7 @@ def test_a_lamp_bit_is_set_atomically_leaving_its_neighbours() -> None:
     [(_, mask)] = [(u, r) for u, r in gateway.requests if r.function is FunctionCode.MASK_WRITE_REGISTER]
     assert (mask.address, mask.and_mask, mask.or_mask) == (9, 0xFFFE, 0x0001)
     assert gateway.units[1].holding_registers[9] == 0b1001, "the fault bit next to it was disturbed"
-    clock.advance(MODEL.read_back_after)
+    clock.advance(MODEL.timing.read_back_after)
     asyncio.run(client.poll())
     assert _value(client, LAMP_ON).value is True
     assert _value(client, FAULT).value is True
