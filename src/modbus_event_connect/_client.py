@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from event_connect import (
-    DEFAULT_TIMING,
     CannotConnectError,
     Clock,
     DataValue,
@@ -132,7 +131,9 @@ class Client:
         self._scheduled_polling = True
         self._checks_requested: float | None = None
         """When `refresh(PollRate.SCAN)` asked for the checks, which runs them without the schedule."""
-        self._reachability = Reachability(self._clock, DEFAULT_TIMING.offline_after)
+        self._model: Model | None = None
+        """The model chosen last; None before the first scan chooses one."""
+        self._reachability = self._fresh_reachability()
         self._statuses = StatusBoard(self._clock)
 
         self._passes = Passes()
@@ -165,7 +166,7 @@ class Client:
         """Cancel pending pulses and let go of the device."""
         self._writes.cancel_pulses()
         await self._device.disconnect()
-        self._reachability = Reachability(self._clock, self._reachability_grace(), name=self._reachability.name)
+        self._reachability = self._fresh_reachability()
         self._statuses.set(Status.CONNECTED, False)
 
     async def _scan(self, handshake: Identity) -> None:
@@ -177,11 +178,14 @@ class Client:
         model = self._select_model(handshake)
         if model is None:
             raise UnsupportedDeviceError(f"no model for a device that reports {dict(handshake)!r}", handshake)
-        self._device.configure(model.options)
+        profile = self._device.use(model)
+        if model is not self._model:
+            self._model = model
+            self._reachability = self._fresh_reachability()
         marks = self._writes.marks()
         answers = _ScanAnswers()
         try:
-            resolved = resolve(model, await self._identify(model, handshake, answers))
+            resolved = resolve(profile, await self._identify(model, handshake, answers))
             _LOGGER.debug("%s chosen for a device that reports %r", model.name, dict(resolved.identity))
             scanned: dict[str, ReadResult] = {}
             found: dict[_Scope, dict[str, str]] = {}
@@ -328,13 +332,17 @@ class Client:
                               "reported", key, key.type.__name__, model.name, resolved.points[key].key.type.__name__)
         for key in resolved.points:
             self._update_polling(key)
-        self._reachability = Reachability(self._clock, model.timing.offline_after, name=model.name)
         self._update_reachability(True)
 
     # ========================================================================= the picture
 
     @property
     def model(self) -> Model:
+        """The model chosen for the device.
+
+        Raises:
+            NotConnectedError: the device has not been scanned.
+        """
         return self._require_model().model
 
     @property
@@ -708,8 +716,15 @@ class Client:
             self._reachability.unanswered()
         self._statuses.set(Status.CONNECTED, self._reachability.reachable)
 
-    def _reachability_grace(self) -> float:
-        return self._resolved.model.timing.offline_after if self._resolved is not None else DEFAULT_TIMING.offline_after
+    def _fresh_reachability(self) -> Reachability:
+        """Reachability as of now, for the model chosen last.
+
+        Before a model is chosen, nothing has answered, so the device does not yet count as
+        answering whatever silence its model allows.
+        """
+        if self._model is None:
+            return Reachability(self._clock, 0.0)
+        return Reachability(self._clock, self._model.timing.offline_after, name=self._model.name)
 
     # ============================================================================= writing
 

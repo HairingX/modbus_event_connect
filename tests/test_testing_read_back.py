@@ -11,11 +11,10 @@ from modbus_event_connect._device import (
     EncodedWrite,
     Identity,
     Outcome,
-    ProtocolOptions,
     ReadResult,
     WriteResult,
 )
-from modbus_event_connect._model import Model, Section
+from modbus_event_connect._model import Model, Profile, Section
 from modbus_event_connect._point import Point
 from modbus_event_connect.modbus._access import HoldingRegister, InputRegister
 from event_connect.testing import FakeClock
@@ -28,7 +27,7 @@ from modbus_event_connect.testing._read_back import (
 SETTING = Point(Key("setting", int), read=HoldingRegister(1), write=HoldingRegister(1))
 SENSOR = Point(Key("sensor", int), read=InputRegister(2))
 MODEL = Model(name="Lagging", manufacturer="Test", sections=[Section([SETTING, SENSOR])],
-              options=ProtocolOptions(), timing=Timing(read_back_after=1.0))
+              timing=Timing(read_back_after=1.0))
 
 
 class LaggingDevice:
@@ -48,8 +47,8 @@ class LaggingDevice:
     async def disconnect(self) -> None:
         pass
 
-    def configure(self, options: ProtocolOptions) -> None:
-        pass
+    def use(self, model: Model) -> Profile:
+        return Profile(model=model)
 
     async def read(self, points: Sequence[Point[Any]]) -> Mapping[str, ReadResult]:
         now = self.clock.monotonic()
@@ -139,7 +138,7 @@ def test_a_measurement_that_cannot_tell_anything_is_refused(key: Key[int], value
 def test_a_value_the_point_refuses_is_found_before_anything_is_written() -> None:
     """The point holds 0, below its limits, so it could not be written back at the end."""
     limited = Point(Key("limited", int), read=HoldingRegister(1), write=HoldingRegister(1), limits=Limits(min=5, max=30))
-    model = Model(name="L", manufacturer="Test", sections=[Section([limited])], options=ProtocolOptions(),
+    model = Model(name="L", manufacturer="Test", sections=[Section([limited])],
                   timing=Timing(read_back_after=1.0))
     clock = FakeClock()
     device = LaggingDevice(clock, 0)

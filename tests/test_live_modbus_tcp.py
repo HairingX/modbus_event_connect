@@ -32,11 +32,10 @@ from modbus_event_connect._point import Point
 from modbus_event_connect.modbus._access import (
     HoldingRegister,
     InputRegister,
-    ModbusOptions,
-    plain,
 )
 from modbus_event_connect.modbus._connection import ModbusTcpConnection, Request, Response
 from modbus_event_connect.modbus._device import ModbusDevice
+from profiles import NEVER_AGAIN, modbus
 
 HOST = live_setting("MODBUS_TCP_HOST")
 PORT = int(live_setting("MODBUS_TCP_PORT") or "502")
@@ -52,7 +51,7 @@ LIVE_MODEL = Model(name="live", manufacturer="any", sections=[Section([
     Point(Key("s16_scaled", float), read=InputRegister(104), data_type=DataType.INT16, scale=0.01, valid_raw=range(-0x8000, 0x7FFF)),
     Point(Key("text", str), read=HoldingRegister(10), data_type=DataType.string(16)),
     Point(Key("u32", int), read=HoldingRegister(28), data_type=DataType.UINT32),
-])], options=ModbusOptions(numbering=plain(first_address=1)), timing=Timing(read_back_after=1.0))
+])], timing=Timing(read_back_after=1.0))
 
 
 @dataclass
@@ -72,7 +71,8 @@ async def live() -> AsyncGenerator[Live, None]:
             raise AssertionError("a write was attempted; these tests are read-only")
         return await read(request)
     setattr(connection, "request", only_reads)
-    device = ModbusDevice(connection, UNIT_ID, owns_connection=True, reconnect=None)
+    device = ModbusDevice(connection, UNIT_ID, owns_connection=True, reconnect=NEVER_AGAIN,
+                          profiles=[modbus(LIVE_MODEL)])
     client = Client(device, LIVE_MODEL, read_only=True, write_retry=NO_RETRY)
     try:
         await client.connect()

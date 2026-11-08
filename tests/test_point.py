@@ -34,13 +34,13 @@ from modbus_event_connect.modbus._access import (
     DiscreteInput,
     HoldingRegister,
     InputRegister,
-    ModbusOptions,
     NumberRange,
     RegisterNumbering,
     modicon,
     plain,
 )
 from event_connect.testing import FakeClock
+from profiles import bare_model, modbus
 
 
 def _key(fields: dict[str, Any]) -> Key[Any]:
@@ -58,6 +58,9 @@ def _key(fields: dict[str, Any]) -> Key[Any]:
 def _refused(match: str, **fields: Any) -> None:
     with pytest.raises(ValueError, match=match):
         Point(fields.pop("key", None) or _key(fields), **fields)
+
+
+BARE = bare_model()
 
 
 # ================================================================================== data_types
@@ -545,7 +548,7 @@ SPLIT_TABLE = RegisterNumbering(input_registers=[NumberRange(10001, 19999, addre
 ])
 def test_register_numbers_become_addresses(numbering: RegisterNumbering, access: Access,
                                            address: int) -> None:
-    assert ModbusOptions(numbering=numbering).address(access) == address
+    assert modbus(BARE, numbering=numbering).address(access) == address
 
 
 @pytest.mark.parametrize("numbering,access", [
@@ -567,7 +570,7 @@ def test_register_numbers_become_addresses(numbering: RegisterNumbering, access:
 def test_a_number_the_numbering_has_no_address_for_is_refused(numbering: RegisterNumbering,
                                                               access: Access) -> None:
     with pytest.raises(ValueError):
-        ModbusOptions(numbering=numbering).address(access)
+        modbus(BARE, numbering=numbering).address(access)
 
 
 @pytest.mark.parametrize("make", [
@@ -595,25 +598,25 @@ def test_numberings_with_the_same_ranges_are_equal() -> None:
     assert modicon(digits=5, first_address=0) != modicon(digits=6, first_address=0)
 
 
-def test_options_name_every_problem_of_a_point() -> None:
-    options = ModbusOptions(numbering=modicon(digits=5, first_address=0), max_registers=32)
-    assert options.problems(Point(Key("ok", int), read=HoldingRegister(40001), write=HoldingRegister(40001))) == []
-    assert options.problems(Point(Key("wrong-table", int), read=HoldingRegister(30001)))
-    assert options.problems(Point(Key("too-wide", str), read=HoldingRegister(40001), data_type=DataType.string(40)))
-    assert options.problems(Point(Key("nabto", int), read=DatapointRegister(1)))
+def test_a_profile_names_every_problem_of_a_point() -> None:
+    profile = modbus(BARE, numbering=modicon(digits=5, first_address=0), max_registers=32)
+    assert profile.problems(Point(Key("ok", int), read=HoldingRegister(40001), write=HoldingRegister(40001))) == []
+    assert profile.problems(Point(Key("wrong-table", int), read=HoldingRegister(30001)))
+    assert profile.problems(Point(Key("too-wide", str), read=HoldingRegister(40001), data_type=DataType.string(40)))
+    assert profile.problems(Point(Key("nabto", int), read=DatapointRegister(1)))
 
 
 def test_a_multi_register_point_cannot_run_off_the_end() -> None:
-    options = ModbusOptions(numbering=plain(first_address=1))
-    assert options.problems(Point(Key("edge", int), read=HoldingRegister(65534), data_type=DataType.UINT16)) == []
-    assert options.problems(Point(Key("over", int), read=HoldingRegister(65535), data_type=DataType.UINT32))
+    profile = modbus(BARE)
+    assert profile.problems(Point(Key("edge", int), read=HoldingRegister(65534), data_type=DataType.UINT16)) == []
+    assert profile.problems(Point(Key("over", int), read=HoldingRegister(65535), data_type=DataType.UINT32))
 
 
 @pytest.mark.parametrize("build", [
-    lambda: ModbusOptions(numbering=plain(first_address=1), max_registers=0),
-    lambda: ModbusOptions(numbering=plain(first_address=1), max_registers=126),
-    lambda: ModbusOptions(numbering=plain(first_address=1), max_bits=0),
-    lambda: ModbusOptions(numbering=plain(first_address=1), max_bits=2001),
+    lambda: modbus(BARE, max_registers=0),
+    lambda: modbus(BARE, max_registers=126),
+    lambda: modbus(BARE, max_bits=0),
+    lambda: modbus(BARE, max_bits=2001),
 ])
 def test_device_limits_must_fit_the_protocol(build: Callable[[], object]) -> None:
     with pytest.raises(ValueError):

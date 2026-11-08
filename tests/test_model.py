@@ -34,12 +34,11 @@ from modbus_event_connect.modbus._access import (
     DiscreteInput,
     HoldingRegister,
     InputRegister,
-    ModbusOptions,
     NumberRange,
     RegisterNumbering,
     modicon,
-    plain,
 )
+from profiles import modbus
 
 # ============================================================================ happy path
 
@@ -55,24 +54,24 @@ def _room(n: int) -> list[Point[Any]]:
 
 SENTIO_LIKE = Model(
     name="Sentio-like", manufacturer="Wavin",
-    sections=[RepeatedSection(_room, range(1, 25), label="room")], options=ModbusOptions(numbering=plain(first_address=1)), timing=Timing(read_back_after=1.0)
+    sections=[RepeatedSection(_room, range(1, 25), label="room")], timing=Timing(read_back_after=1.0)
 )
 
 
 def test_sentio_like_model_resolves_every_room() -> None:
-    resolved = resolve(SENTIO_LIKE, {})
+    resolved = resolve(modbus(SENTIO_LIKE), {})
     assert len(resolved.points) == 24 * 2
     assert resolved.instances["room"] == tuple(range(1, 25))
 
 
 def test_sentio_like_labels_carry_the_instance_number() -> None:
-    resolved = resolve(SENTIO_LIKE, {})
+    resolved = resolve(modbus(SENTIO_LIKE), {})
     assert resolved.point("room_3_temp").labels["room"] == 3
     assert resolved.point("room_24_setpoint").labels["room"] == 24
 
 
 def test_select_by_label_returns_exactly_that_instance() -> None:
-    resolved = resolve(SENTIO_LIKE, {})
+    resolved = resolve(modbus(SENTIO_LIKE), {})
     room3 = resolved.select(Labels(room=3))
     assert {point.key for point in room3} == {"room_3_temp", "room_3_setpoint"}
 
@@ -100,7 +99,7 @@ def test_model_accepts_sequences_and_stores_tuples() -> None:
     async def step(scan: Scan) -> None:
         return None
 
-    model = Model(name="X", manufacturer="Y", sections=[section], identity_points=[identity_point], scan_steps=[step], options=ModbusOptions(numbering=plain(first_address=1)), timing=Timing(read_back_after=1.0))
+    model = Model(name="X", manufacturer="Y", sections=[section], identity_points=[identity_point], scan_steps=[step], timing=Timing(read_back_after=1.0))
     assert isinstance(model.sections, tuple)
     assert isinstance(model.identity_points, tuple)
     assert isinstance(model.scan_steps, tuple)
@@ -111,8 +110,8 @@ def test_model_accepts_sequences_and_stores_tuples() -> None:
 
 def test_a_section_with_when_none_is_always_included() -> None:
     p = Point(Key("always", int), read=HoldingRegister(1), data_type=DataType.UINT16)
-    model = Model(name="X", manufacturer="Y", sections=[Section([p])], options=ModbusOptions(numbering=plain(first_address=1)), timing=Timing(read_back_after=1.0))
-    assert "always" in resolve(model, {}).points
+    model = Model(name="X", manufacturer="Y", sections=[Section([p])], timing=Timing(read_back_after=1.0))
+    assert "always" in resolve(modbus(model), {}).points
 
 
 def _hardware_at_least_2(identity: Identity) -> bool:
@@ -124,12 +123,12 @@ def test_a_feature_section_is_included_only_when_its_condition_holds() -> None:
     base = Point(Key("base", int), read=HoldingRegister(1), data_type=DataType.UINT16)
     cooling = Point(Key("cooling_enabled", bool), read=Coil(1), data_type=DataType.BOOL)
     model = Model(name="X", manufacturer="Y",
-                  sections=[Section([base]), Section([cooling], when=_hardware_at_least_2)], options=ModbusOptions(numbering=plain(first_address=1)), timing=Timing(read_back_after=1.0))
+                  sections=[Section([base]), Section([cooling], when=_hardware_at_least_2)], timing=Timing(read_back_after=1.0))
 
-    old_hw = resolve(model, {"hardware": 1})
+    old_hw = resolve(modbus(model), {"hardware": 1})
     assert "cooling_enabled" not in old_hw.points
 
-    new_hw = resolve(model, {"hardware": 2})
+    new_hw = resolve(modbus(model), {"hardware": 2})
     assert "cooling_enabled" in new_hw.points
 
 
@@ -138,8 +137,8 @@ def test_a_when_that_raises_is_a_problem_naming_the_section_and_excludes_it() ->
         raise RuntimeError("boom")
 
     p = Point(Key("p", int), read=HoldingRegister(1), data_type=DataType.UINT16)
-    model = Model(name="X", manufacturer="Y", sections=[Section([p], when=broken_when)], options=ModbusOptions(numbering=plain(first_address=1)), timing=Timing(read_back_after=1.0))
-    found = problems(model, {})
+    model = Model(name="X", manufacturer="Y", sections=[Section([p], when=broken_when)], timing=Timing(read_back_after=1.0))
+    found = problems(modbus(model), {})
     assert any("when(identity) raised" in msg and "boom" in msg for msg in found)
 
 
@@ -147,9 +146,9 @@ def test_a_when_that_raises_is_a_problem_naming_the_section_and_excludes_it() ->
 
 
 CTS400 = Model(name="CTS400", manufacturer="Nilan",
-                sections=[Section([Point(Key("base", int), read=HoldingRegister(1), data_type=DataType.UINT16)])], options=ModbusOptions(numbering=plain(first_address=1)), timing=Timing(read_back_after=1.0))
+                sections=[Section([Point(Key("base", int), read=HoldingRegister(1), data_type=DataType.UINT16)])], timing=Timing(read_back_after=1.0))
 CTS600 = Model(name="CTS600", manufacturer="Nilan",
-                sections=[Section([Point(Key("base", int), read=HoldingRegister(1), data_type=DataType.UINT16)])], options=ModbusOptions(numbering=plain(first_address=1)), timing=Timing(read_back_after=1.0))
+                sections=[Section([Point(Key("base", int), read=HoldingRegister(1), data_type=DataType.UINT16)])], timing=Timing(read_back_after=1.0))
 
 
 def _select_nilan_model(identity: Identity) -> Model | None:
@@ -186,8 +185,8 @@ def test_a_factory_that_raises_is_reported_with_its_instance_number() -> None:
             raise ValueError("unlucky")
         return [Point(Key(f"p_{n}", int), read=InputRegister(n), data_type=DataType.UINT16)]
 
-    model = Model(name="X", manufacturer="Y", sections=[RepeatedSection(flaky, [1, 2, 3], label="unit")], options=ModbusOptions(numbering=plain(first_address=1)), timing=Timing(read_back_after=1.0))
-    found = problems(model, {})
+    model = Model(name="X", manufacturer="Y", sections=[RepeatedSection(flaky, [1, 2, 3], label="unit")], timing=Timing(read_back_after=1.0))
+    found = problems(modbus(model), {})
     assert len(found) == 1
     assert "instance 2" in found[0] and "factory raised" in found[0]
 
@@ -195,16 +194,16 @@ def test_a_factory_that_raises_is_reported_with_its_instance_number() -> None:
 def test_instance_numbers_must_be_unique() -> None:
     model = Model(name="X", manufacturer="Y",
                   sections=[RepeatedSection(lambda n: [Point(Key(f"p_{n}", int), read=InputRegister(n), data_type=DataType.UINT16)],
-                                     [1, 2, 2, 3], label="unit")], options=ModbusOptions(numbering=plain(first_address=1)), timing=Timing(read_back_after=1.0))
-    found = problems(model, {})
+                                     [1, 2, 2, 3], label="unit")], timing=Timing(read_back_after=1.0))
+    found = problems(modbus(model), {})
     assert any("instance number 2 appears 2 times" in msg for msg in found)
 
 
 def test_instance_label_must_not_be_empty() -> None:
     model = Model(name="X", manufacturer="Y",
                   sections=[RepeatedSection(lambda n: [Point(Key(f"p_{n}", int), read=InputRegister(n), data_type=DataType.UINT16)],
-                                     [1, 2], label="")], options=ModbusOptions(numbering=plain(first_address=1)), timing=Timing(read_back_after=1.0))
-    found = problems(model, {})
+                                     [1, 2], label="")], timing=Timing(read_back_after=1.0))
+    found = problems(modbus(model), {})
     assert any("label must not be empty" in msg for msg in found)
 
 
@@ -219,16 +218,16 @@ def test_two_repeated_sections_may_not_share_a_label() -> None:
     model = Model(name="X", manufacturer="Y",
                   sections=[RepeatedSection(first, [1, 2], label="unit"),
                             RepeatedSection(second, [1, 2], label="unit")],
-                  options=ModbusOptions(numbering=plain(first_address=1)), timing=Timing(read_back_after=1.0))
-    found = problems(model, {})
+                  timing=Timing(read_back_after=1.0))
+    found = problems(modbus(model), {})
     assert any("already has the label 'unit'" in msg for msg in found)
 
 
 def test_duplicate_keys_across_instances_are_reported() -> None:
     model = Model(name="X", manufacturer="Y",
                   sections=[RepeatedSection(lambda n: [Point(Key("shared_key", int), read=InputRegister(n), data_type=DataType.UINT16)],
-                                     [1, 2], label="unit")], options=ModbusOptions(numbering=plain(first_address=1)), timing=Timing(read_back_after=1.0))
-    found = problems(model, {})
+                                     [1, 2], label="unit")], timing=Timing(read_back_after=1.0))
+    found = problems(modbus(model), {})
     assert any("duplicate key 'shared_key'" in msg and "2 times" in msg for msg in found)
 
 
@@ -236,8 +235,8 @@ def test_a_point_already_carrying_the_instance_label_with_a_different_value_is_a
     def conflicting(n: int) -> list[Point[Any]]:
         return [Point(Key(f"p_{n}", int), read=InputRegister(n), data_type=DataType.UINT16, labels={"unit": 999})]
 
-    model = Model(name="X", manufacturer="Y", sections=[RepeatedSection(conflicting, [1], label="unit")], options=ModbusOptions(numbering=plain(first_address=1)), timing=Timing(read_back_after=1.0))
-    found = problems(model, {})
+    model = Model(name="X", manufacturer="Y", sections=[RepeatedSection(conflicting, [1], label="unit")], timing=Timing(read_back_after=1.0))
+    found = problems(modbus(model), {})
     assert any("already labeled unit=999" in msg for msg in found)
 
 
@@ -247,8 +246,8 @@ def test_a_point_already_carrying_the_instance_label_with_a_different_value_is_a
 def test_duplicate_keys_between_identity_and_a_section_are_reported() -> None:
     a = Point(Key("dup", int), read=HoldingRegister(1), data_type=DataType.UINT16)
     b = Point(Key("dup", int), read=HoldingRegister(2), data_type=DataType.UINT16)
-    model = Model(name="X", manufacturer="Y", sections=[Section([b])], identity_points=[a], options=ModbusOptions(numbering=plain(first_address=1)), timing=Timing(read_back_after=1.0))
-    found = problems(model, {})
+    model = Model(name="X", manufacturer="Y", sections=[Section([b])], identity_points=[a], timing=Timing(read_back_after=1.0))
+    found = problems(modbus(model), {})
     assert any("duplicate key 'dup'" in msg and "2 times" in msg for msg in found)
 
 
@@ -257,8 +256,8 @@ def test_duplicate_keys_between_identity_and_a_section_are_reported() -> None:
 
 def test_identity_point_without_a_read_side_is_a_problem() -> None:
     write_only = Point(Key("cmd", int), write=HoldingRegister(1), data_type=DataType.UINT16, write_kind=WriteKind.COMMAND)
-    model = Model(name="X", manufacturer="Y", sections=[], identity_points=[write_only], options=ModbusOptions(numbering=plain(first_address=1)), timing=Timing(read_back_after=1.0))
-    found = problems(model, {})
+    model = Model(name="X", manufacturer="Y", sections=[], identity_points=[write_only], timing=Timing(read_back_after=1.0))
+    found = problems(modbus(model), {})
     assert any("cmd" in msg and "read side" in msg for msg in found)
 
 
@@ -268,45 +267,45 @@ def test_identity_point_without_a_read_side_is_a_problem() -> None:
 def test_partial_overlap_of_read_sides_is_a_problem() -> None:
     wide = Point(Key("wide", int), read=HoldingRegister(100), data_type=DataType.INT32)
     narrow = Point(Key("narrow", int), read=HoldingRegister(101), data_type=DataType.UINT16)
-    model = Model(name="X", manufacturer="Y", sections=[Section([wide, narrow])], options=ModbusOptions(numbering=plain(first_address=1)), timing=Timing(read_back_after=1.0))
-    found = problems(model, {})
+    model = Model(name="X", manufacturer="Y", sections=[Section([wide, narrow])], timing=Timing(read_back_after=1.0))
+    found = problems(modbus(model), {})
     assert any("'wide'" in msg and "'narrow'" in msg and "overlap" in msg for msg in found)
 
 
 def test_partial_overlap_of_write_sides_is_a_problem() -> None:
     wide = Point(Key("wide", int), read=HoldingRegister(100), write=HoldingRegister(100), data_type=DataType.INT32)
     narrow = Point(Key("narrow", int), read=HoldingRegister(101), write=HoldingRegister(101), data_type=DataType.UINT16)
-    model = Model(name="X", manufacturer="Y", sections=[Section([wide, narrow])], options=ModbusOptions(numbering=plain(first_address=1)), timing=Timing(read_back_after=1.0))
-    found = problems(model, {})
+    model = Model(name="X", manufacturer="Y", sections=[Section([wide, narrow])], timing=Timing(read_back_after=1.0))
+    found = problems(modbus(model), {})
     assert any("write sides" in msg and "overlap" in msg for msg in found)
 
 
 def test_identical_spans_are_allowed() -> None:
     view_a = Point(Key("view_a", int), read=HoldingRegister(100), data_type=DataType.UINT16)
     view_b = Point(Key("view_b", int), read=HoldingRegister(100), data_type=DataType.UINT16)
-    model = Model(name="X", manufacturer="Y", sections=[Section([view_a, view_b])], options=ModbusOptions(numbering=plain(first_address=1)), timing=Timing(read_back_after=1.0))
-    assert problems(model, {}) == []
+    model = Model(name="X", manufacturer="Y", sections=[Section([view_a, view_b])], timing=Timing(read_back_after=1.0))
+    assert problems(modbus(model), {}) == []
 
 
 def test_bit_views_of_one_register_are_allowed() -> None:
     bit_a = Point(Key("bit_a", bool), read=HoldingRegister(50), data_type=DataType.bit(0))
     bit_b = Point(Key("bit_b", bool), read=HoldingRegister(50), data_type=DataType.bit(1))
-    model = Model(name="X", manufacturer="Y", sections=[Section([bit_a, bit_b])], options=ModbusOptions(numbering=plain(first_address=1)), timing=Timing(read_back_after=1.0))
-    assert problems(model, {}) == []
+    model = Model(name="X", manufacturer="Y", sections=[Section([bit_a, bit_b])], timing=Timing(read_back_after=1.0))
+    assert problems(modbus(model), {}) == []
 
 
 def test_different_address_spaces_never_overlap() -> None:
     in_input = Point(Key("in_input", int), read=InputRegister(100), data_type=DataType.UINT16)
     in_holding = Point(Key("in_holding", int), read=HoldingRegister(100), data_type=DataType.UINT16)
-    model = Model(name="X", manufacturer="Y", sections=[Section([in_input, in_holding])], options=ModbusOptions(numbering=plain(first_address=1)), timing=Timing(read_back_after=1.0))
-    assert problems(model, {}) == []
+    model = Model(name="X", manufacturer="Y", sections=[Section([in_input, in_holding])], timing=Timing(read_back_after=1.0))
+    assert problems(modbus(model), {}) == []
 
 
 def test_bit_spaces_allow_the_same_address_for_several_points() -> None:
     d1 = Point(Key("d1", bool), read=DiscreteInput(5), data_type=DataType.BOOL)
     d2 = Point(Key("d2", bool), read=DiscreteInput(5), data_type=DataType.BOOL)
-    model = Model(name="X", manufacturer="Y", sections=[Section([d1, d2])], options=ModbusOptions(numbering=plain(first_address=1)), timing=Timing(read_back_after=1.0))
-    assert problems(model, {}) == []
+    model = Model(name="X", manufacturer="Y", sections=[Section([d1, d2])], timing=Timing(read_back_after=1.0))
+    assert problems(modbus(model), {}) == []
 
 
 # ========================================================================== read-back delay
@@ -317,8 +316,8 @@ def test_re_reading_until_stable_needs_a_positive_read_back_delay(seconds: float
     mode = Point(Key("mode", int), read=HoldingRegister(1), write=HoldingRegister(1),
                  on_write=Refresh(["fan"], until_stable=10.0))
     model = Model(name="X", manufacturer="Y", sections=[Section([mode, Point(Key("fan", int), read=InputRegister(2))])],
-                  options=ModbusOptions(numbering=plain(first_address=1)), timing=Timing(read_back_after=seconds))
-    assert any("positive read-back delay" in msg for msg in problems(model, {})) is refused
+                  timing=Timing(read_back_after=seconds))
+    assert any("positive read-back delay" in msg for msg in problems(modbus(model), {})) is refused
 
 
 # =================================================================== on_write / on_change targets
@@ -327,23 +326,23 @@ def test_re_reading_until_stable_needs_a_positive_read_back_delay(seconds: float
 def test_on_write_naming_an_unknown_key_is_a_problem() -> None:
     p = Point(Key("cause", int), read=HoldingRegister(1), write=HoldingRegister(1), data_type=DataType.UINT16,
               on_write=Refresh(["does_not_exist"]))
-    model = Model(name="X", manufacturer="Y", sections=[Section([p])], options=ModbusOptions(numbering=plain(first_address=1)), timing=Timing(read_back_after=1.0))
-    found = problems(model, {})
+    model = Model(name="X", manufacturer="Y", sections=[Section([p])], timing=Timing(read_back_after=1.0))
+    found = problems(modbus(model), {})
     assert any("cause" in msg and "on_write target" in msg and "does_not_exist" in msg for msg in found)
 
 
 def test_on_write_labels_matching_nothing_is_a_problem() -> None:
     p = Point(Key("cause", int), read=HoldingRegister(1), write=HoldingRegister(1), data_type=DataType.UINT16,
               on_write=Refresh(Labels(room=99)))
-    model = Model(name="X", manufacturer="Y", sections=[Section([p])], options=ModbusOptions(numbering=plain(first_address=1)), timing=Timing(read_back_after=1.0))
-    found = problems(model, {})
+    model = Model(name="X", manufacturer="Y", sections=[Section([p])], timing=Timing(read_back_after=1.0))
+    found = problems(modbus(model), {})
     assert any("on_write target" in msg and "selects no point" in msg for msg in found)
 
 
 def test_on_change_target_must_select_at_least_one_point() -> None:
     p = Point(Key("trigger", bool), read=DiscreteInput(1), data_type=DataType.BOOL, on_change=Refresh(["missing_key"]))
-    model = Model(name="X", manufacturer="Y", sections=[Section([p])], options=ModbusOptions(numbering=plain(first_address=1)), timing=Timing(read_back_after=1.0))
-    found = problems(model, {})
+    model = Model(name="X", manufacturer="Y", sections=[Section([p])], timing=Timing(read_back_after=1.0))
+    found = problems(modbus(model), {})
     assert any("on_change target" in msg and "missing_key" in msg for msg in found)
 
 
@@ -354,8 +353,8 @@ def test_protocol_problems_are_prefixed_with_the_key() -> None:
     # 30001 is an input register number, not a holding register one.
     bad = Point(Key("bad", int), read=HoldingRegister(30001), data_type=DataType.UINT16)
     model = Model(name="X", manufacturer="Y", sections=[Section([bad])],
-                  options=ModbusOptions(numbering=modicon(digits=5, first_address=0)), timing=Timing(read_back_after=1.0))
-    found = problems(model, {})
+                  timing=Timing(read_back_after=1.0))
+    found = problems(modbus(model, numbering=modicon(digits=5, first_address=0)), {})
     assert any(msg.startswith("'bad': ") for msg in found)
 
 
@@ -365,8 +364,8 @@ def test_points_overlap_by_address_even_when_their_numbers_do_not() -> None:
     wide = Point(Key("wide", int), read=InputRegister(19999), data_type=DataType.UINT32)   # addresses 9998-9999
     next_ = Point(Key("next", int), read=InputRegister(20001))                            # address 9999
     model = Model(name="X", manufacturer="Y", sections=[Section([wide, next_])],
-                  options=ModbusOptions(numbering=numbering), timing=Timing(read_back_after=1.0))
-    assert any("overlap" in msg for msg in problems(model, {}))
+                  timing=Timing(read_back_after=1.0))
+    assert any("overlap" in msg for msg in problems(modbus(model, numbering=numbering), {}))
 
 
 # ============================================================================ intervals
@@ -375,21 +374,21 @@ def test_points_overlap_by_address_even_when_their_numbers_do_not() -> None:
 @pytest.mark.parametrize("interval", [0, -5])
 def test_an_interval_must_be_positive_or_none(interval: float) -> None:
     model = Model(name="X", manufacturer="Y", sections=[],
-                  timing=Timing(poll_intervals={PollRate.FAST: interval, PollRate.SLOW: None, PollRate.RARE: None, PollRate.STATIC: None}, read_back_after=1.0), options=ModbusOptions(numbering=plain(first_address=1)))
-    found = problems(model, {})
+                  timing=Timing(poll_intervals={PollRate.FAST: interval, PollRate.SLOW: None, PollRate.RARE: None, PollRate.STATIC: None}, read_back_after=1.0))
+    found = problems(modbus(model), {})
     assert any("must be positive or None" in msg for msg in found)
 
 
 def test_an_interval_below_min_interval_is_a_problem() -> None:
     model = Model(name="X", manufacturer="Y", sections=[],
-                  timing=Timing(poll_intervals={PollRate.FAST: 1.0, PollRate.SLOW: 60.0, PollRate.RARE: 900.0, PollRate.STATIC: None}, min_poll_interval=5.0, read_back_after=1.0), options=ModbusOptions(numbering=plain(first_address=1)))
-    found = problems(model, {})
+                  timing=Timing(poll_intervals={PollRate.FAST: 1.0, PollRate.SLOW: 60.0, PollRate.RARE: 900.0, PollRate.STATIC: None}, min_poll_interval=5.0, read_back_after=1.0))
+    found = problems(modbus(model), {})
     assert any("below the floor min_poll_interval" in msg for msg in found)
 
 
 def test_default_intervals_and_min_interval_cause_no_problem() -> None:
-    model = Model(name="X", manufacturer="Y", sections=[], options=ModbusOptions(numbering=plain(first_address=1)), timing=Timing(read_back_after=1.0))
-    assert problems(model, {}) == []
+    model = Model(name="X", manufacturer="Y", sections=[], timing=Timing(read_back_after=1.0))
+    assert problems(modbus(model), {}) == []
 
 
 # ============================================================================ name / manufacturer
@@ -397,8 +396,8 @@ def test_default_intervals_and_min_interval_cause_no_problem() -> None:
 
 @pytest.mark.parametrize("name,manufacturer", [("", "Y"), ("X", ""), ("", "")])
 def test_empty_name_or_manufacturer_is_a_problem(name: str, manufacturer: str) -> None:
-    model = Model(name=name, manufacturer=manufacturer, sections=[], options=ModbusOptions(numbering=plain(first_address=1)), timing=Timing(read_back_after=1.0))
-    found = problems(model, {})
+    model = Model(name=name, manufacturer=manufacturer, sections=[], timing=Timing(read_back_after=1.0))
+    found = problems(modbus(model), {})
     assert found
 
 
@@ -406,23 +405,23 @@ def test_empty_name_or_manufacturer_is_a_problem(name: str, manufacturer: str) -
 
 
 def test_resolve_raises_model_error_listing_every_problem() -> None:
-    model = Model(name="", manufacturer="", sections=[], options=ModbusOptions(numbering=plain(first_address=1)), timing=Timing(read_back_after=1.0))
+    model = Model(name="", manufacturer="", sections=[], timing=Timing(read_back_after=1.0))
     with pytest.raises(ModelError) as excinfo:
-        resolve(model, {})
+        resolve(modbus(model), {})
     message = str(excinfo.value)
     assert "model name" in message
     assert "manufacturer" in message
 
 
 def test_problems_never_raises_and_returns_an_empty_list_when_valid() -> None:
-    model = Model(name="X", manufacturer="Y", sections=[], options=ModbusOptions(numbering=plain(first_address=1)), timing=Timing(read_back_after=1.0))
-    assert problems(model, {}) == []
+    model = Model(name="X", manufacturer="Y", sections=[], timing=Timing(read_back_after=1.0))
+    assert problems(modbus(model), {}) == []
 
 
 def test_resolve_succeeds_when_there_are_no_problems() -> None:
     p = Point(Key("ok", int), read=HoldingRegister(1), data_type=DataType.UINT16)
-    model = Model(name="X", manufacturer="Y", sections=[Section([p])], options=ModbusOptions(numbering=plain(first_address=1)), timing=Timing(read_back_after=1.0))
-    resolved = resolve(model, {})
+    model = Model(name="X", manufacturer="Y", sections=[Section([p])], timing=Timing(read_back_after=1.0))
+    resolved = resolve(modbus(model), {})
     assert resolved.point("ok") is p
 
 
@@ -432,29 +431,29 @@ def test_resolve_succeeds_when_there_are_no_problems() -> None:
 def test_resolved_model_select_by_keys_preserves_the_given_order() -> None:
     a = Point(Key("a", int), read=HoldingRegister(1), data_type=DataType.UINT16)
     b = Point(Key("b", int), read=HoldingRegister(2), data_type=DataType.UINT16)
-    model = Model(name="X", manufacturer="Y", sections=[Section([a, b])], options=ModbusOptions(numbering=plain(first_address=1)), timing=Timing(read_back_after=1.0))
-    resolved = resolve(model, {})
+    model = Model(name="X", manufacturer="Y", sections=[Section([a, b])], timing=Timing(read_back_after=1.0))
+    resolved = resolve(modbus(model), {})
     assert resolved.select(("b", "a")) == (b, a)
 
 
 def test_resolved_model_select_by_keys_raises_naming_every_unknown_key() -> None:
     a = Point(Key("a", int), read=HoldingRegister(1), data_type=DataType.UINT16)
-    model = Model(name="X", manufacturer="Y", sections=[Section([a])], options=ModbusOptions(numbering=plain(first_address=1)), timing=Timing(read_back_after=1.0))
-    resolved = resolve(model, {})
+    model = Model(name="X", manufacturer="Y", sections=[Section([a])], timing=Timing(read_back_after=1.0))
+    resolved = resolve(modbus(model), {})
     with pytest.raises(KeyError, match="missing_one.*missing_two|missing_two.*missing_one"):
         resolved.select(("a", "missing_one", "missing_two"))
 
 
 def test_resolved_model_select_by_labels_may_be_empty() -> None:
     a = Point(Key("a", int), read=HoldingRegister(1), data_type=DataType.UINT16, labels={"room": 1})
-    model = Model(name="X", manufacturer="Y", sections=[Section([a])], options=ModbusOptions(numbering=plain(first_address=1)), timing=Timing(read_back_after=1.0))
-    resolved = resolve(model, {})
+    model = Model(name="X", manufacturer="Y", sections=[Section([a])], timing=Timing(read_back_after=1.0))
+    resolved = resolve(modbus(model), {})
     assert resolved.select(Labels(room=99)) == ()
 
 
 def test_resolved_model_point_raises_key_error_naming_the_key() -> None:
-    model = Model(name="X", manufacturer="Y", sections=[], options=ModbusOptions(numbering=plain(first_address=1)), timing=Timing(read_back_after=1.0))
-    resolved = resolve(model, {})
+    model = Model(name="X", manufacturer="Y", sections=[], timing=Timing(read_back_after=1.0))
+    resolved = resolve(modbus(model), {})
     with pytest.raises(KeyError, match="missing"):
         resolved.point("missing")
 
@@ -462,6 +461,6 @@ def test_resolved_model_point_raises_key_error_naming_the_key() -> None:
 def test_resolved_model_points_are_in_declaration_order_identity_first() -> None:
     id_point = Point(Key("id_point", int), read=HoldingRegister(1), data_type=DataType.UINT16)
     section_point = Point(Key("section_point", int), read=HoldingRegister(2), data_type=DataType.UINT16)
-    model = Model(name="X", manufacturer="Y", sections=[Section([section_point])], identity_points=[id_point], options=ModbusOptions(numbering=plain(first_address=1)), timing=Timing(read_back_after=1.0))
-    resolved = resolve(model, {})
+    model = Model(name="X", manufacturer="Y", sections=[Section([section_point])], identity_points=[id_point], timing=Timing(read_back_after=1.0))
+    resolved = resolve(modbus(model), {})
     assert list(resolved.points.keys()) == ["id_point", "section_point"]

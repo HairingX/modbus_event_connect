@@ -17,13 +17,14 @@ from modbus_event_connect import (
     ModelError,
     Point,
     PollRate,
+    Profile,
     Quality,
     RepeatedSection,
     Scan,
     Section,
     Timing,
 )
-from modbus_event_connect._device import Identity, Outcome, ProtocolOptions, ReadResult, WriteResult
+from modbus_event_connect._device import Identity, Outcome, ReadResult, WriteResult
 from modbus_event_connect._data_type import DataType
 from modbus_event_connect.modbus._access import HoldingRegister, InputRegister
 from modbus_event_connect.testing import FakeClock
@@ -50,8 +51,8 @@ class FakeDevice:
     async def disconnect(self) -> None:
         self.connected = False
 
-    def configure(self, options: ProtocolOptions | None) -> None:
-        pass
+    def use(self, model: Model) -> Profile:
+        return Profile(model=model)
 
     async def read(self, points: Sequence[Point[Any]]) -> Mapping[str, ReadResult]:
         self.reads.append(tuple(p.key for p in points))
@@ -129,7 +130,7 @@ def _model(scan: InstanceScanStep = scan_zone) -> Model:
         sections=[Section([Point(EXTRA, read=InputRegister(2))], when=_has_extra),
                   RepeatedSection(_zone, range(1, 4), label="zone", scan=scan)],
         scan_steps=[read_version],
-        options=ProtocolOptions(), timing=Timing(read_back_after=1.0, poll_intervals={PollRate.SCAN: SCAN_INTERVAL}),
+        timing=Timing(read_back_after=1.0, poll_intervals={PollRate.SCAN: SCAN_INTERVAL}),
     )
 
 
@@ -243,7 +244,7 @@ def test_checks_follow_the_scan_interval_set_for_them() -> None:
 def test_a_model_without_a_scan_interval_is_never_checked() -> None:
     model = Model(name="ZONES", manufacturer="TEST",
                   sections=[RepeatedSection(_zone, range(1, 4), label="zone", scan=scan_zone)],
-                  options=ProtocolOptions(), timing=Timing(read_back_after=1.0, poll_intervals={PollRate.SCAN: None}))
+                  timing=Timing(read_back_after=1.0, poll_intervals={PollRate.SCAN: None}))
     client, device, clock, _ = _connected(model=model)
     assert client.seconds_until_next_poll() is None, "nothing is subscribed, and nothing is checked"
     device.reads.clear()

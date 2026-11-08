@@ -47,7 +47,7 @@ from event_connect import (
 from ._client import Client, PointsCallback
 from ._data_type import ByteOrder, DataType, DataTypeKind, WordOrder
 from ._device import Identity
-from ._model import InstanceScanStep, Model, ModelSelector, RepeatedSection, Scan, ScanStep, Section
+from ._model import InstanceScanStep, Model, ModelSelector, Profile, RepeatedSection, Scan, ScanStep, Section
 from ._point import Point
 
 __version__ = _installed_version("modbus_event_connect")
@@ -82,6 +82,7 @@ __all__ = [
     "Point",
     "PointsCallback",
     "PollRate",
+    "Profile",
     "Pulse",
     "Quality",
     "ReadOnlyError",

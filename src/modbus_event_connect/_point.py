@@ -29,7 +29,7 @@ __all__ = ["Access", "Point"]
 class Access:
     """Where one side of a point lives; concrete kinds are defined per protocol."""
     address: int
-    """The address, or a register number the protocol's options turn into one."""
+    """The address, or a register number the model's profile turns into one."""
 
     writable: ClassVar[bool] = False
     """Whether this space accepts writes."""

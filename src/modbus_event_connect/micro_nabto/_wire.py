@@ -98,6 +98,12 @@ def setpoint_write(items: Sequence[tuple[int, int, int]]) -> bytes:
                                    for obj, address, value in items])
 
 
+MAX_DATAGRAM = 65507
+"""The most bytes a UDP datagram carries over IPv4."""
+DATAPOINT_ITEM = 5
+"""Bytes one register takes in a datapoint read's request: its object and four address bytes."""
+
+
 def _packet(client_id: bytes, server_id: bytes, kind: int, sequence: int, payload: bytes, *,
             checksum: bool) -> bytes:
     length = HEADER_LENGTH + len(payload) + (2 if checksum else 0)
@@ -199,3 +205,7 @@ def _values(payload: bytes, count_at: int) -> list[int] | None:
     if len(payload) != start + 2 * count:
         return None
     return [int.from_bytes(payload[i:i + 2], "big") for i in range(start, len(payload), 2)]
+
+
+EMPTY_DATAPOINT_READ = len(data_request(bytes(4), bytes(4), 0, datapoint_read([])))
+"""Bytes a datapoint read's request takes besides its registers."""
