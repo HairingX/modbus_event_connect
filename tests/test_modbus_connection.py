@@ -16,7 +16,7 @@ from modbus_event_connect.modbus._connection import (
     Request,
     Response,
 )
-from modbus_event_connect.testing._clock import FakeClock
+from event_connect.testing import FakeClock
 
 HOST = "modbus.invalid"
 
@@ -125,6 +125,25 @@ class NoUnitClient(FakeClient):
         return await self._handle("read_holding_registers", address, count=count)
 
 
+def making(client: object) -> Callable[..., object]:
+    """Stands in for pymodbus's client class: whatever it is asked to make, it gives `client`."""
+    def make(*args: Any, **kwargs: Any) -> object:
+        return client
+    return make
+
+
+def on(client: FakeClient, **settings: Any) -> ModbusTcpConnection:
+    """A connection that talks through `client`, made where pymodbus makes its client."""
+    original = pymodbus.client.AsyncModbusTcpClient
+    setattr(pymodbus.client, "AsyncModbusTcpClient", making(client))
+    try:
+        connection = ModbusTcpConnection(HOST, **settings)
+        connection._ensure_client()
+    finally:
+        setattr(pymodbus.client, "AsyncModbusTcpClient", original)
+    return connection
+
+
 def holding(unit: int, address: int = 0, count: int = 1) -> Request:
     return Request(unit, FunctionCode.READ_HOLDING_REGISTERS, address, count=count)
 
@@ -134,7 +153,7 @@ def holding(unit: int, address: int = 0, count: int = 1) -> Request:
 
 async def test_the_unit_travels_with_every_request_as_device_id() -> None:
     client = FakeClient()
-    conn = ModbusTcpConnection(HOST, client=client)
+    conn = on(client)
     await conn.request(holding(3, 10))
     await conn.request(holding(7, 10))
     assert [(c[0], c[2]["device_id"]) for c in client.calls] == [
@@ -143,7 +162,7 @@ async def test_the_unit_travels_with_every_request_as_device_id() -> None:
 
 async def test_an_older_pymodbus_gets_the_unit_as_slave() -> None:
     client = OldFakeClient()
-    conn = ModbusTcpConnection(HOST, client=client)
+    conn = on(client)
     await conn.request(holding(5))
     await conn.request(Request(9, FunctionCode.WRITE_SINGLE_REGISTER, 4, values=(1,)))
     assert [c[2]["slave"] for c in client.calls] == [5, 9]
@@ -151,7 +170,7 @@ async def test_an_older_pymodbus_gets_the_unit_as_slave() -> None:
 
 
 async def test_a_pymodbus_that_takes_no_unit_is_refused_rather_than_guessed() -> None:
-    conn = ModbusTcpConnection(HOST, client=NoUnitClient())
+    conn = on(NoUnitClient())
     with pytest.raises(TypeError):
         await conn.request(holding(1))
 
@@ -172,7 +191,7 @@ async def test_a_pymodbus_that_takes_no_unit_is_refused_rather_than_guessed() ->
 ])
 async def test_every_write_reaches_its_pymodbus_method(request_: Request, call: str, kwargs: dict[str, Any]) -> None:
     client = FakeClient(lambda name, address, kw: FakeReply())
-    response = await ModbusTcpConnection(HOST, client=client).request(request_)
+    response = await on(client).request(request_)
     assert response == Response(ok=True)
     name, address, sent = client.calls[0]
     assert (name, address) == (call, 5)
@@ -185,7 +204,7 @@ async def test_every_write_reaches_its_pymodbus_method(request_: Request, call: 
 ])
 async def test_register_reads_return_the_registers(function: FunctionCode, call: str) -> None:
     client = FakeClient(lambda name, address, kw: FakeReply(registers=[11, 22, 33]))
-    response = await ModbusTcpConnection(HOST, client=client).request(Request(1, function, 100, count=3))
+    response = await on(client).request(Request(1, function, 100, count=3))
     assert response == Response(ok=True, registers=(11, 22, 33))
     assert client.calls[0][:2] == (call, 100) and client.calls[0][2]["count"] == 3
 
@@ -197,14 +216,14 @@ async def test_register_reads_return_the_registers(function: FunctionCode, call:
 async def test_bit_reads_are_zero_or_one_and_cut_to_the_count(function: FunctionCode, call: str) -> None:
     # pymodbus pads bits to a whole byte: eight come back for three asked.
     client = FakeClient(lambda name, address, kw: FakeReply(bits=[True, False, True, True, True, True, True, True]))
-    response = await ModbusTcpConnection(HOST, client=client).request(Request(1, function, 0, count=3))
+    response = await on(client).request(Request(1, function, 0, count=3))
     assert response.registers == (1, 0, 1)
     assert client.calls[0][0] == call
 
 
 async def test_a_short_reply_is_an_error_but_not_a_missing_answer() -> None:
     client = FakeClient(lambda name, address, kw: FakeReply(registers=[1]))
-    response = await ModbusTcpConnection(HOST, client=client).request(holding(1, count=3))
+    response = await on(client).request(holding(1, count=3))
     assert not response.ok and not response.no_answer and response.exception_code == 0
 
 
@@ -214,20 +233,20 @@ async def test_a_short_reply_is_an_error_but_not_a_missing_answer() -> None:
 @pytest.mark.parametrize("code", [0x01, 0x02, 0x04, 0x06, 0x0B])
 async def test_an_exception_response_carries_its_code(code: int) -> None:
     client = FakeClient(lambda name, address, kw: FakeReply(exception_code=code))
-    response = await ModbusTcpConnection(HOST, client=client).request(holding(1))
+    response = await on(client).request(holding(1))
     assert (response.ok, response.exception_code, response.no_answer) == (False, code, False)
 
 
 async def test_a_raised_exception_is_no_answer_and_does_not_leak_the_host() -> None:
     client = FakeClient(lambda name, address, kw: ConnectionError(f"Connection to {HOST}:502 lost"))
-    response = await ModbusTcpConnection(HOST, client=client).request(holding(1))
+    response = await on(client).request(holding(1))
     assert response.no_answer and not response.ok
     assert HOST not in response.detail
 
 
 async def test_a_timeout_raised_by_pymodbus_is_no_answer() -> None:
     client = FakeClient(lambda name, address, kw: asyncio.TimeoutError())
-    response = await ModbusTcpConnection(HOST, client=client).request(holding(1))
+    response = await on(client).request(holding(1))
     assert response.no_answer
 
 
@@ -235,7 +254,7 @@ async def test_after_pymodbus_gives_up_waiting_the_next_request_opens_a_new_link
     no_response = ModbusIOException("No response received after 0 retries, continue with next request")
     answers: list[Answer] = [no_response, FakeReply(registers=[7])]
     client = FakeClient(lambda name, address, kw: answers.pop(0))
-    conn = ModbusTcpConnection(HOST, client=client)
+    conn = on(client)
     assert (await conn.request(holding(1))).no_answer
     assert client.closes == 1 and not conn.connected
     response = await conn.request(holding(1))
@@ -247,14 +266,14 @@ async def test_a_client_that_never_answers_is_given_up_on_and_the_link_dropped()
     # A reply arriving after we gave up must not be read as the answer to the next request.
     client = FakeClient(hang=True)
     client.connected = True
-    response = await ModbusTcpConnection(HOST, client=client, timeout=0.01).request(holding(1))
+    response = await on(client, timeout=0.01).request(holding(1))
     assert response.no_answer
     assert client.closes == 1
 
 
 async def test_a_none_reply_is_no_answer() -> None:
     client = FakeClient(lambda name, address, kw: None)
-    assert (await ModbusTcpConnection(HOST, client=client).request(holding(1))).no_answer
+    assert (await on(client).request(holding(1))).no_answer
 
 
 # ============================================================================ serialisation
@@ -262,7 +281,7 @@ async def test_a_none_reply_is_no_answer() -> None:
 
 async def test_concurrent_callers_are_sent_one_at_a_time() -> None:
     client = FakeClient()
-    conn = ModbusTcpConnection(HOST, client=client)
+    conn = on(client)
     responses = await asyncio.gather(*(conn.request(holding(unit)) for unit in range(1, 9)))
     assert all(r.ok for r in responses)
     assert len(client.calls) == 8
@@ -277,7 +296,7 @@ async def test_the_frame_gap_is_kept_after_each_answer() -> None:
         waits.append(seconds)
         clock.advance(seconds)
 
-    conn = ModbusTcpConnection(HOST, client=FakeClient(), frame_gap=0.05, clock=clock, sleep=sleep)
+    conn = on(FakeClient(), frame_gap=0.05, clock=clock, sleep=sleep)
     await conn.request(holding(1))
     assert waits == []                            # nothing before the first request
     await conn.request(holding(1))
@@ -296,7 +315,7 @@ async def test_no_frame_gap_means_no_waiting() -> None:
     async def sleep(seconds: float) -> None:
         waits.append(seconds)
 
-    conn = ModbusTcpConnection(HOST, client=FakeClient(), clock=FakeClock(), sleep=sleep)
+    conn = on(FakeClient(), clock=FakeClock(), sleep=sleep)
     for _ in range(3):
         await conn.request(holding(1))
     assert waits == []
@@ -307,7 +326,7 @@ async def test_no_frame_gap_means_no_waiting() -> None:
 
 async def test_a_request_on_a_closed_link_opens_it_first() -> None:
     client = FakeClient()
-    conn = ModbusTcpConnection(HOST, client=client)
+    conn = on(client)
     assert not conn.connected
     assert (await conn.request(holding(1))).ok
     assert client.connects == 1 and conn.connected
@@ -317,7 +336,7 @@ async def test_a_request_on_a_closed_link_opens_it_first() -> None:
 
 async def test_a_link_that_will_not_open_is_no_answer_without_sending() -> None:
     client = FakeClient(connect_result=False)
-    response = await ModbusTcpConnection(HOST, client=client).request(holding(1))
+    response = await on(client).request(holding(1))
     assert response.no_answer
     assert client.connects == 1                   # tried once
     assert client.calls == []
@@ -325,7 +344,7 @@ async def test_a_link_that_will_not_open_is_no_answer_without_sending() -> None:
 
 async def test_open_and_close() -> None:
     client = FakeClient()
-    conn = ModbusTcpConnection(HOST, client=client)
+    conn = on(client)
     assert await conn.open() and conn.connected
     assert await conn.open() and client.connects == 1
     await conn.close()
@@ -339,7 +358,7 @@ async def test_open_reports_a_failure_instead_of_raising() -> None:
         raise OSError(f"cannot reach {HOST}")
 
     client.connect = refuse  # type: ignore[method-assign]
-    assert await ModbusTcpConnection(HOST, client=client).open() is False
+    assert await on(client).open() is False
 
 
 def test_nothing_is_created_by_the_constructor_so_it_works_outside_a_loop(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -350,7 +369,7 @@ def test_nothing_is_created_by_the_constructor_so_it_works_outside_a_loop(monkey
 
     monkeypatch.setattr(pymodbus.client, "AsyncModbusTcpClient", factory)
     conn = ModbusTcpConnection(HOST, 1502, timeout=2.5)
-    assert conn.client is None and made == [] and not conn.connected
+    assert conn._client is None and made == [] and not conn.connected
 
 
 async def test_the_client_is_created_on_first_use_with_the_settings(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -391,3 +410,10 @@ def test_requests_are_checked_when_made() -> None:
 def test_the_codes_are_the_modbus_ones() -> None:
     assert FunctionCode.MASK_WRITE_REGISTER == 0x16 and FunctionCode.WRITE_MULTIPLE_COILS == 0x0F
     assert ExceptionCode.GATEWAY_TARGET_FAILED == 0x0B and ExceptionCode.SERVER_DEVICE_BUSY == 0x06
+
+
+def test_a_connection_makes_its_own_pymodbus_client_and_takes_none() -> None:
+    import inspect
+
+    assert "client" not in inspect.signature(ModbusTcpConnection).parameters
+    assert not hasattr(ModbusTcpConnection, "client")

@@ -7,39 +7,41 @@ from typing import Any, Callable
 import pytest
 
 from event_connect import _unit as unit_module
-from modbus_event_connect._clock import Clock, SystemClock
-from modbus_event_connect._data_type import DataType, DataTypeKind
-from modbus_event_connect._device import EncodedWrite, Outcome, ReadResult, WriteResult
-from modbus_event_connect._key import Key
-from modbus_event_connect._point import (
+from event_connect import (
     DEFAULT_INTERVALS,
-    Access,
     Change,
+    Clock,
+    DataValue,
+    Key,
     Labels,
     Limits,
-    Point,
     PollRate,
     Pulse,
+    Quality,
     Refresh,
+    SystemClock,
     Transform,
     Transforms,
+    Unit,
     WriteKind,
+    WriteRange,
 )
-from modbus_event_connect._unit import Unit
-from modbus_event_connect._value import DataValue, Quality
+from modbus_event_connect._data_type import DataType, DataTypeKind
+from modbus_event_connect._device import EncodedWrite, Outcome, ReadResult, WriteResult
+from modbus_event_connect._point import Access, Point
 from modbus_event_connect.micro_nabto._access import DatapointRegister, SetpointRegister
 from modbus_event_connect.modbus._access import (
     Coil,
     DiscreteInput,
     HoldingRegister,
     InputRegister,
-    ModbusOptions,
     NumberRange,
     RegisterNumbering,
     modicon,
     plain,
 )
-from modbus_event_connect.testing._clock import FakeClock
+from event_connect.testing import FakeClock
+from profiles import bare_model, modbus
 
 
 def _key(fields: dict[str, Any]) -> Key[Any]:
@@ -57,6 +59,9 @@ def _key(fields: dict[str, Any]) -> Key[Any]:
 def _refused(match: str, **fields: Any) -> None:
     with pytest.raises(ValueError, match=match):
         Point(fields.pop("key", None) or _key(fields), **fields)
+
+
+BARE = bare_model()
 
 
 # ================================================================================== data_types
@@ -450,16 +455,6 @@ def test_a_write_refresh_waits_as_its_point_does_and_a_change_refresh_not_at_all
     assert point.on_change is not None and point.on_change.after == 0.0
 
 
-def test_read_back_after_needs_a_write_side() -> None:
-    _refused("read_back_after describes writes", read=InputRegister(1), read_back_after=2.0)
-
-
-@pytest.mark.parametrize("seconds", [-1.0, float("inf"), float("nan")])
-def test_read_back_after_must_be_a_finite_number_of_seconds(seconds: float) -> None:
-    _refused("read_back_after must be", read=HoldingRegister(1), write=HoldingRegister(1),
-             read_back_after=seconds)
-
-
 def test_a_refresh_reacts_to_any_change_unless_told_otherwise() -> None:
     assert Refresh(["a"]).when is Change.ANY
 
@@ -554,7 +549,7 @@ SPLIT_TABLE = RegisterNumbering(input_registers=[NumberRange(10001, 19999, addre
 ])
 def test_register_numbers_become_addresses(numbering: RegisterNumbering, access: Access,
                                            address: int) -> None:
-    assert ModbusOptions(numbering=numbering).address(access) == address
+    assert modbus(BARE, numbering=numbering).address(access) == address
 
 
 @pytest.mark.parametrize("numbering,access", [
@@ -576,7 +571,7 @@ def test_register_numbers_become_addresses(numbering: RegisterNumbering, access:
 def test_a_number_the_numbering_has_no_address_for_is_refused(numbering: RegisterNumbering,
                                                               access: Access) -> None:
     with pytest.raises(ValueError):
-        ModbusOptions(numbering=numbering).address(access)
+        modbus(BARE, numbering=numbering).address(access)
 
 
 @pytest.mark.parametrize("make", [
@@ -604,25 +599,25 @@ def test_numberings_with_the_same_ranges_are_equal() -> None:
     assert modicon(digits=5, first_address=0) != modicon(digits=6, first_address=0)
 
 
-def test_options_name_every_problem_of_a_point() -> None:
-    options = ModbusOptions(numbering=modicon(digits=5, first_address=0), max_registers=32)
-    assert options.problems(Point(Key("ok", int), read=HoldingRegister(40001), write=HoldingRegister(40001))) == []
-    assert options.problems(Point(Key("wrong-table", int), read=HoldingRegister(30001)))
-    assert options.problems(Point(Key("too-wide", str), read=HoldingRegister(40001), data_type=DataType.string(40)))
-    assert options.problems(Point(Key("nabto", int), read=DatapointRegister(1)))
+def test_a_profile_names_every_problem_of_a_point() -> None:
+    profile = modbus(BARE, numbering=modicon(digits=5, first_address=0), max_registers=32)
+    assert profile.problems(Point(Key("ok", int), read=HoldingRegister(40001), write=HoldingRegister(40001))) == []
+    assert profile.problems(Point(Key("wrong-table", int), read=HoldingRegister(30001)))
+    assert profile.problems(Point(Key("too-wide", str), read=HoldingRegister(40001), data_type=DataType.string(40)))
+    assert profile.problems(Point(Key("nabto", int), read=DatapointRegister(1)))
 
 
 def test_a_multi_register_point_cannot_run_off_the_end() -> None:
-    options = ModbusOptions(numbering=plain(first_address=1))
-    assert options.problems(Point(Key("edge", int), read=HoldingRegister(65534), data_type=DataType.UINT16)) == []
-    assert options.problems(Point(Key("over", int), read=HoldingRegister(65535), data_type=DataType.UINT32))
+    profile = modbus(BARE)
+    assert profile.problems(Point(Key("edge", int), read=HoldingRegister(65534), data_type=DataType.UINT16)) == []
+    assert profile.problems(Point(Key("over", int), read=HoldingRegister(65535), data_type=DataType.UINT32))
 
 
 @pytest.mark.parametrize("build", [
-    lambda: ModbusOptions(numbering=plain(first_address=1), max_registers=0),
-    lambda: ModbusOptions(numbering=plain(first_address=1), max_registers=126),
-    lambda: ModbusOptions(numbering=plain(first_address=1), max_bits=0),
-    lambda: ModbusOptions(numbering=plain(first_address=1), max_bits=2001),
+    lambda: modbus(BARE, max_registers=0),
+    lambda: modbus(BARE, max_registers=126),
+    lambda: modbus(BARE, max_bits=0),
+    lambda: modbus(BARE, max_bits=2001),
 ])
 def test_device_limits_must_fit_the_protocol(build: Callable[[], object]) -> None:
     with pytest.raises(ValueError):
@@ -760,3 +755,49 @@ def test_the_poll_rates_climb_from_seconds_to_a_quarter_of_an_hour() -> None:
 
 def test_a_point_is_polled_at_the_medium_rate_unless_it_says_otherwise() -> None:
     assert Point(Key("p", int), read=InputRegister(1)).poll_rate is PollRate.MEDIUM
+
+
+# ============================================================================ write range
+
+
+def _setting(key: Key[Any], **kw: Any) -> Point[Any]:
+    return Point(key, read=HoldingRegister(1), write=HoldingRegister(1), **kw)
+
+
+@pytest.mark.parametrize("point,expected", [
+    (_setting(Key("t", float), data_type=DataType.INT16, scale=0.1, valid_raw=range(-0x8000, 0x7FFF)),
+     WriteRange(-3276.8, 3276.6, 0.1)),
+    (_setting(Key("n", int)), WriteRange(0, 65535, 1)),
+    (_setting(Key("n", int), limits=Limits(min=5)), WriteRange(5, 65535, 1)),
+    (_setting(Key("t", float), data_type=DataType.INT16, scale=0.5, limits=Limits(min=5, max=30, step=1.0)),
+     WriteRange(5, 30, 1.0)),
+    (_setting(Key("m", float), transform=Transforms.SECONDS_AS_MINUTES), WriteRange(0, 65535 / 60, 1 / 60)),
+    (_setting(Key("d", int), scale=-1), WriteRange(-65535, 0, 1)),
+    (_setting(Key("o", float), scale=0.5, offset=-20, valid_raw={0, 7, 100}), WriteRange(-20, 30, 0.5)),
+    (_setting(Key("f", float), data_type=DataType.FLOAT32, limits=Limits(min=0, max=10)), WriteRange(0, 10, None)),
+], ids=["scaled-valid-raw", "data-type", "half-limits", "limits", "transform", "negative-scale", "offset-set",
+        "float-limits"])
+def test_a_points_write_range_is_its_limits_and_else_what_its_registers_carry(
+        point: Point[Any], expected: WriteRange) -> None:
+    found = point.write_range()
+    assert found is not None
+    assert (found.min, found.max) == pytest.approx((expected.min, expected.max))
+    assert found.step == (pytest.approx(expected.step) if expected.step is not None else None)
+
+
+@pytest.mark.parametrize("scale", [0.01, 0.1, 0.5])
+def test_a_scaled_points_write_range_steps_by_its_scale_exactly(scale: float) -> None:
+    point = _setting(Key("t", float), data_type=DataType.INT16, scale=scale, valid_raw=range(-0x8000, 0x7FFF))
+    found = point.write_range()
+    assert found is not None and found.step == scale
+
+
+@pytest.mark.parametrize("point", [
+    Point(Key("r", int), read=InputRegister(1)),
+    _setting(Key("s", Mode)),
+    _setting(Key("b", bool), data_type=DataType.BOOL),
+    _setting(Key("f", float), data_type=DataType.FLOAT32),
+    _setting(Key("text", str), data_type=DataType.string(2)),
+], ids=["read-only", "states", "bool", "float-without-limits", "text"])
+def test_a_point_without_a_range_of_numbers_to_write_has_none(point: Point[Any]) -> None:
+    assert point.write_range() is None

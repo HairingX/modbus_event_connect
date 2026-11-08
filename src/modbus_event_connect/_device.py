@@ -4,9 +4,12 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from ._point import Access, Point
+from ._point import Point
+
+if TYPE_CHECKING:
+    from ._model import Model, Profile
 
 Identity = Mapping[str, int | float | str | bool | None]
 """What a device says about itself: from a protocol handshake, or read from identity points."""
@@ -86,21 +89,6 @@ class EncodedWrite:
             raise ValueError(f"registers must be 16-bit values, got {self.registers}")
 
 
-class ProtocolOptions:
-    """What a model states in its protocol's terms.
-
-    The base class states nothing; a protocol supplies its own subclass.
-    """
-
-    def problems(self, point: Point[Any]) -> list[str]:
-        """What is wrong with `point` under these options. Empty when nothing is."""
-        return []
-
-    def address(self, access: Access) -> int:
-        """The address sent for `access`. Raises ValueError if it has none."""
-        return access.address
-
-
 @runtime_checkable
 class Device(Protocol):
     """One device, reached through one protocol. The core talks to this and nothing below it."""
@@ -117,8 +105,14 @@ class Device(Protocol):
         """Let go of the device. Closes the connection only if this device opened it."""
         ...
 
-    def configure(self, options: ProtocolOptions) -> None:
-        """Apply the chosen model's options. Called once the model is known, before any read."""
+    def use(self, model: Model) -> Profile:
+        """Talk to the device as the profile of `model` says, from now on, and return that profile.
+
+        Called once the model is chosen, before any of its points is read.
+
+        Raises:
+            ModelError: the device was given no profile of `model`.
+        """
         ...
 
     async def read(self, points: Sequence[Point[Any]]) -> Mapping[str, ReadResult]:

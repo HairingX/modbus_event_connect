@@ -8,25 +8,45 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from event_connect import DEFAULT_TIMING, Passes, Reachability, Status, StatusBoard, StatusCallback, Write, changed, stale
-
-from ._clock import Clock, SystemClock
-from ._conversion import decode, encode
-from ._device import Device, Identity, Outcome, ReadResult
-from ._errors import (
+from event_connect import (
     CannotConnectError,
+    Clock,
+    DataValue,
     InvalidValueError,
+    Key,
+    Labels,
     ModelError,
     NotConnectedError,
+    Passes,
+    PollRate,
+    Quality,
+    Reachability,
     ReadOnlyError,
+    Retry,
+    Scheduler,
+    Selector,
+    Status,
+    StatusBoard,
+    StatusCallback,
+    Subscriptions,
+    SystemClock,
     UnsupportedDeviceError,
+    Value,
+    ValueCallback,
+    Write,
+    WriteKind,
+    changed,
+    is_key,
+    selector,
+    should_poll,
+    stale,
+    tell,
 )
-from ._events import Subscriptions, ValueCallback, tell
-from ._key import Key, is_key
+
+from ._conversion import decode, encode
+from ._device import Device, Identity, Outcome, ReadResult
 from ._model import InstanceScanStep, Model, ModelSelector, RepeatedSection, ResolvedModel, resolve
-from ._point import Labels, Point, PollRate, Selector, WriteKind
-from ._scheduler import Scheduler
-from ._value import DataValue, Quality, Value
+from ._point import Point
 from ._writes import WriteQueue
 
 _LOGGER = logging.getLogger(__name__)
@@ -82,14 +102,12 @@ class Client:
     `model` is a model, or a selector choosing one from the device's identity.
     """
 
-    def __init__(self, device: Device, model: Model | ModelSelector, *,
+    def __init__(self, device: Device, model: Model | ModelSelector, *, write_retry: Retry,
                  clock: Clock | None = None, read_only: bool = False,
-                 sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-                 write_retry_for: float = 0.0, write_retry_pause: float = 0.5) -> None:
+                 sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
         """Args:
-            write_retry_for: seconds after its first sending that a write the device answered
-                `BUSY` is still sent again; 0 sends every write once.
-            write_retry_pause: seconds between those sendings.
+            write_retry: when a write the device answered `BUSY` is sent again, counting its
+                sendings and the time since the first; `NO_RETRY` sends every write once.
         """
         self._device = device
         self._select_model: ModelSelector = (lambda _identity: model) if isinstance(model, Model) else model
@@ -113,15 +131,15 @@ class Client:
         self._scheduled_polling = True
         self._checks_requested: float | None = None
         """When `refresh(PollRate.SCAN)` asked for the checks, which runs them without the schedule."""
-        self._consecutive_failures: dict[str, int] = {}
-        self._reachability = Reachability(self._clock, DEFAULT_TIMING.offline_after)
+        self._model: Model | None = None
+        """The model chosen last; None before the first scan chooses one."""
+        self._reachability = self._fresh_reachability()
         self._statuses = StatusBoard(self._clock)
 
         self._passes = Passes()
-        self._writes = WriteQueue(device, clock=self._clock, sleep=sleep, retry_for=write_retry_for,
-                                  retry_pause=write_retry_pause, answered=self._update_reachability,
-                                  written=self._taken,
-                                  pending=lambda pending: self._statuses.set(Status.WRITE_PENDING, pending))
+        self._writes = WriteQueue(device, clock=self._clock, sleep=sleep, retry=write_retry,
+                                  statuses=self._statuses, answered=self._update_reachability,
+                                  written=self._taken)
 
     # ================================================================================= scan
 
@@ -148,7 +166,7 @@ class Client:
         """Cancel pending pulses and let go of the device."""
         self._writes.cancel_pulses()
         await self._device.disconnect()
-        self._reachability = Reachability(self._clock, self._reachability_grace(), name=self._reachability.name)
+        self._reachability = self._fresh_reachability()
         self._statuses.set(Status.CONNECTED, False)
 
     async def _scan(self, handshake: Identity) -> None:
@@ -160,11 +178,14 @@ class Client:
         model = self._select_model(handshake)
         if model is None:
             raise UnsupportedDeviceError(f"no model for a device that reports {dict(handshake)!r}", handshake)
-        self._device.configure(model.options)
+        profile = self._device.use(model)
+        if model is not self._model:
+            self._model = model
+            self._reachability = self._fresh_reachability()
         marks = self._writes.marks()
         answers = _ScanAnswers()
         try:
-            resolved = resolve(model, await self._identify(model, handshake, answers))
+            resolved = resolve(profile, await self._identify(model, handshake, answers))
             _LOGGER.debug("%s chosen for a device that reports %r", model.name, dict(resolved.identity))
             scanned: dict[str, ReadResult] = {}
             found: dict[_Scope, dict[str, str]] = {}
@@ -197,7 +218,7 @@ class Client:
         answers = _ScanAnswers()
         scanned: dict[str, ReadResult] = {}
         marked, read_keys = await self._run_scan(resolved, scope, answers, scanned)
-        instance = resolved.select(Labels(**{label: number}))
+        instance = _select(resolved, Labels(**{label: number}))
         self._missing_by_scan[scope] = marked
         for point in instance:
             self._missing_by_read.pop(point.key, None)       # tried again with the instance
@@ -282,7 +303,7 @@ class Client:
 
     def _commit(self, model: Model, resolved: ResolvedModel, marks: dict[_Scope, dict[str, str]],
                 reads: dict[_Scope, dict[str, tuple[Quality, Value]]]) -> None:
-        scheduler = Scheduler(self._clock, model.poll_intervals, min_poll_interval=model.min_poll_interval)
+        scheduler = model.timing.scheduler(self._clock)
         scheduler.set_points(resolved.points.values())
         for target, seconds in self._interval_overrides.items():
             if isinstance(target, PollRate) or target in resolved.points:
@@ -311,13 +332,17 @@ class Client:
                               "reported", key, key.type.__name__, model.name, resolved.points[key].key.type.__name__)
         for key in resolved.points:
             self._update_polling(key)
-        self._reachability = Reachability(self._clock, model.offline_after, name=model.name)
         self._update_reachability(True)
 
     # ========================================================================= the picture
 
     @property
     def model(self) -> Model:
+        """The model chosen for the device.
+
+        Raises:
+            NotConnectedError: the device has not been scanned.
+        """
         return self._require_model().model
 
     @property
@@ -336,7 +361,7 @@ class Client:
         """The numbers of the instances of `label` of which this unit has at least one point."""
         resolved = self._require_model()
         return tuple(n for n in resolved.instances.get(label, ())
-                     if any(self._is_available(p.key) for p in resolved.select(Labels(**{label: n}))))
+                     if any(self._is_available(p.key) for p in _select(resolved, Labels(**{label: n}))))
 
     def select(self, targets: Selector | Sequence[str]) -> tuple[Point[Any], ...]:
         """The points `targets` selects, among those this unit has."""
@@ -380,8 +405,13 @@ class Client:
         return self._statuses.value(status)
 
     def consecutive_failures(self, key: str) -> int:
-        """Consecutive failed reads of `key`."""
-        return self._consecutive_failures.get(key, 0)
+        """Consecutive failed reads of `key`, as its schedule counts them.
+
+        Raises:
+            NotConnectedError: the device has not been scanned.
+            KeyError: this unit has no readable point `key`.
+        """
+        return self._require_scheduler().consecutive_failures(key)
 
     @property
     def silent(self) -> bool:
@@ -552,9 +582,7 @@ class Client:
         now = self._clock.monotonic()
         interval = self._require_scheduler().rate_interval(PollRate.SCAN)
         for scope in [scope for scope, check in self._checks.items() if check.due <= now]:
-            check = self._checks.get(scope)
-            if check is None:
-                continue                                   # a scan of the whole unit replaced it
+            check = self._checks[scope]
             check.due = now + interval if interval is not None else math.inf
             resolved = self._require_model()
             points = [resolved.points[key] for key in check.read]
@@ -646,7 +674,6 @@ class Client:
                     # The read asked for it, so it runs without scheduled polling too.
                     self._checks_requested = now if self._checks_requested is None else min(self._checks_requested, now)
             success = answer.outcome is Outcome.OK and data.quality is not Quality.STALE
-            self._consecutive_failures[point.key] = 0 if success else self.consecutive_failures(point.key) + 1
             scheduler.record(point.key, data, success=success, retry_after=answer.retry_after)
             self._store(point, data, previous)
 
@@ -681,12 +708,21 @@ class Client:
         The device counts as not answering only once it has been silent for the model's
         `offline_after`, so one lost answer does not make it unavailable.
         """
-        reachable = (self._reachability.answered(self._scheduler) if answered
-                     else self._reachability.unanswered())
-        self._statuses.set(Status.CONNECTED, reachable)
+        if answered:
+            self._reachability.answered(self._scheduler)
+        else:
+            self._reachability.unanswered()
+        self._statuses.set(Status.CONNECTED, self._reachability.reachable)
 
-    def _reachability_grace(self) -> float:
-        return self._resolved.model.offline_after if self._resolved is not None else DEFAULT_TIMING.offline_after
+    def _fresh_reachability(self) -> Reachability:
+        """Reachability as of now, for the model chosen last.
+
+        Before a model is chosen, nothing has answered, so the device does not yet count as
+        answering whatever silence its model allows.
+        """
+        if self._model is None:
+            return Reachability(self._clock, 0.0)
+        return Reachability(self._clock, self._model.timing.offline_after, name=self._model.name)
 
     # ============================================================================= writing
 
@@ -750,15 +786,15 @@ class Client:
             self._store(point, self._as_written(point, value), self._values.get(point.key))
         scheduler = self._require_scheduler()
         resolved = self._require_model()
-        after = resolved.model.read_back_delay(point)
+        timing = resolved.model.timing
         if point.readable:
-            scheduler.refresh([point.key], after=after)
+            scheduler.refresh([point.key], after=timing.written_point_delay(point))
         effect = point.on_write
         if effect is not None:
             keys = [p.key for p in _select(resolved, effect.targets)
                     if p.readable and self._is_available(p.key)]
             if keys:
-                scheduler.refresh(keys, after=after, until_stable=effect.until_stable)
+                scheduler.refresh(keys, after=timing.on_write_delay(point), until_stable=effect.until_stable)
 
     # ============================================================================ internals
 
@@ -784,20 +820,14 @@ class Client:
             raise TypeError(f"{key!r} names a {key.type.__name__}, but the "
                             f"{self._require_model().model.name} model's point holds a {point.key.type.__name__}")
 
-    def _should_poll(self, point: Point[Any]) -> bool:
-        """Whether anything wants `point` read: the model, its role as a trigger, or a consumer."""
-        return (point.poll_always
-                or point.on_change is not None
-                or point.key in self._polled_keys
-                or self._subscriptions.polled(point.key))
-
     def _update_polling(self, key: str) -> None:
         """Tell the scheduler whether `key` takes part in scheduling."""
         if self._resolved is None or self._scheduler is None or key not in self._resolved.points:
             return
         point = self._resolved.points[key]
         if point.readable:
-            self._scheduler.set_polled(key, self._should_poll(point) and self._is_available(key))
+            self._scheduler.set_polled(key, should_poll(point, self._subscriptions, self._polled_keys)
+                                       and self._is_available(key))
 
 
 class _ScanContext:
@@ -827,11 +857,14 @@ class _ScanContext:
 
 
 def _select(resolved: ResolvedModel, targets: Selector | Sequence[str]) -> tuple[Point[Any], ...]:
-    if isinstance(targets, Labels):
-        return resolved.select(targets)
-    if isinstance(targets, str):
-        raise TypeError(f"give keys as a list or tuple, not the single string {targets!r}")
-    return resolved.select(tuple(targets))
+    """The points of `resolved` that `targets` selects.
+
+    Raises:
+        TypeError: a single string.
+        ValueError: no keys.
+        KeyError: naming every key the model does not have.
+    """
+    return resolved.select(selector(targets))
 
 
 def _record_availability(record: dict[str, str], points: Iterable[Point[Any]], available: bool, reason: str) -> None:
@@ -852,11 +885,9 @@ def _scopes(resolved: ResolvedModel) -> list[_Scope]:
 
 
 def _instance_scan(model: Model, label: str) -> InstanceScanStep:
-    """The scan of the repeated section labelled `label`."""
-    for section in model.sections:
-        if isinstance(section, RepeatedSection) and section.label == label and section.scan is not None:
-            return section.scan
-    raise KeyError(f"no repeated section labelled {label!r} has a scan")
+    """The scan of the repeated section labelled `label`, which must have one."""
+    return next(section.scan for section in model.sections
+                if isinstance(section, RepeatedSection) and section.label == label and section.scan is not None)
 
 
 def _union(marks: Iterable[Mapping[str, str]]) -> dict[str, str]:

@@ -5,29 +5,38 @@ from typing import Any
 
 import pytest
 
+from event_connect import (
+    AuthenticationError,
+    CircuitBreaker,
+    DataValue,
+    Key,
+    Limits,
+    ModelError,
+    Quality,
+    ReadOnlyError,
+    Timing,
+    Unit,
+    UnsupportedDeviceError,
+    Within,
+)
 from modbus_event_connect import Fixed, Retry, Status
 from modbus_event_connect._client import Client
 from modbus_event_connect._data_type import DataType
 from modbus_event_connect._device import Device, EncodedWrite, Identity, Outcome
-from modbus_event_connect._errors import (
-    AuthenticationError,
-    ReadOnlyError,
-    UnsupportedDeviceError,
-)
-from modbus_event_connect._key import Key
 from modbus_event_connect._model import Model, Section
-from modbus_event_connect._point import Limits, Point
-from modbus_event_connect._unit import Unit
-from modbus_event_connect._value import DataValue, Quality
+from modbus_event_connect._point import Point
 from modbus_event_connect.micro_nabto._access import DatapointRegister, SetpointRegister
 from modbus_event_connect.micro_nabto._connection import MicroNabtoConnection
-from modbus_event_connect.micro_nabto._device import MicroNabtoDevice, MicroNabtoOptions
-from modbus_event_connect.modbus._access import HoldingRegister, ModbusOptions, plain
-from modbus_event_connect.testing._clock import FakeClock
+from modbus_event_connect.micro_nabto import _wire as wire
+from modbus_event_connect.micro_nabto._device import MAX_REGISTERS_PER_READ, MicroNabtoDevice, RereadZeros
+from modbus_event_connect.modbus._access import HoldingRegister
+from event_connect.testing import FakeClock
 from modbus_event_connect.testing._micro_nabto import Command, SimulatedMicroNabtoDevice
+from profiles import HANDSHAKE_NEVER_AGAIN, bare_model, micro_nabto
 
 EMAIL = "user@example.invalid"
 DATAPOINT_READ, SETPOINT_READ, SETPOINT_WRITE = 0x2D, 0x2A, 0x2B
+BARE = bare_model()
 
 
 def _key(text: str, data_type: DataType) -> Key[Any]:
@@ -52,12 +61,13 @@ def _simulated(*, clock: FakeClock | None = None, emails: frozenset[str] = froze
 
 
 def _device(simulated: SimulatedMicroNabtoDevice, *, clock: FakeClock | None = None,
-            email: str = EMAIL, reconnect: Retry | None = None) -> MicroNabtoDevice:
+            email: str = EMAIL, reconnect: CircuitBreaker = HANDSHAKE_NEVER_AGAIN) -> MicroNabtoDevice:
     host, port = simulated.address
     device = MicroNabtoDevice(MicroNabtoConnection(email, host=host, port=port, timeout=0.05, retries=1,
                                                    answer_wait=0.5, clock=clock, reconnect=reconnect),
+                              profiles=[micro_nabto(BARE, later_answer_wait=0.2), micro_nabto(CTS, later_answer_wait=0.2)],
                               owns_connection=True)
-    device.configure(MicroNabtoOptions(later_answer_wait=0.2))
+    device.use(BARE)
     return device
 
 
@@ -83,7 +93,8 @@ async def _connected(simulated: SimulatedMicroNabtoDevice) -> MicroNabtoDevice:
 # ================================================================================ contract
 
 def test_a_micro_nabto_device_is_a_device_protocol() -> None:
-    assert isinstance(MicroNabtoDevice.udp(EMAIL, host="device.invalid", reconnect=None), Device)
+    assert isinstance(MicroNabtoDevice.udp(EMAIL, host="device.invalid", reconnect=HANDSHAKE_NEVER_AGAIN,
+                                           profiles=[micro_nabto(BARE)]), Device)
 
 
 async def test_connect_returns_the_identity_from_the_handshake() -> None:
@@ -98,23 +109,36 @@ async def test_connect_to_a_silent_device_returns_none() -> None:
         assert await _device(simulated).connect() is None
 
 
-async def test_a_device_reads_nothing_before_it_knows_the_models_options() -> None:
+async def test_before_a_model_is_chosen_a_device_reads_as_cautiously_as_any_profile_says() -> None:
+    cautious = micro_nabto(bare_model("Cautious"), max_registers=8, later_answer_wait=1.0,
+                           zeros=RereadZeros(within=9.0, wait=Fixed(2.0), at_once=False, halves=False))
+    bold = micro_nabto(bare_model("Bold"), max_registers=64, later_answer_wait=3.0)
     async with _simulated() as simulated:
         host, port = simulated.address
         device = MicroNabtoDevice(MicroNabtoConnection(EMAIL, host=host, port=port, timeout=0.05, retries=1,
-                                                       reconnect=None),
-                                  owns_connection=True)
-        assert device.options is None
-        with pytest.raises(RuntimeError):
-            await device.read([_dp(1)])
-        assert simulated.received(DATAPOINT_READ) == []
+                                                       reconnect=HANDSHAKE_NEVER_AGAIN),
+                                  profiles=[cautious, bold], owns_connection=True)
+        assert device.profile is None
+        assert (device.max_registers, device.later_answer_wait, device.zeros) == (8, 3.0, cautious.zeros)
+        await device.connect()
+        await device.read([_dp(a) for a in range(1, 21)])
+        assert [len(c.items) for c in simulated.received(DATAPOINT_READ)] == [8, 8, 4]
+        assert device.use(bold.model) is bold and device.profile is bold
+        assert (device.max_registers, device.later_answer_wait, device.zeros) == (64, 3.0, bold.zeros)
         await device.disconnect()
 
 
-async def test_options_of_another_protocol_are_refused() -> None:
-    async with _simulated() as simulated:
-        with pytest.raises(TypeError):
-            _device(simulated).configure(ModbusOptions(numbering=plain(first_address=1)))
+def test_a_model_the_device_has_no_profile_of_is_refused() -> None:
+    device = MicroNabtoDevice.udp(EMAIL, host="device.invalid", reconnect=HANDSHAKE_NEVER_AGAIN,
+                                  profiles=[micro_nabto(BARE)])
+    with pytest.raises(ModelError, match="no profile of the model 'Other'"):
+        device.use(bare_model("Other"))
+
+
+def test_a_device_needs_one_profile_of_each_model_it_may_meet() -> None:
+    with pytest.raises(ModelError, match="two profiles of the model 'Bare'"):
+        MicroNabtoDevice.udp(EMAIL, host="device.invalid", reconnect=HANDSHAKE_NEVER_AGAIN,
+                             profiles=[micro_nabto(BARE), micro_nabto(BARE, max_registers=8)])
 
 
 # ================================================================================= reading
@@ -151,7 +175,6 @@ async def test_one_absent_address_among_many_is_found_in_few_requests() -> None:
 async def test_a_read_is_split_at_max_points() -> None:
     async with _simulated() as simulated:
         device = await _connected(simulated)
-        device.configure(MicroNabtoOptions(max_registers=64))
         answers = await device.read([_dp(a) for a in range(1, 101)])
         assert all(a.outcome is Outcome.OK for a in answers.values()) and len(answers) == 100
         assert [len(c.items) for c in simulated.received(DATAPOINT_READ)] == [64, 36]
@@ -221,6 +244,29 @@ async def test_a_later_answer_with_values_to_a_request_sent_again_is_taken_over_
         assert "reading them again" not in _warnings(caplog)
         diagnostics = device.diagnostics()
         assert (diagnostics["later_answer_waits"], diagnostics["later_answers_taken"]) == (1, 1)
+
+
+async def test_a_later_answer_is_waited_for_as_long_as_the_chosen_profile_says() -> None:
+    async with _simulated() as simulated:
+        host, port = simulated.address
+        hasty = bare_model("Hasty")
+        device = MicroNabtoDevice(MicroNabtoConnection(EMAIL, host=host, port=port, timeout=0.05, retries=1,
+                                                       answer_wait=0.5, reconnect=HANDSHAKE_NEVER_AGAIN),
+                                  profiles=[micro_nabto(hasty, later_answer_wait=0.0),
+                                            micro_nabto(BARE, later_answer_wait=0.2)], owns_connection=True)
+        device.use(hasty)
+        await device.connect()
+        points = [_dp(1), _dp(2)]
+        await device.read(points)
+        simulated.acknowledge = False
+        simulated.zeros_for_repeats = True
+        simulated.answer_delay = 0.08
+        await device.read(points)
+        assert device.diagnostics()["later_answers_taken"] == 0
+        device.use(BARE)
+        await device.read(points)
+        assert device.diagnostics()["later_answers_taken"] == 1
+        await device.disconnect()
 
 
 async def test_zeros_where_zeros_were_are_not_logged(caplog: pytest.LogCaptureFixture) -> None:
@@ -335,29 +381,42 @@ async def test_only_a_setpoint_is_written_and_never_a_single_bit() -> None:
     (Point(Key("p", bool), read=SetpointRegister(1), write=SetpointRegister(1), data_type=DataType.bit(3)), "single bit"),
     (Point(Key("p", str), read=DatapointRegister(1), data_type=DataType.string(65)), "spans 65, more than the 64"),
 ])
-def test_the_options_name_what_micro_nabto_cannot_carry(point: Point[Any], problem: str | None) -> None:
-    found = MicroNabtoOptions().problems(point)
+def test_the_profile_names_what_micro_nabto_cannot_carry(point: Point[Any], problem: str | None) -> None:
+    found = micro_nabto(BARE).problems(point)
     assert (found == []) if problem is None else any(problem in p for p in found), found
 
 
-def test_max_registers_must_be_positive() -> None:
-    with pytest.raises(ValueError):
-        MicroNabtoOptions(max_registers=0)
+@pytest.mark.parametrize("registers", [0, MAX_REGISTERS_PER_READ + 1])
+def test_max_registers_must_be_what_one_read_can_ask_for(registers: int) -> None:
+    with pytest.raises(ValueError, match="max_registers"):
+        micro_nabto(BARE, max_registers=registers)
+
+
+def test_one_read_can_ask_for_as_many_registers_as_a_datagram_carries() -> None:
+    assert wire.EMPTY_DATAPOINT_READ + wire.DATAPOINT_ITEM * MAX_REGISTERS_PER_READ <= wire.MAX_DATAGRAM
+    items = [(0, a) for a in range(MAX_REGISTERS_PER_READ)]
+    request = wire.data_request(bytes(4), bytes(4), 1, wire.datapoint_read(items))
+    assert len(request) <= wire.MAX_DATAGRAM < len(request) + wire.DATAPOINT_ITEM
+
+
+def test_a_later_answer_wait_cannot_be_negative() -> None:
+    with pytest.raises(ValueError, match="later_answer_wait"):
+        micro_nabto(BARE, later_answer_wait=-1.0)
 
 
 async def test_a_device_leaves_a_given_connection_open_and_closes_its_own() -> None:
     async with _simulated() as simulated:
         host, port = simulated.address
         connection = MicroNabtoConnection(EMAIL, host=host, port=port, timeout=0.05, retries=1,
-                                          reconnect=None)
-        given = MicroNabtoDevice(connection)
+                                          reconnect=HANDSHAKE_NEVER_AGAIN)
+        given = MicroNabtoDevice(connection, profiles=[micro_nabto(BARE)])
         assert await given.connect() is not None
         await given.disconnect()
         assert connection.connected
         await connection.close()
 
         own = MicroNabtoDevice.udp(EMAIL, host=host, port=port, timeout=0.05, retries=1,
-                                   reconnect=None)
+                                   reconnect=HANDSHAKE_NEVER_AGAIN, profiles=[micro_nabto(BARE)])
         assert await own.connect() is not None
         await own.disconnect()
         assert not own._connection.connected
@@ -377,7 +436,7 @@ async def test_diagnostics_count_without_naming_the_address_or_the_email() -> No
 
 TEMP = Point(Key("temp_outside", float), read=DatapointRegister(27), data_type=DataType.INT16, scale=0.1, unit=Unit.CELSIUS)
 FAN = Point(Key("fan_level", int), read=SetpointRegister(30), write=SetpointRegister(30), data_type=DataType.UINT16, limits=Limits(min=0, max=200))
-CTS = Model(name="CTS", manufacturer="Example", sections=[Section([TEMP, FAN])], options=MicroNabtoOptions(), read_back_after=1.0)
+CTS = Model(name="CTS", manufacturer="Example", sections=[Section([TEMP, FAN])], timing=Timing(read_back_after=1.0))
 
 
 def _select(identity: Identity) -> Model | None:
@@ -385,9 +444,9 @@ def _select(identity: Identity) -> Model | None:
 
 
 def _client(simulated: SimulatedMicroNabtoDevice, *, clock: FakeClock | None = None, read_only: bool = False,
-            email: str = EMAIL, reconnect: Retry | None = None) -> Client:
+            email: str = EMAIL, reconnect: CircuitBreaker = HANDSHAKE_NEVER_AGAIN) -> Client:
     return Client(_device(simulated, clock=clock, email=email, reconnect=reconnect), _select, clock=clock, read_only=read_only,
-                  write_retry_for=15.0, write_retry_pause=0.01)
+                  write_retry=Retry(Fixed(0.01), Within(15.0)))
 
 
 async def test_a_client_picks_its_model_from_the_handshake_and_reads_negative_values() -> None:
@@ -445,7 +504,7 @@ async def test_a_written_setpoint_reaches_the_device() -> None:
 async def test_a_silent_device_makes_the_client_unavailable_until_it_answers_again() -> None:
     clock = FakeClock()
     async with _simulated(clock=clock) as simulated:
-        client = _client(simulated, clock=clock, reconnect=Retry(Fixed(10.0)))
+        client = _client(simulated, clock=clock, reconnect=CircuitBreaker(after=1, retry=Retry(Fixed(10.0))))
         await client.connect()
         client.subscribe(Key("temp_outside", float), _nothing)
         simulated.silent = True
@@ -475,3 +534,8 @@ async def test_a_restarted_device_goes_unnoticed_by_the_client() -> None:
         await client.poll()
         temp = client.value(Key("temp_outside", float))
         assert client.status(Status.CONNECTED).value is True and temp is not None and temp.quality is Quality.GOOD
+
+
+def test_the_simulator_counts_nothing_no_test_reads() -> None:
+    simulated = SimulatedMicroNabtoDevice()
+    assert not hasattr(simulated, "discoveries") and not hasattr(simulated, "bad_checksums")

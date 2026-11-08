@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from event_connect import NO_RETRY
 from modbus_event_connect import (
     Client,
     InstanceScanStep,
@@ -16,12 +17,14 @@ from modbus_event_connect import (
     ModelError,
     Point,
     PollRate,
+    Profile,
     Quality,
     RepeatedSection,
     Scan,
     Section,
+    Timing,
 )
-from modbus_event_connect._device import Identity, Outcome, ProtocolOptions, ReadResult, WriteResult
+from modbus_event_connect._device import Identity, Outcome, ReadResult, WriteResult
 from modbus_event_connect._data_type import DataType
 from modbus_event_connect.modbus._access import HoldingRegister, InputRegister
 from modbus_event_connect.testing import FakeClock
@@ -48,8 +51,8 @@ class FakeDevice:
     async def disconnect(self) -> None:
         self.connected = False
 
-    def configure(self, options: ProtocolOptions | None) -> None:
-        pass
+    def use(self, model: Model) -> Profile:
+        return Profile(model=model)
 
     async def read(self, points: Sequence[Point[Any]]) -> Mapping[str, ReadResult]:
         self.reads.append(tuple(p.key for p in points))
@@ -127,8 +130,7 @@ def _model(scan: InstanceScanStep = scan_zone) -> Model:
         sections=[Section([Point(EXTRA, read=InputRegister(2))], when=_has_extra),
                   RepeatedSection(_zone, range(1, 4), label="zone", scan=scan)],
         scan_steps=[read_version],
-        options=ProtocolOptions(), read_back_after=1.0,
-        poll_intervals={PollRate.SCAN: SCAN_INTERVAL},
+        timing=Timing(read_back_after=1.0, poll_intervals={PollRate.SCAN: SCAN_INTERVAL}),
     )
 
 
@@ -152,7 +154,7 @@ def _connected(registers: Mapping[str, int] = REGISTERS,
                model: Model | None = None) -> tuple[Client, FakeDevice, FakeClock, PointsSeen]:
     device = FakeDevice(registers)
     clock = FakeClock()
-    client = Client(device, model or _model(), clock=clock)
+    client = Client(device, model or _model(), clock=clock, write_retry=NO_RETRY)
     asyncio.run(client.connect())
     seen = PointsSeen()
     client.subscribe_points(seen)
@@ -183,7 +185,7 @@ def test_an_instance_scan_may_not_mark_another_instances_points() -> None:
         scan.set_available(Labels(zone=n % 3 + 1), False, reason="not mine")
 
     device = FakeDevice(REGISTERS)
-    client = Client(device, _model(overreaching), clock=FakeClock())
+    client = Client(device, _model(overreaching), clock=FakeClock(), write_retry=NO_RETRY)
     with pytest.raises(ModelError, match="not its own"):
         asyncio.run(client.connect())
 
@@ -223,7 +225,7 @@ def test_the_checks_are_spread_evenly_over_the_scan_interval() -> None:
 def test_seconds_until_next_poll_counts_the_checks() -> None:
     device = FakeDevice({"version": 1, "zone_1_type": 0})
     clock = FakeClock()
-    client = Client(device, _model(), clock=clock)
+    client = Client(device, _model(), clock=clock, write_retry=NO_RETRY)
     asyncio.run(client.connect())
     wait = client.seconds_until_next_poll()
     assert wait is not None and 0 < wait <= SCAN_INTERVAL, "nothing is subscribed, only checks are due"
@@ -242,8 +244,7 @@ def test_checks_follow_the_scan_interval_set_for_them() -> None:
 def test_a_model_without_a_scan_interval_is_never_checked() -> None:
     model = Model(name="ZONES", manufacturer="TEST",
                   sections=[RepeatedSection(_zone, range(1, 4), label="zone", scan=scan_zone)],
-                  options=ProtocolOptions(), read_back_after=1.0,
-                  poll_intervals={PollRate.SCAN: None})
+                  timing=Timing(read_back_after=1.0, poll_intervals={PollRate.SCAN: None}))
     client, device, clock, _ = _connected(model=model)
     assert client.seconds_until_next_poll() is None, "nothing is subscribed, and nothing is checked"
     device.reads.clear()
@@ -357,7 +358,7 @@ def test_a_points_callback_that_fails_is_logged_and_the_others_are_told() -> Non
 
 def test_an_unsubscribed_points_callback_is_not_told() -> None:
     device = FakeDevice(REGISTERS)
-    client = Client(device, _model(), clock=FakeClock())
+    client = Client(device, _model(), clock=FakeClock(), write_retry=NO_RETRY)
     asyncio.run(client.connect())
     seen = PointsSeen()
     unsubscribe = client.subscribe_points(seen)

@@ -29,17 +29,17 @@ import pytest
 import pytest_asyncio
 
 from conftest import live_or_skip, live_setting
+from event_connect import NO_RETRY, DataValue, Key, Quality, Timing
 from modbus_event_connect._client import Client
 from modbus_event_connect._data_type import DataType
 from modbus_event_connect._device import Outcome
-from modbus_event_connect._key import Key
 from modbus_event_connect._model import Model, Section
 from modbus_event_connect._point import Point
-from modbus_event_connect._value import DataValue, Quality
 from modbus_event_connect.micro_nabto import _wire as wire
 from modbus_event_connect.micro_nabto._access import DatapointRegister, SetpointRegister
 from modbus_event_connect.micro_nabto._connection import MicroNabtoConnection, discover
-from modbus_event_connect.micro_nabto._device import MicroNabtoDevice, MicroNabtoOptions
+from modbus_event_connect.micro_nabto._device import MicroNabtoDevice
+from profiles import HANDSHAKE_NEVER_AGAIN, bare_model, micro_nabto
 
 HOST = live_setting("MICRO_NABTO_HOST")
 EMAIL = live_setting("MICRO_NABTO_EMAIL")
@@ -62,7 +62,9 @@ LIVE_MODEL = Model(
     sections=[Section([*(Point(Key(f"dp_{a}", float if a in TEMPERATURES else int), read=DatapointRegister(a), data_type=DataType.INT16 if a in TEMPERATURES else DataType.UINT16,
                            scale=0.1 if a in TEMPERATURES else 1.0) for a in DATAPOINTS),
                    *(Point(Key(f"sp_{a}", int), read=SetpointRegister(a), data_type=DataType.UINT16) for a in SETPOINTS)])],
-    options=MicroNabtoOptions(), read_back_after=1.0)
+    timing=Timing(read_back_after=1.0))
+WIDE = bare_model("Wide")
+"""A model read 108 registers at a time."""
 
 
 SETPOINT_WRITE = 0x2B
@@ -88,7 +90,7 @@ def _count(live: Live, name: str) -> int:
 @pytest_asyncio.fixture(scope="module", loop_scope="module")  # pyright: ignore[reportUntypedFunctionDecorator, reportUnknownMemberType]
 async def live() -> AsyncGenerator[Live, None]:
     assert HOST is not None and EMAIL is not None   # guarded by the skip above
-    connection = MicroNabtoConnection(EMAIL, host=HOST, port=PORT, device_id=DEVICE_ID, reconnect=None)
+    connection = MicroNabtoConnection(EMAIL, host=HOST, port=PORT, device_id=DEVICE_ID, reconnect=HANDSHAKE_NEVER_AGAIN)
 
     read = connection.request
 
@@ -97,8 +99,9 @@ async def live() -> AsyncGenerator[Live, None]:
             raise AssertionError("a write was attempted; these tests are read-only")
         return await read(command)
     setattr(connection, "request", refuse_writes)
-    device = MicroNabtoDevice(connection, owns_connection=True)
-    client = Client(device, LIVE_MODEL, read_only=True)
+    device = MicroNabtoDevice(connection, profiles=[micro_nabto(LIVE_MODEL), micro_nabto(WIDE, max_registers=108)],
+                              owns_connection=True)
+    client = Client(device, LIVE_MODEL, read_only=True, write_retry=NO_RETRY)
     try:
         await client.connect()
     except Exception as err:
@@ -157,7 +160,7 @@ async def test_an_address_the_device_lacks_is_missing_and_the_rest_are_still_rea
 
 
 async def test_a_read_of_108_registers_is_answered_in_one_exchange(live: Live) -> None:
-    live.device.configure(MicroNabtoOptions(max_registers=108))
+    live.device.use(WIDE)
     try:
         points = [_single(DATAPOINTS[i % len(DATAPOINTS)], f"r{i}") for i in range(108)]
         exchanges = _count(live, "exchanges")
@@ -165,7 +168,7 @@ async def test_a_read_of_108_registers_is_answered_in_one_exchange(live: Live) -
         assert {a.outcome for a in answers.values()} == {Outcome.OK}
         assert _count(live, "exchanges") == exchanges + 1
     finally:
-        live.device.configure(MicroNabtoOptions())
+        live.device.use(LIVE_MODEL)
 
 
 async def test_a_session_left_unused_is_renewed_before_the_device_ends_it(live: Live) -> None:

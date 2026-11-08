@@ -5,10 +5,10 @@ import asyncio
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 
+from event_connect import Key, Quality
+
 from .._client import Client
 from .._conversion import encode
-from .._key import Key
-from .._value import Quality
 
 
 @dataclass(frozen=True)

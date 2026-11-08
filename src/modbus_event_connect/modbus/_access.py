@@ -1,4 +1,4 @@
-"""Modbus address spaces, and what a model states in Modbus terms."""
+"""Modbus address spaces, and how a model is talked to over Modbus: its profile."""
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
@@ -6,8 +6,9 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Any, ClassVar, Literal
 
-from .._device import ProtocolOptions
-from .._resilience import Retry
+from event_connect import Retry
+
+from .._model import Profile
 from .._point import Access, Point
 
 MAX_ADDRESS = 0xFFFF
@@ -154,7 +155,7 @@ def modicon(*, digits: Literal[5, 6], first_address: Literal[0, 1]) -> RegisterN
 class SingleWrite(Enum):
     """How one holding register is written."""
     FC06 = auto()
-    """Write Single Register. The default."""
+    """Write Single Register."""
     FC16 = auto()
     """Write Multiple Registers with a count of one - for devices that only implement 0x10."""
 
@@ -162,24 +163,26 @@ class SingleWrite(Enum):
 class BitWrite(Enum):
     """How one bit inside a holding register is written."""
     MASK = auto()
-    """Mask Write Register (0x16): atomic on the device, neighbouring bits untouched. The default."""
+    """Mask Write Register (0x16): atomic on the device, neighbouring bits untouched."""
     READ_MODIFY_WRITE = auto()
     """Read, change the bit, write back - for devices without 0x16; not atomic against concurrent changes."""
 
 
-@dataclass(frozen=True)
-class ModbusOptions(ProtocolOptions):
-    """What a model states about its device in Modbus terms."""
+@dataclass(frozen=True, kw_only=True)
+class ModbusProfile(Profile):
+    """How a model is talked to over Modbus."""
     numbering: RegisterNumbering
-    """How the model numbers registers."""
-    max_registers: int = MAX_REGISTERS_PER_READ
-    """Most registers the device accepts in one read."""
-    max_bits: int = MAX_BITS_PER_READ
-    """Most coils or discrete inputs the device accepts in one read."""
-    single_write: SingleWrite = SingleWrite.FC06
-    bit_write: BitWrite = BitWrite.MASK
-    busy: Retry | None = None
-    """How a read answered "busy" (0x06) is tried again; None leaves the device's."""
+    """How the model's manual numbers registers."""
+    max_registers: int
+    """Most registers the device accepts in one read: 1 to the 125 Modbus allows."""
+    max_bits: int
+    """Most coils or discrete inputs the device accepts in one read: 1 to the 2000 Modbus allows."""
+    single_write: SingleWrite
+    """How one holding register is written."""
+    bit_write: BitWrite
+    """How one bit inside a holding register is written."""
+    busy: Retry
+    """How a read answered "busy" (0x06) is tried again; a write so answered is not."""
 
     def __post_init__(self) -> None:
         if not 1 <= self.max_registers <= MAX_REGISTERS_PER_READ:
@@ -188,10 +191,16 @@ class ModbusOptions(ProtocolOptions):
             raise ValueError(f"max_bits must be 1-{MAX_BITS_PER_READ}, got {self.max_bits}")
 
     def address(self, access: Access) -> int:
-        """The address sent for `access`. Raises ValueError if it has none."""
+        """The address sent for `access`, as `numbering` gives it.
+
+        Raises:
+            ValueError: it has none.
+        """
         return self.numbering.address(access)
 
     def problems(self, point: Point[Any]) -> list[str]:
+        """What is wrong with `point` over Modbus: a side outside the four tables or the address
+        space, or larger than one request of this device may be."""
         found: list[str] = []
         for side, access in (("read", point.read), ("write", point.write)):
             if access is None:

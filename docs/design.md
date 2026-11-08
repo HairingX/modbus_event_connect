@@ -37,26 +37,54 @@ Each one has a real case behind it.
 
 ## 2. Layers
 
+A device is described in three layers, each said once, by whoever knows it:
+
 ```
-  Model        Sentio, Nilan, a lamp …     declares points, poll rates, effects, scan steps
+  Model        what the unit is: points, sections, scan steps,   the device library, one file
+               timing - and nothing of a protocol                per model
   ─────────────────────────────────────────────────────────────────────────────────────────
+  Profile      how that model is talked to over one protocol:    the same file, next to the
+               register numbering, request sizes, how a write    model it names
+               is sent, how a busy or empty answer is read again
+  ─────────────────────────────────────────────────────────────────────────────────────────
+  Connection   where the unit is, and how often a silent one     whoever creates the client:
+               is asked again: host, unit id, `reconnect`        the device library's
+                                                                 create_client, or the host
+```
+
+The model says what the unit is; it holds no setting of a protocol, so the same model can be
+reached over two protocols, each with its own profile. A profile names its model, and holds
+every setting its protocol needs, with no default: a device library that writes a new model
+writes its profile beside it, and cannot leave a setting to be forgotten. It keeps one list of
+its profiles. The connection depends on the installation, so it is the only thing a host
+states.
+
+The library itself is built in layers too:
+
+```
   Core         points, data types, polling, events, availability, quality, consumer API;
                what is protocol-free of it - keys, values, points by their behaviour, the
-               scheduler, subscriptions, reachability - is event_connect's
+               scheduler, subscriptions, reachability, the circuit breaker - is event_connect's
   ─────────────────────────────────────────────────────────────────────────────────────────
-  Protocol     Modbus, micro_nabto         address spaces, register numbering, batching,
-                                           function codes, mapping device errors to quality
+  Protocol     Modbus, micro_nabto         the profiles, address spaces, batching, function
+                                           codes, mapping device errors to quality
   ─────────────────────────────────────────────────────────────────────────────────────────
-  Connection   TCP socket, serial port     the link: one request at a time, timeouts,
-                                           reconnect, pause between frames
+  Connection   TCP socket, UDP session     the link: one request at a time, timeouts,
+                                           reopening, a gap between frames
 ```
 
 Only the protocol and connection layers know Modbus. Its four tables are a Modbus concept, not a
 library concept: micro_nabto has its own address spaces (datapoint and setpoint objects), and
 the core must not treat it as a special case.
 
-A **device** is a model plus where to reach it: a connection and, for Modbus, a unit id. A
-**client** is one device as the consumer sees it.
+A **device** is where a unit is reached: a connection and, for Modbus, a unit id, given the
+profiles of every model it may turn out to be and its `reconnect`. A **client** is one device as
+the consumer sees it. The client chooses the model, from the handshake or a selector, and tells
+the device with `use(model)`; from then on the device talks to the unit as that model's profile
+says. Before that, it asks as little as any of its profiles allows: the fewest registers and bits
+in one read, the longest wait for a later answer, and zeros taken as late as any profile takes
+them. A model the device has no profile of is a `ModelError` at `use`, and two profiles of one
+model are one when the device is made.
 
 ### Principles
 
@@ -144,8 +172,8 @@ give that address:
 - The Wavin Sentio manual gives addresses; verified live, InputRegister 51201 is address 51201.
 
 Getting it wrong shifts every point by one register and still returns plausible numbers. So
-the library assumes no convention: `ModbusOptions.numbering` is required, and so are a
-model's options. It is a `RegisterNumbering`: per table, ranges of numbers, each saying which
+the library assumes no convention: `ModbusProfile.numbering` is required, as is every setting
+of a profile. It is a `RegisterNumbering`: per table, ranges of numbers, each saying which
 address its first number is. That one form covers all of the above, and a manual that
 continues a table in another range. `plain(first_address)` and `modicon(digits, first_address)`
 are ready-made numberings. Both ask the same question, which address the first register is,
@@ -153,8 +181,8 @@ and neither has a default. The words zero-based and one-based are avoided: Kepwa
 "Zero-Based Addressing" means the subtraction of one, the opposite of what the name suggests
 for a manual that counts from 0.
 
-It is declared **once per model**, because it is a property of how that vendor wrote the
-manual. It is applied by the **protocol layer**, so the connection only ever sees addresses.
+It is declared **once per model**, in its profile, because it is a property of how that vendor
+wrote the manual. It is applied by the **protocol layer**, so the connection only ever sees addresses.
 It cannot live on the connection: two devices behind one gateway can come from vendors with
 different conventions. The model's overlap check compares addresses, not numbers, since two
 ranges can map different numbers onto neighbouring addresses.
@@ -193,8 +221,8 @@ read:   raw registers → decode (data type, orders) → valid_raw? → scale, o
 write:  value → limits check → transform.write → inverse scale, offset → encode → raw registers
 ```
 
-- **Sentinels are explicit.** `no_data=(0x7FFF,)` produces quality `NO_DATA` (see 6.1), never a
-  number and never a silent `None`.
+- **Sentinels are explicit.** `valid_raw=range(-0x8000, 0x7FFF)` makes 0x7FFF read as quality
+  `NO_DATA` (see 6.1), never a number and never a silent `None`.
 - **Limits are in engineering units** — the numbers a user sees — and are checked before
   anything is encoded. They are also the entity's min / max / step.
 - **A transform is a pair**, declared as one object with both directions, so a model cannot
@@ -266,8 +294,6 @@ no enum names yet can still be told.
 
 - A device library publishes its keys with its model; they are how a consumer names points.
 - Repeated points get their key from the template, e.g. `Key(f"room_{n}_temp_air", float)`.
-- The library is being built new and nobody runs it yet, so Sentio — the first consumer — is
-  free to choose its keys now. After that they are frozen.
 - **Keys a consumer already stores stay as they are:** a device library that takes over from one
   in use gives its points the same key strings, and a test compares the full key set.
 
@@ -277,7 +303,8 @@ no enum names yet can still be told.
 
 ### 4.1 Composition
 
-A model is data: sections of points, identity points, and scan steps.
+A model is data: sections of points, identity points, scan steps and timing. Its profile, in the
+same file, says how it is talked to.
 
 ```python
 class Room(StrEnum):                     # what one room has — typed, written once
@@ -287,20 +314,20 @@ class Room(StrEnum):                     # what one room has — typed, written 
 
 def room(n: int) -> list[Point]:         # one room; called for every room
     base = room_base(n)
-    key = lambda name: f"datapoint_room_{n}_{name}"
+    key = lambda name, kind: Key(f"room_{n}_{name}", kind)
     return [
-        Point(key(Room.TYPE), read=InputRegister(base + 1), data_type=DataType.UINT16,
+        Point(key(Room.TYPE, RoomType), read=InputRegister(base + 1), data_type=DataType.UINT16,
               poll_rate=PollRate.STATIC),
-        Point(key(Room.TEMP_AIR), read=InputRegister(base + 4), data_type=DataType.INT16,
+        Point(key(Room.TEMP_AIR, float), read=InputRegister(base + 4), data_type=DataType.INT16,
               scale=0.01, valid_raw=range(-0x8000, 0x7FFF), unit=Unit.CELSIUS, deadband=0.05),
-        Point(key(Room.TEMP_TARGET), read=HoldingRegister(base + 19),
+        Point(key(Room.TEMP_TARGET, float), read=HoldingRegister(base + 19),
               write=HoldingRegister(base + 19), data_type=DataType.INT16, scale=0.01,
               limits=Limits(5, 35, step=0.5), unit=Unit.CELSIUS),
     ]
 
 SENTIO = Model(
-    options=ModbusOptions(numbering=plain(first_address=1)),
-    read_back_after=1.0,
+    name="Sentio", manufacturer="Wavin",
+    timing=Timing(read_back_after=1.0),
     sections=[
         Section(BASE_POINTS),
         RepeatedSection(room, range(1, 25), label="room"),     # 24 rooms from one definition
@@ -309,15 +336,29 @@ SENTIO = Model(
     scan_steps=[probe_rooms, probe_peripherals],
 )
 
+SENTIO_MODBUS = ModbusProfile(
+    model=SENTIO,
+    numbering=plain(first_address=1),
+    max_registers=100, max_bits=2000,
+    single_write=SingleWrite.FC06, bit_write=BitWrite.MASK,
+    busy=Retry(Exponential(0.2), Attempts(5)),
+)
+
 NILAN = Model(
-    options=MicroNabtoOptions(),
-    read_back_after=2.0,
+    name="CTS 602", manufacturer="Nilan",
+    timing=Timing(read_back_after=2.0),
     # no identity points: the identity arrives with the handshake
     sections=[
         Section(BASE_POINTS),
-        Section(COOLING_POINTS, when=lambda id: id.hardware_major >= 2),
-        Section(HEAT_PUMP_POINTS, when=lambda id: id.device_model in HEAT_PUMP_MODELS),
+        Section(COOLING_POINTS, when=lambda id: id["hardware_major"] >= 2),
+        Section(HEAT_PUMP_POINTS, when=lambda id: id["device_model"] in HEAT_PUMP_MODELS),
     ],
+)
+
+NILAN_MICRO_NABTO = MicroNabtoProfile(
+    model=NILAN,
+    max_registers=64, later_answer_wait=5.0,
+    zeros=RereadZeros(within=7.5, wait=Steps(0.5, then=Fixed(1.0)), at_once=True, halves=True),
 )
 ```
 
@@ -398,20 +439,22 @@ Only the scan writes it: a consumer cannot hide a point the unit has.
 
 ### 4.4 Validation and the model walker
 
-Point rules are checked at construction (3.1). Model rules are checked when a model is
-resolved, at every `connect()`: duplicate keys (which would otherwise silently overwrite one
-another), overlapping multi-register points, selectors that select nothing, and what the
-protocol cannot carry. These are certain, cheap, and depend on the identity.
+Point rules are checked at construction (3.1), and so are a profile's settings. Model rules are
+checked when a model's profile is resolved, at every `connect()`: duplicate keys (which would
+otherwise silently overwrite one another), overlapping multi-register points, selectors that
+select nothing, timing its scheduler refuses, and what the profile cannot carry. These are
+certain, cheap, and depend on the identity.
 
 The **model walker**, `testing.assert_models_valid`, is what a device repository calls from
-one test:
+one test, with its models and its one list of profiles:
 
 ```python
 def test_every_model_variant_is_valid():
-    assert_models_valid(SENTIO, NILAN, identities=IDENTITIES)
+    assert_models_valid([SENTIO], PROFILES, identities=IDENTITIES)
 ```
 
-Besides the rules above, it samples every transform: `write(read(x))` must give `x` back for
+It fails for a model without a profile, a profile of a model not given, and two profiles of one
+model. Besides the rules above, it samples every transform: `write(read(x))` must give `x` back for
 negative, fractional and large values. A sample is a test, not a proof, so it runs in the
 device repository's tests and not at every connect. Test support lives in `testing`, never in
 the modules that run in production.
@@ -518,15 +561,16 @@ t = 6 s …  every `after` while the values change
            → the points return to their own poll rate
 ```
 
-- A written point is always re-read, whether or not it lists itself. The answer to a write
+- A written point is always re-read, whether or not it lists itself, after the
+  `read_back_after` of its model's timing, whatever its `on_write` says. The answer to a write
   says the request arrived, not what the device now holds: Modbus answers 0x06 with an echo
-  of the request, and this library's micro_nabto write waits for no answer at all.
+  of the request, and a micro_nabto write's answer only says whether the device took it (13.4).
 - `on_write` accepts keys or a label selector.
 - Without `until_stable`, the affected points are read once after `after`.
-- `after` defaults to the written point's read-back delay: its own `read_back_after`, else
-  the model's, which is required. How long a device takes to show a write is known to no one
-  but its model's author, so the library has no default; `testing.measure_read_back`
-  measures it on a real device, writing to a point the author chooses.
+- `after` defaults to `read_back_after`, which the model's timing states. How long a device
+  takes to show a write is known to no one but its model's author, so a model cannot be made
+  without its timing; `testing.measure_read_back` measures it on a real device, writing to a
+  point the author chooses.
 
 ### 5.6 Triggers
 
@@ -553,7 +597,7 @@ Two clocks, for two jobs, both from one injectable `Clock`:
 
 | | Python | Used for |
 |---|---|---|
-| **monotonic** | `time.monotonic()` — seconds as `float`, never moves backwards | due times, `after`, `until_stable`, intervals, backoff |
+| **monotonic** | `time.monotonic()` — seconds as `float`, never moves backwards | due times, `after`, `until_stable`, intervals, how long a breaker stays open |
 | **wall** | `datetime.now(timezone.utc)` | `DataValue.timestamp` — a moment a person or a database reads |
 
 Scheduling must not run on the wall clock. It can jump: a Raspberry Pi without a real-time
@@ -566,7 +610,7 @@ class Clock(Protocol):
     def monotonic(self) -> float: ...
     def now(self) -> datetime: ...
 
-client = SentioClient(connection, clock=FakeClock())    # tests: advance time by hand
+client = Client(device, SENTIO, write_retry=NO_RETRY, clock=FakeClock())   # tests: advance time by hand
 clock.advance(seconds=2)                                # moves both clocks together
 ```
 
@@ -591,13 +635,12 @@ class DataValue[T]:
 use it: see 5.7. `raw` is kept for `NO_DATA` too, so a sentinel or a state no enum names yet is
 still there to see and to report.
 
-This is OPC UA's DataValue. It is what the earlier `PointRead` was reaching for, and it applies
-to every read, not only to a scan step's question.
+This is OPC UA's DataValue, and it applies to every read, a scan step's included.
 
 | Quality | Cause | A consumer shows |
 |---|---|---|
 | `GOOD` | the device answered with a valid value | the value |
-| `NO_DATA` | the device answered with a `no_data` sentinel | unknown |
+| `NO_DATA` | the device answered with a number outside the point's `valid_raw`, or no state names | unknown |
 | `OFFLINE` | 0x04: the device answered, but what is behind the register does not respond | unavailable |
 | `STALE` | the last attempt failed (timeout, other error); the previous value is kept | unavailable after its own tolerance, see 6.3 |
 | `MISSING` | 0x02: this unit does not have the register | nothing: it builds nothing for it |
@@ -620,11 +663,12 @@ The callback receives the old and the new `DataValue`.
   its own value does.
 - What to build from `can_read` / `can_write`; unit, limits, step and device from the point.
 - One lost packet does not flap a value: a `STALE` value is the last good one, read again within
-  seconds, and the device counts as unreachable only after the model's `offline_after`. A
-  consumer that wants one value shown as unavailable sooner has its consecutive failure count.
+  seconds, and the device counts as unreachable only after the `offline_after` of its model's
+  timing. A consumer that wants one value shown as unavailable sooner has its consecutive failure
+  count, the one the schedule keeps.
 - **Whether the device is reachable** is `Status.CONNECTED`, and it is decided by answers, never
   by the socket: a TCP socket stays open for minutes after a cable is pulled. It turns False only
-  once nothing has been answered for the model's `offline_after`, counted from the first
+  once nothing has been answered for the `offline_after` of its model's timing, counted from the first
   unanswered pass or write, so one lost packet does not make the device unavailable; the first
   answer makes it True again and makes every value due. Each change is logged once, not on every
   failed read.
@@ -643,20 +687,19 @@ await client.write(ROOM_3_TEMP_TARGET, 21.5)          # Key("room_3_temp_target"
 4. Sent with the function code for the space and the device's write policy.
 5. Its effects scheduled (5.5).
 
-**Write policy**, per device:
+**Write policy**, per profile, which states each choice:
 
-| Write | Default | Alternatives |
-|---|---|---|
-| one holding register | `0x06` | `0x10` — some devices only implement 0x10 |
-| several holding registers | `0x10` | — |
-| one coil | `0x05` | — |
-| several coils | `0x0F` | — |
-| one bit inside a holding register | `0x16` Mask Write: atomic on the device | read-modify-write, serialised per register, for devices without 0x16 |
+| Write | Sent with |
+|---|---|
+| one holding register | `SingleWrite.FC06`: `0x06`; `SingleWrite.FC16`: `0x10`, for devices that only implement 0x10 |
+| several holding registers | `0x10` |
+| one coil | `0x05` |
+| one bit inside a holding register | `BitWrite.MASK`: `0x16` Mask Write, atomic on the device; `BitWrite.READ_MODIFY_WRITE`: read, change, write, serialised per register, for devices without 0x16 |
 
 **Coalescing** applies to `WriteKind.STATE` only (3.6). Writes to one device are sent in order.
-A write the device answers `BUSY` is sent again, before later writes, until `write_retry_for`
-seconds have passed since it was first sent, `write_retry_pause` apart; 0, the default, sends
-it once. A setting overtaken by a newer one meanwhile is not sent again: the newer one goes
+A write the device answers `BUSY` is sent again, before later writes, as the client's
+`write_retry` says: a `Retry`, required, that counts the sendings and the time since the first;
+`NO_RETRY` sends it once. A setting overtaken by a newer one meanwhile is not sent again: the newer one goes
 instead, and both callers get its outcome.
 
 **While a point is written** it is not read, and what a read begun before the write answered
@@ -670,7 +713,7 @@ typed by its key.
 ### 7.4 Read-only mode
 
 ```python
-client = SentioClient(connection, read_only=True)
+client = Client(device, SENTIO, write_retry=NO_RETRY, read_only=True)
 ```
 
 Every write raises `ReadOnlyError` before anything reaches the connection. It is the rule we
@@ -686,29 +729,29 @@ already takes it per call; only our transport pins it at construction.
 
 ```python
 gateway = ModbusTcpConnection(host, port)        # one link; the host owns and closes it
-lamps   = LampClient(gateway, unit_id=1)
-fan     = FanClient(gateway, unit_id=2)
-blinds  = BlindClient(gateway, unit_id=3)
+lamps   = ModbusDevice(gateway, 1, reconnect=BREAKER, profiles=lamp.PROFILES)
+fan     = ModbusDevice(gateway, 2, reconnect=BREAKER, profiles=fan.PROFILES)
+blinds  = ModbusDevice(gateway, 3, reconnect=BREAKER, profiles=blind.PROFILES)
 ```
 
-- The **connection** sends one request at a time, keeps an optional pause between frames (RS-485
-  gateways need it), and reconnects.
+- The **connection** sends one request at a time, keeps an optional gap between frames (RS-485
+  gateways need it), and opens the link again when a request finds it closed.
 - Every request returns its **status with its response**, never through a "last call"
   property: on a shared connection that would describe whichever request finished last.
 - Reachability, `OFFLINE` and failure counts belong to each device. A device behind a gateway
   can stop answering while the others go on.
 - **Gateway exception codes:** 0x0B is the gateway reporting that the device behind it did not
   answer. For that device it is no answer at all, the same as a timeout on a direct link, and it
-  counts towards backoff: the gateway waited out its own bus timeout before saying so. 0x0A
-  (no path to the device) is a configuration error.
-- **Automatic backoff:** a device that keeps timing out is polled less often for a while, so its
-  timeouts do not starve every other device on the bus. On a shared RS-485 bus this is what
-  keeps one dead fan from freezing the lights. After 3 unanswered requests in a row, the device
-  is asked again when its `reconnect`, a `Retry`, says; whoever creates the device states it, as
-  how soon to ask depends on how the device is reached. Busy retries are a `Retry` a model
-  states in `ModbusOptions`. The client adds no retry of its own: one on top of the device's
-  backoff would only ask again when it refuses, and each refusal would push the next attempt
-  further out.
+  counts towards opening its breaker: the gateway waited out its own bus timeout before saying
+  so. 0x0A (no path to the device) is a configuration error.
+- **A circuit breaker per device:** a device that keeps timing out is not asked for a while, so
+  its timeouts do not starve every other device on the bus. On a shared RS-485 bus this is what
+  keeps one dead fan from freezing the lights. Its `reconnect`, a `CircuitBreaker`, opens once
+  `after` requests in a row went unanswered, and its `retry` says when it lets a probe through;
+  an answer closes it. Whoever creates the device states it, as how soon to ask depends on how
+  the device is reached. Busy retries are a `Retry` the model's profile states. The client adds
+  no retry of its own: one on top of the device's breaker would only ask again while it is open,
+  and each refusal would keep it open longer.
 
 Every device behind a gateway shares its bus, and each request occupies it for all of them. On
 a slow serial bus this is where poll rates (5.2) stop being an optimisation and become necessary.
@@ -738,13 +781,19 @@ CTS 402 — which other devices may not share.
   the write. A CTS 402 answered 0x63 and 0x85 to writes it did not take - they are not uNabto's
   codes, which it sends as exceptions - and took the same write on a later try; so a write
   answered otherwise is `BUSY`, naming the status, and the client may send it again.
+- **The handshake has a breaker too:** the connection's `reconnect` opens once `after`
+  handshakes in a row failed, and requests fail at once until its `retry` lets a handshake
+  through.
 
 ---
 
 ## 9. Diagnostics
 
 Per device, and from the client as `diagnostics()`: requests, failures by kind, average and
-longest latency, backoff state, the consecutive failure count. For micro_nabto also: resends,
+longest latency, the consecutive failure count, and the breaker in its own words - whether it is
+`open`, for how long more (`open_for`, infinite once it gave up), its `openings` since the last
+answer, whether it `gave_up`, and the requests `refused_while_open`; for micro_nabto these are
+the breaker over handshakes. For micro_nabto also: resends,
 acknowledgements, the wait for a later answer in use and how it went; how often the device went
 silent and the longest silence; handshakes it refused, by status; and of answers of only zeros,
 the time allowed, how many readings again were sent, how each episode ended (values at once,
@@ -761,9 +810,12 @@ to reads are logged.
 
 Whatever explains an outcome is logged as a warning, once a time it happens, so that Home
 Assistant's log tells it without debug and a unit without the fault never logs it:
-- **A request left unanswered**, with the session it was in and how long after the last answer;
-  then nothing more until the device answers again, which is logged with how long it was silent
-  and how many requests went unanswered.
+- **A request left unanswered**, with the session it was in, which of its requests it was, how
+  many times it was sent and how long after the last answer; then nothing more until the device
+  answers again, which is logged with how long it was silent and how many requests went
+  unanswered. The connection keeps this record itself, at once and with what only the protocol
+  knows, while the client's reachability says only whether the device counts as answering, and
+  only after its model's `offline_after`.
 - **A handshake refused** for anything but the email, with uNabto's status: 0x8009 is a device
   with no session free, as one is while old sessions have yet to time out. It is tried again
   when the connection's `reconnect` says. Only 0x8004 is a refused email, `AuthenticationError`.
@@ -780,21 +832,21 @@ too; the warnings carry what tells them apart. The answer is not taken at once:
 - **To a read sent again**, the request is kept open for a later answer, up to
   `later_answer_wait`: a gateway that got both sendings may answer both, and the zeros need not be
   the answer that holds the values. A later answer to it with values is taken, and the warning
-  says so and how long it was waited for. The wait is 5 s; a model sets its own in
-  `MicroNabtoOptions`, and whoever opens the connection can override both.
+  says so and how long it was waited for. The wait is the profile's `later_answer_wait`, given to
+  the connection with each read.
 - **Otherwise**, the registers are read again at once, which a single bad answer does not
   survive. If they are zeros again, the points answer `BUSY` with `retry_after`: the client keeps
   their last values, as `STALE`, and reads them again half a second after the zeros, then once a
-  second, as `RereadZeros`, which a model states in `MicroNabtoOptions`, says. Nothing waits: other points, writes and refreshes go on, and any reading of those
+  second, as the profile's `RereadZeros` says. Nothing waits: other points, writes and refreshes go on, and any reading of those
   registers in between counts, without moving the time. The first values end it, and the warning
   says how long after the zeros they came and what each reading before them answered, so the
   device's time is known to within a second.
-- **At `reread_zeros_for`** after the zeros, 7.5 s, short of the 10 s between two fast polls, the
-  registers are read in two halves. Values from the halves are taken, and the warning says the
-  request was too many registers for the device; a model then sets `max_registers`, which holds
-  however many points it gains. Zeros from the halves are taken as what the unit reads. A model
-  sets the time in `MicroNabtoOptions`, and whoever creates the device can override both. A
-  model whose device answers zeros only where they are takes them at once with `TAKE_ZEROS`.
+- **At the rule's `within`** after the zeros - for a Nilan, 7.5 s, short of the 10 s between two
+  fast polls - the registers are read in two halves. Values from the halves are taken, and the
+  warning says the request was too many registers for the device; its profile then sets
+  `max_registers`, which holds however many points it gains. Zeros from the halves are taken as
+  what the unit reads. A profile whose device answers zeros only where they are takes them at
+  once with `TAKE_ZEROS`.
 
 ---
 
@@ -803,7 +855,7 @@ too; the warnings carry what tells them apart. The answer is not taken at once:
 - **Simulators** are the standard doubles: `SimulatedModbusDevice`, a register image that refuses
   requests the way real units do, several of them behind a `SimulatedModbusGateway`; and
   `SimulatedMicroNabtoDevice` on a localhost UDP port, answering byte for byte as a real device.
-- **An injectable clock** (5.7), so scheduling, `after`, `until_stable` and backoff are tested
+- **An injectable clock** (5.7), so scheduling, `after`, `until_stable` and the breakers are tested
   without waiting.
 - **The model walker** (4.4) in every device repository.
 - **The key migration test** (3.8) for Sentio and Nilan.
@@ -821,19 +873,19 @@ A library that gets these wrong is worse than none.
 | `0x01`: the function is unsupported | `UNSUPPORTED`, recorded like a missing register |
 | `0x04`: what is behind the register is not answering | `OFFLINE`; the point stays polled |
 | `0x06`: busy | a read is retried four times, the wait doubling from 0.2 s, then `BUSY`; a write is `BUSY` at once, for the client to send again |
-| `0x0B`: the gateway's device did not answer | `NO_ANSWER`, counted towards backoff |
+| `0x0B`: the gateway's device did not answer | `NO_ANSWER`, counted towards opening the device's breaker |
 | No answer at all | `NO_ANSWER`; the value goes `STALE`; reachability follows answers, never the socket |
 | One bad address refuses a whole request | the request is halved until the refusal is pinned down: a few absent addresses among many cost few requests, though a request where every address is absent costs about twice as many as reading each alone |
-| A micro_nabto read answered with only zeros where values were | a later answer to a read sent again is taken if it holds values; otherwise read again at once, then the last values kept as STALE and the registers read again as `RereadZeros` says, without holding anything up, until values come or, at `reread_zeros_for`, two halves are read and their answer taken; logged as warnings |
-| Devices accept different request sizes | `max_registers` / `max_bits` per model |
+| A micro_nabto read answered with only zeros where values were | a later answer to a read sent again is taken if it holds values; otherwise read again at once, then the last values kept as STALE and the registers read again as `RereadZeros` says, without holding anything up, until values come or, at the rule's `within`, two halves are read and their answer taken; logged as warnings |
+| Devices accept different request sizes | `max_registers` / `max_bits` per profile |
 | Four address spaces | one access class each; never batched together |
 | Word order and byte order | per point |
 | Sixteen flags in one register | `DataType.bit(n)`; points sharing an address are read once |
-| A value meaning "no reading" | `no_data` / `raw_range` give `NO_DATA`, distinct from `MISSING` |
+| A value meaning "no reading" | a number outside `valid_raw` gives `NO_DATA`, distinct from `MISSING` |
 | Read and write at different addresses | a read side and a write side |
-| Manuals number registers in their own ways | `RegisterNumbering`, once per model |
+| Manuals number registers in their own ways | `RegisterNumbering`, once per model, in its profile |
 | A reply arriving after its timeout | the link is dropped, so it never answers the next request |
-| One silent device behind a gateway | backoff per device; the others are not slowed |
+| One silent device behind a gateway | a breaker per device; the others are not slowed |
 | A slot index is not an identity (peripherals reorder) | the model's: a serial number is the identity |
 
 ---

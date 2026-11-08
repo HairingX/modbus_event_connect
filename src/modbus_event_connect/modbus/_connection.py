@@ -8,7 +8,8 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import Any, Protocol, runtime_checkable
 
-from .._clock import Clock, SystemClock
+from event_connect import Clock, SystemClock
+
 
 
 class FunctionCode(IntEnum):
@@ -118,14 +119,10 @@ class ModbusTcpConnection:
     """
 
     def __init__(self, host: str, port: int = 502, *, timeout: float = 3.0, frame_gap: float = 0.0,
-                 client: Any = None, clock: Clock | None = None,
-                 sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
+                 clock: Clock | None = None, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
         """Args:
             timeout: seconds to wait for an answer; a lost answer is reported, not retried.
-            frame_gap: seconds kept between the end of one answer and the next request.
-            client: a pymodbus client to use in place of one made from `host` and `port`, with
-                its settings as given. One that reconnects by itself opens links this connection
-                does not know of."""
+            frame_gap: seconds kept between the end of one answer and the next request."""
         if timeout <= 0:
             raise ValueError(f"timeout must be positive, got {timeout}")
         if frame_gap < 0:
@@ -134,17 +131,12 @@ class ModbusTcpConnection:
         self._port = port
         self._timeout = timeout
         self._frame_gap = frame_gap
-        self._client: Any = client
+        self._client: Any = None
         self._clock: Clock = clock if clock is not None else SystemClock()
         self._sleep = sleep
         self._lock = asyncio.Lock()
         self._last_answer_at: float | None = None
         self._unit_keyword: str | None = None
-
-    @property
-    def client(self) -> Any:
-        """The underlying pymodbus client, or None before first use."""
-        return self._client
 
     @property
     def connected(self) -> bool:
@@ -183,19 +175,14 @@ class ModbusTcpConnection:
         if self.connected:
             return True
         try:
-            result: Any = self._ensure_client().connect()
-            if inspect.isawaitable(result):
-                result = await result
-            return bool(result)
+            return bool(await self._ensure_client().connect())
         except Exception:
             return False
 
     async def _close(self) -> None:
         if self._client is None:
             return
-        result: Any = self._client.close()
-        if inspect.isawaitable(result):
-            await result
+        self._client.close()
 
     async def _keep_frame_gap(self) -> None:
         if self._frame_gap <= 0 or self._last_answer_at is None:
@@ -252,8 +239,7 @@ class ModbusTcpConnection:
             # A guard above pymodbus's own timeout: if the client hangs anyway, drop the link so
             # a late reply is never taken as the answer to the next request.
             async with asyncio.timeout(self._timeout * 2):
-                response: Any = (await pending
-                                 if inspect.isawaitable(pending) else pending)
+                response: Any = await pending
         except TimeoutError:
             await self._close()
             return Response(ok=False, no_answer=True, detail=f"{name}: no answer in time")
