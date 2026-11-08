@@ -177,6 +177,7 @@ class MicroNabtoConnection:
         self._silences = 0
         self._longest_silence = 0.0
         self._refusals: Counter[int] = Counter()
+        self._refused_while_open = 0
         self._refusal_logged: int | None = None
         self._answer_before = 0.0
         """When the last answer before the session being established came."""
@@ -243,7 +244,13 @@ class MicroNabtoConnection:
             return answer
 
     def diagnostics(self) -> Mapping[str, object]:
-        """Counters for a bug report; never an address, a device id or the email."""
+        """Counters for a bug report; never an address, a device id or the email.
+
+        Of the breaker over handshakes: whether it is `open`, and for how many seconds more
+        (`open_for`, infinite once it gave up), its `openings` since the last session, whether it
+        `gave_up`, and the requests refused while it was open.
+        """
+        open_for = self._breaker.open_for(self._clock.monotonic())
         return {
             "connected": self.connected,
             "exchanges": self._exchanges,
@@ -259,7 +266,11 @@ class MicroNabtoConnection:
             "longest_later_answer_wait": self._longest_later_answer_wait,
             "silences": self._silences,
             "longest_silence": self._longest_silence,
-            "handshake_pauses": self._breaker.openings,
+            "open": open_for > 0,
+            "open_for": open_for,
+            "openings": self._breaker.openings,
+            "gave_up": self._breaker.gave_up,
+            "refused_while_open": self._refused_while_open,
             "refusals": {f"0x{status:04x}": count for status, count in sorted(self._refusals.items())},
         }
 
@@ -312,16 +323,17 @@ class MicroNabtoConnection:
     async def _establish(self) -> Identity | None:
         """Establish a session as `reconnect` allows; None if it holds the handshake back, or the
         device did not answer."""
-        if not await self._ready_to_try():
-            return None
-        attempt = self._breaker.attempt(self._clock.monotonic())
+        attempt = self._breaker.attempt(self._clock.monotonic()) if await self._ready_to_try() else None
         if attempt is None:
+            self._refused_while_open += 1
             return None
         with attempt:
             identity = await self._try_establish()
             if identity is None:
+                openings = self._breaker.openings
                 attempt.unanswered(self._clock.monotonic())
-                self._log_pause()
+                if self._breaker.openings != openings:
+                    self._log_opening()
             else:
                 attempt.answered()
         return identity
@@ -339,14 +351,15 @@ class MicroNabtoConnection:
                       breaker.open_for(self._clock.monotonic()))
         return False
 
-    def _log_pause(self) -> None:
+    def _log_opening(self) -> None:
+        """Log the breaker opening, numbering the failed handshakes since the last session."""
         breaker = self._breaker
         if breaker.gave_up:
             _LOGGER.debug("micro_nabto: handshake %d failed; not tried again until connected",
-                          breaker.openings)
+                          breaker.unanswered_in_a_row)
         else:
             _LOGGER.debug("micro_nabto: handshake %d failed; trying again in %.1f s",
-                          breaker.openings, breaker.open_for(self._clock.monotonic()))
+                          breaker.unanswered_in_a_row, breaker.open_for(self._clock.monotonic()))
 
     async def _try_establish(self) -> Identity | None:
         self._answer_before = self._last_answer

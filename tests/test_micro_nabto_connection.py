@@ -244,7 +244,7 @@ async def test_after_a_failed_handshake_requests_fail_at_once_until_retry_after(
         assert await _read(connection, 1) == [1001]
 
 
-async def test_a_failed_handshake_pauses_longer_each_time_by_its_rule() -> None:
+async def test_after_each_failed_handshake_the_breaker_stays_open_longer_as_its_retry_says() -> None:
     clock = FakeClock()
     async with _device(clock=clock) as device:
         device.silent = True
@@ -257,8 +257,28 @@ async def test_a_failed_handshake_pauses_longer_each_time_by_its_rule() -> None:
         reached = device.datagrams
         clock.advance(19)
         assert await _read(connection, 1) is None
-        assert device.datagrams == reached, "a handshake was tried before the second, longer pause was over"
-        assert connection.diagnostics()["handshake_pauses"] == 2
+        assert device.datagrams == reached, "a handshake was tried before the breaker let a probe through"
+        diagnostics = connection.diagnostics()
+        assert (diagnostics["openings"], diagnostics["open"], diagnostics["refused_while_open"]) == (2, True, 1)
+        assert diagnostics["open_for"] == pytest.approx(1.0)
+
+
+async def test_handshakes_that_fail_before_the_breaker_opens_are_tried_again_at_once(
+        caplog: pytest.LogCaptureFixture) -> None:
+    clock = FakeClock()
+    async with _device(clock=clock) as device:
+        device.silent = True
+        address, port = device.address
+        connection = MicroNabtoConnection(EMAIL, host=address, port=port, timeout=0.05, retries=0, clock=clock,
+                                          reconnect=CircuitBreaker(after=2, retry=Retry(Fixed(10.0))))
+        with caplog.at_level(logging.DEBUG, logger="modbus_event_connect.micro_nabto"):
+            assert await connection.open() is None
+            assert connection.diagnostics()["open"] is False
+            reached = device.datagrams
+            assert await _read(connection, 1) is None
+        assert device.datagrams > reached and connection.diagnostics()["open"] is True
+        assert [m for m in caplog.messages if "handshake" in m and "failed" in m] == [
+            "micro_nabto: handshake 2 failed; trying again in 10.0 s"]
 
 
 def test_a_connection_keeps_the_reconnect_it_was_given() -> None:
@@ -306,7 +326,7 @@ async def test_a_reconnect_that_gives_up_leaves_the_handshake_untried_until_open
         assert await connection.open() is not None
 
 
-async def test_a_reconnect_not_ready_holds_the_handshake_back_for_another_pause() -> None:
+async def test_a_reconnect_not_ready_keeps_the_breaker_open_for_as_long_again() -> None:
     @dataclass(frozen=True)
     class Offline(Retry):
         online: list[bool] = field(default_factory=lambda: [False])

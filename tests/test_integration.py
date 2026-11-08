@@ -299,7 +299,7 @@ def test_a_half_open_link_is_noticed_and_recovered_from() -> None:
     assert gateway.connected is True, "test premise: the link still reports itself connected"
     assert client.status(Status.CONNECTED).value is False
     assert _value(client, TEMP).quality is Quality.STALE
-    assert device.diagnostics()["backing_off"] is True
+    assert device.diagnostics()["open"] is True
 
     gateway.half_open = False
     clock.advance(30)
@@ -333,8 +333,8 @@ def test_a_pulled_cable_goes_stale_backs_off_and_recovers() -> None:
     assert (stale.value, stale.quality, stale.timestamp) == (good.value, Quality.STALE, good.timestamp)
     assert client.status(Status.CONNECTED).value is False
     diagnostics = device.diagnostics()
-    assert diagnostics["backing_off"] is True
-    assert isinstance(diagnostics["refused_while_backing_off"], int) and diagnostics["refused_while_backing_off"] > 0
+    assert diagnostics["open"] is True
+    assert isinstance(diagnostics["refused_while_open"], int) and diagnostics["refused_while_open"] > 0
 
     gateway.link_down = False
     gateway.units[1].input_registers[4] = 230
@@ -540,7 +540,7 @@ def test_writes_land_in_order_even_when_the_device_is_busy() -> None:
 
 
 def test_after_an_outage_of_15_s_a_value_read_every_10_s_is_back_20_s_after_it_began() -> None:
-    """A device's own backoff decides when it is asked again; nothing on top of it may delay that."""
+    """A device's own breaker decides when it is asked again; nothing on top of it may delay that."""
     gateway = SimulatedModbusGateway({1: _unit()})
     clock = FakeClock()
     device = ModbusDevice(gateway, unit_id=1, clock=clock, sleep=_no_wait, reconnect=NEVER_AGAIN, profiles=PROFILES)

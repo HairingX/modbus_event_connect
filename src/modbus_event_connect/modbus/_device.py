@@ -77,7 +77,7 @@ class _Batch:
 class _Answer:
     """What came of one request after busy retries.
 
-    `response` is None when it was never sent because the device is backing off.
+    `response` is None when it was never sent because the device's breaker is open.
     """
     outcome: Outcome
     response: Response | None
@@ -89,8 +89,8 @@ class _Answer:
 
 
 class ModbusDevice:
-    """One unit on a Modbus connection; several may share one, each with its own retries and
-    pauses."""
+    """One unit on a Modbus connection; several may share one, each with its own busy retries and
+    its own breaker."""
 
     def __init__(self, connection: ModbusConnection, unit_id: int, *, reconnect: CircuitBreaker,
                  profiles: Sequence[ModbusProfile], owns_connection: bool = False,
@@ -121,7 +121,7 @@ class ModbusDevice:
 
         self._requests = 0
         self._busy_repeats = 0
-        self._refused_while_backing_off = 0
+        self._refused_while_open = 0
         self._outcomes: Counter[Outcome] = Counter()
         self._latency_total = 0.0
 
@@ -243,20 +243,25 @@ class ModbusDevice:
         return WriteResult(answer.outcome, answer.exception_code, answer.detail)
 
     def diagnostics(self) -> Mapping[str, object]:
-        """Counters for a bug report; never a host or port. `outcomes` counts every exchange (a
-        request plus its busy retries) by how it ended."""
-        backing_off = self._backing_off()
+        """Counters for a bug report; never a host or port.
+
+        `outcomes` counts every exchange (a request plus its busy retries) by how it ended. Of the
+        breaker: whether it is `open`, and for how many seconds more (`open_for`, infinite once it
+        gave up), its `openings` since the last answer, whether it `gave_up`, and the requests
+        refused while it was open.
+        """
+        open_for = self._breaker.open_for(self._clock.monotonic())
         return {
             "unit_id": self._unit,
             "requests": self._requests,
             "outcomes": {outcome.name: self._outcomes[outcome] for outcome in Outcome},
             "busy_retries": self._busy_repeats,
             "consecutive_no_answers": self._breaker.unanswered_in_a_row,
-            "backing_off": backing_off,
-            "backing_off_for": self._breaker.open_for(self._clock.monotonic()),
-            "backoffs": self._breaker.openings,
+            "open": open_for > 0,
+            "open_for": open_for,
+            "openings": self._breaker.openings,
             "gave_up": self._breaker.gave_up,
-            "refused_while_backing_off": self._refused_while_backing_off,
+            "refused_while_open": self._refused_while_open,
             "average_latency": self._latency_total / self._requests if self._requests else None,
         }
 
@@ -302,7 +307,7 @@ class ModbusDevice:
             register = register | mask if on else register & ~mask & 0xFFFF
             return await self._exchange(self._register_write(address, (register,)), retry=False)
 
-    # ------------------------------------------------------------- one exchange, backoff
+    # ------------------------------------------------------------ one exchange, the breaker
 
     async def _exchange(self, request: Request, *, retry: bool = True) -> _Answer:
         """Send `request`, trying "busy" again as the profile's `busy` says unless `retry` is False.
@@ -313,9 +318,9 @@ class ModbusDevice:
         while True:
             response = await self._send(request)
             if response is None:
-                self._refused_while_backing_off += 1
+                self._refused_while_open += 1
                 return _Answer(Outcome.NO_ANSWER, None,
-                               f"{_where(request)}: not sent, backing off after "
+                               f"{_where(request)}: not sent, the breaker is open after "
                                f"{self._reconnect.after} unanswered requests")
             tries += 1
             if response.exception_code != ExceptionCode.SERVER_DEVICE_BUSY:
@@ -331,8 +336,8 @@ class ModbusDevice:
 
     async def _send(self, request: Request) -> Response | None:
         """Puts one request on the connection, or returns `None` while the breaker is open. Once
-        its pause is over, one probe request goes through if `reconnect`'s retry is ready; others
-        wait for its answer."""
+        its time is up, it lets one probe through if `reconnect`'s retry is ready; the others wait
+        for its answer."""
         if not await self._ready_to_probe(request):
             return None
         attempt = self._breaker.attempt(self._clock.monotonic())
@@ -349,7 +354,7 @@ class ModbusDevice:
                 openings = self._breaker.openings
                 attempt.unanswered(self._clock.monotonic())
                 if self._breaker.openings != openings:
-                    self._log_pause(request)
+                    self._log_opening(request)
             else:
                 attempt.answered()
         return response
@@ -367,7 +372,7 @@ class ModbusDevice:
                       request.unit_id, breaker.open_for(self._clock.monotonic()))
         return False
 
-    def _log_pause(self, request: Request) -> None:
+    def _log_opening(self, request: Request) -> None:
         breaker = self._breaker
         if breaker.gave_up:
             _LOGGER.debug("unit %d: no answer after try %d; not asked again until connected",
@@ -375,9 +380,6 @@ class ModbusDevice:
         else:
             _LOGGER.debug("unit %d: no answer after try %d; asking again in %.1f s",
                           request.unit_id, breaker.openings, breaker.open_for(self._clock.monotonic()))
-
-    def _backing_off(self) -> bool:
-        return self._breaker.open_for(self._clock.monotonic()) > 0
 
 
 # ================================================================================ helpers

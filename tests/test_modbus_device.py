@@ -1,6 +1,7 @@
 """The Modbus protocol layer: `ModbusDevice` against simulated units behind a simulated gateway,
 with a fake clock and a `sleep` that does not wait."""
 import asyncio
+import math
 from collections.abc import Callable
 import logging
 from dataclasses import dataclass, field
@@ -366,9 +367,9 @@ async def test_a_unit_the_gateway_cannot_reach_is_backed_off() -> None:
     device = used(modbus_device(gateway, 9, clock=FakeClock(), sleep=Sleeps()))
     for _ in range(3):
         await device.read([u16("p", HoldingRegister(0))])
-    assert device.diagnostics()["backing_off"] is True
+    assert device.diagnostics()["open"] is True
     await device.read([u16("p", HoldingRegister(0))])
-    assert len(gateway.requests) == 3, "a device backing off still put requests on the bus"
+    assert len(gateway.requests) == 3, "a device whose breaker is open still put requests on the bus"
 
 
 async def test_no_answer_is_no_answer() -> None:
@@ -387,7 +388,7 @@ async def test_a_fault_on_one_address_fails_the_whole_batch_that_touches_it() ->
 # ================================================================================== busy
 
 
-async def test_busy_is_retried_with_backoff_until_it_succeeds() -> None:
+async def test_busy_is_retried_with_a_growing_wait_until_it_succeeds() -> None:
     rig = Rig(SimulatedModbusDevice(holding_registers={0: 42}, busy_for=2))
     assert (await rig.device.read([u16("p", HoldingRegister(0))]))["p"] == ok(42)
     assert rig.sleeps.waits == [0.2, 0.4]
@@ -621,7 +622,7 @@ def test_a_device_needs_one_profile_of_each_model_it_may_meet() -> None:
         ModbusDevice(SimulatedModbusGateway({}), 1, reconnect=NEVER_AGAIN, profiles=[])
 
 
-# ============================================================================== backoff
+# ========================================================================= the breaker
 
 
 def silent(**kw: Any) -> SimulatedModbusDevice:
@@ -641,34 +642,34 @@ async def unanswered(rig: Rig, times: int = 3) -> None:
 async def test_a_device_backs_off_after_three_no_answers_in_a_row() -> None:
     rig = Rig(silent())
     await unanswered(rig, 2)
-    assert rig.device.diagnostics()["backing_off"] is False
+    assert rig.device.diagnostics()["open"] is False
     await read0(rig)
-    assert rig.device.diagnostics()["backing_off"] is True
+    assert rig.device.diagnostics()["open"] is True
     assert len(rig.unit.requests) == 3
 
 
 async def test_a_silent_device_is_asked_again_as_its_reconnect_says() -> None:
     rig = Rig(silent(), reconnect=CircuitBreaker(after=3, retry=Retry(Steps(2, 4, then=Fixed(10)))))
     await unanswered(rig)
-    pauses: list[float] = []
+    open_times: list[float] = []
     for _ in range(4):
-        pause = rig.device.diagnostics()["backing_off_for"]
-        assert isinstance(pause, float)
-        pauses.append(pause)
-        rig.clock.advance(pause)
+        open_for = rig.device.diagnostics()["open_for"]
+        assert isinstance(open_for, float)
+        open_times.append(open_for)
+        rig.clock.advance(open_for)
         await read0(rig)
-    assert pauses == [2, 4, 10, 10] and len(rig.unit.requests) == 3 + 4
+    assert open_times == [2, 4, 10, 10] and len(rig.unit.requests) == 3 + 4
 
 
 async def test_a_device_silent_for_hours_is_still_asked_again_at_its_reconnect_max() -> None:
     rig = Rig(silent(), reconnect=CircuitBreaker(after=3, retry=Retry(Exponential(2.0, max=10.0))))
     await unanswered(rig)
     for _ in range(1100):
-        pause = rig.device.diagnostics()["backing_off_for"]
-        assert isinstance(pause, float)
-        rig.clock.advance(pause)
+        open_for = rig.device.diagnostics()["open_for"]
+        assert isinstance(open_for, float)
+        rig.clock.advance(open_for)
         assert (await read0(rig)).outcome is Outcome.NO_ANSWER
-    assert rig.device.diagnostics()["backing_off_for"] == 10.0 and len(rig.unit.requests) == 3 + 1100
+    assert rig.device.diagnostics()["open_for"] == 10.0 and len(rig.unit.requests) == 3 + 1100
 
 
 async def test_a_reconnect_that_gives_up_leaves_the_device_unasked_until_connected() -> None:
@@ -676,7 +677,8 @@ async def test_a_reconnect_that_gives_up_leaves_the_device_unasked_until_connect
     await unanswered(rig)
     rig.clock.advance(5)
     await read0(rig)
-    assert rig.device.diagnostics()["gave_up"] is True
+    diagnostics = rig.device.diagnostics()
+    assert (diagnostics["gave_up"], diagnostics["open"], diagnostics["open_for"]) == (True, True, math.inf)
     rig.clock.advance(86400)
     await read0(rig)
     assert len(rig.unit.requests) == 4
@@ -685,19 +687,25 @@ async def test_a_reconnect_that_gives_up_leaves_the_device_unasked_until_connect
     assert len(rig.unit.requests) == 5
 
 
+def test_the_diagnostics_say_what_the_breaker_does_in_its_own_words() -> None:
+    keys = set(Rig(silent()).device.diagnostics())
+    assert {"open", "open_for", "openings", "gave_up", "refused_while_open"} <= keys
+    assert not {key for key in keys if "back" in key or "paus" in key}
+
+
 async def test_a_reconnect_that_never_asks_again_waits_for_connect() -> None:
     rig = Rig(silent(), reconnect=NEVER_AGAIN)
     await unanswered(rig)
     rig.clock.advance(86400)
     raw = await read0(rig)
-    assert raw.outcome is Outcome.NO_ANSWER and "backing off" in raw.detail
+    assert raw.outcome is Outcome.NO_ANSWER and "the breaker is open" in raw.detail
     assert len(rig.unit.requests) == 3 and rig.device.reconnect is NEVER_AGAIN
     await rig.device.connect()
     await read0(rig)
     assert len(rig.unit.requests) == 4
 
 
-async def test_connecting_asks_a_device_again_without_waiting_out_its_pause() -> None:
+async def test_connecting_asks_a_device_again_without_waiting_for_its_breaker() -> None:
     rig = Rig(silent())
     await unanswered(rig)
     await rig.device.connect()
@@ -705,7 +713,7 @@ async def test_connecting_asks_a_device_again_without_waiting_out_its_pause() ->
     assert len(rig.unit.requests) == 4
 
 
-async def test_a_reconnect_not_ready_holds_the_probe_back_for_another_pause() -> None:
+async def test_a_reconnect_not_ready_keeps_the_breaker_open_for_as_long_again() -> None:
     @dataclass(frozen=True)
     class Offline(Retry):
         online: list[bool] = field(default_factory=lambda: [False])
@@ -718,15 +726,15 @@ async def test_a_reconnect_not_ready_holds_the_probe_back_for_another_pause() ->
     await unanswered(rig)
     rig.clock.advance(10)
     raw = await read0(rig)
-    assert "backing off" in raw.detail and len(rig.unit.requests) == 3
-    assert rig.device.diagnostics()["backing_off_for"] == 10
+    assert "the breaker is open" in raw.detail and len(rig.unit.requests) == 3
+    assert rig.device.diagnostics()["open_for"] == 10
     reconnect.online[0] = True
     rig.clock.advance(10)
     await read0(rig)
     assert len(rig.unit.requests) == 4
 
 
-async def test_every_pause_and_giving_up_is_logged_for_debugging(caplog: pytest.LogCaptureFixture) -> None:
+async def test_every_opening_and_giving_up_is_logged_for_debugging(caplog: pytest.LogCaptureFixture) -> None:
     rig = Rig(silent(), unit_id=7, reconnect=CircuitBreaker(after=3, retry=Retry(Fixed(5), Attempts(2))))
     with caplog.at_level(logging.DEBUG, logger="modbus_event_connect.modbus._device"):
         await unanswered(rig)
@@ -764,18 +772,18 @@ async def test_a_cancelled_probe_lets_the_next_one_through() -> None:
     assert "not sent" not in (await read0(rig)).detail
 
 
-async def test_a_device_backing_off_answers_no_answer_without_touching_the_connection() -> None:
+async def test_a_device_whose_breaker_is_open_answers_no_answer_without_touching_the_connection() -> None:
     rig = Rig(silent())
     await unanswered(rig)
     rig.clock.advance(59)
     raw = await read0(rig)
     write = await rig.device.write(setting(HoldingRegister(0)), EncodedWrite((1,)))
-    assert raw.outcome is Outcome.NO_ANSWER and "backing off" in raw.detail
-    assert write.outcome is Outcome.NO_ANSWER and "backing off" in write.detail
+    assert raw.outcome is Outcome.NO_ANSWER and "the breaker is open" in raw.detail
+    assert write.outcome is Outcome.NO_ANSWER and "the breaker is open" in write.detail
     assert len(rig.gateway.requests) == 3
 
 
-async def test_a_probe_after_the_backoff_that_gets_no_answer_backs_off_again_at_once() -> None:
+async def test_a_probe_that_gets_no_answer_opens_the_breaker_again_at_once() -> None:
     rig = Rig(silent(), reconnect=CircuitBreaker(after=3, retry=Retry(Fixed(60.0))))
     await unanswered(rig)
     rig.clock.advance(60)
@@ -783,10 +791,10 @@ async def test_a_probe_after_the_backoff_that_gets_no_answer_backs_off_again_at_
     assert len(rig.unit.requests) == 4
     assert (await read0(rig)).outcome is Outcome.NO_ANSWER      # refused, not sent
     assert len(rig.unit.requests) == 4
-    assert rig.device.diagnostics()["backing_off_for"] == 60
+    assert rig.device.diagnostics()["open_for"] == 60
 
 
-async def test_an_answered_probe_ends_the_backoff() -> None:
+async def test_an_answered_probe_closes_the_breaker() -> None:
     rig = Rig(silent(), reconnect=CircuitBreaker(after=3, retry=Retry(Fixed(60.0))))
     await unanswered(rig)
     rig.unit.faults.clear()
@@ -796,7 +804,7 @@ async def test_an_answered_probe_ends_the_backoff() -> None:
     rig.unit.faults[(FC.READ_HOLDING_REGISTERS, 0)] = NO_ANSWER
     await read0(rig)
     await read0(rig)
-    assert rig.device.diagnostics()["backing_off"] is False           # the count started again
+    assert rig.device.diagnostics()["open"] is False           # the count started again
 
 
 async def test_only_one_probe_goes_through_while_it_is_out() -> None:
@@ -804,7 +812,7 @@ async def test_only_one_probe_goes_through_while_it_is_out() -> None:
     await unanswered(rig)
     rig.clock.advance(10)
     first, second = await asyncio.gather(read0(rig), read0(rig))
-    assert "backing off" not in first.detail and "backing off" in second.detail
+    assert "the breaker is open" not in first.detail and "the breaker is open" in second.detail
     assert len(rig.unit.requests) == 4
 
 
@@ -816,7 +824,7 @@ async def test_any_answer_resets_the_count_even_an_exception() -> None:
     assert rig.device.diagnostics()["consecutive_no_answers"] == 0
     await read0(rig)
     await read0(rig)
-    assert rig.device.diagnostics()["backing_off"] is False
+    assert rig.device.diagnostics()["open"] is False
 
 
 async def test_a_link_that_is_down_counts_as_no_answer() -> None:
@@ -825,7 +833,7 @@ async def test_a_link_that_is_down_counts_as_no_answer() -> None:
     assert (await read0(rig)).outcome is Outcome.NO_ANSWER
     await read0(rig)
     await read0(rig)
-    assert rig.device.diagnostics()["backing_off"] is True
+    assert rig.device.diagnostics()["open"] is True
 
 
 # ================================================================ several devices, one link
@@ -858,14 +866,14 @@ async def test_requests_from_several_devices_never_overlap() -> None:
     assert {unit for unit, _ in gateway.requests} == {1, 2}
 
 
-async def test_one_devices_fault_and_backoff_do_not_touch_the_other() -> None:
+async def test_one_devices_fault_and_breaker_do_not_touch_the_other() -> None:
     gateway, first, second, _, two = two_devices()
     two.faults[(FC.READ_HOLDING_REGISTERS, 0)] = NO_ANSWER
     for _ in range(3):
         await second.read([u16("a", HoldingRegister(0))])
-    assert second.diagnostics()["backing_off"] is True
+    assert second.diagnostics()["open"] is True
     assert await first.read([u16("a", HoldingRegister(0))]) == {"a": ok(111)}
-    assert first.diagnostics()["backing_off"] is False
+    assert first.diagnostics()["open"] is False
     assert first.diagnostics()["outcomes"] == {**{o.name: 0 for o in Outcome}, "OK": 1}
     assert gateway.connected
 
@@ -940,7 +948,7 @@ async def test_diagnostics_count_what_happened_and_hold_no_host() -> None:
     d = device.diagnostics()
     assert d["requests"] == 3 and d["busy_retries"] == 1
     assert d["outcomes"] == {**{o.name: 0 for o in Outcome}, "OK": 1, "MISSING": 1}
-    assert d["consecutive_no_answers"] == 0 and d["backing_off"] is False and d["backing_off_for"] == 0.0
+    assert d["consecutive_no_answers"] == 0 and d["open"] is False and d["open_for"] == 0.0
     latency = d["average_latency"]
     assert isinstance(latency, float) and abs(latency - 0.05) < 1e-9
 
