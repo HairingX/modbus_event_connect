@@ -9,7 +9,7 @@ import pytest
 from pymodbus.exceptions import ModbusIOException
 
 from modbus_event_connect._data_type import DataType
-from modbus_event_connect import Attempts, Fixed, Retry, Steps
+from modbus_event_connect import Attempts, Exponential, Fixed, Retry, Steps
 from modbus_event_connect._device import (
     Device,
     EncodedWrite,
@@ -633,6 +633,17 @@ async def test_a_silent_device_is_asked_again_as_its_reconnect_says() -> None:
         rig.clock.advance(pause)
         await read0(rig)
     assert pauses == [2, 4, 10, 10] and len(rig.unit.requests) == 3 + 4
+
+
+async def test_a_device_silent_for_hours_is_still_asked_again_at_its_reconnect_max() -> None:
+    rig = Rig(silent(), reconnect=Retry(Exponential(2.0, max=10.0)))
+    await unanswered(rig)
+    for _ in range(1100):
+        pause = rig.device.diagnostics()["backing_off_for"]
+        assert isinstance(pause, float)
+        rig.clock.advance(pause)
+        assert (await read0(rig)).outcome is Outcome.NO_ANSWER
+    assert rig.device.diagnostics()["backing_off_for"] == 10.0 and len(rig.unit.requests) == 3 + 1100
 
 
 async def test_a_reconnect_that_gives_up_leaves_the_device_unasked_until_connected() -> None:

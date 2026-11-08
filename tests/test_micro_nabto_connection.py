@@ -142,6 +142,16 @@ async def test_the_last_exchange_says_the_request_was_sent_again_and_holds_the_a
         assert (1001).to_bytes(2, "big") in exchange.answer
 
 
+async def test_the_email_a_ping_answers_with_is_not_kept() -> None:
+    async with _device() as device:
+        connection = _connection(device)
+        await connection.open()
+        exchange = connection.last_exchange
+        assert exchange is not None and exchange.session_request == 1 and exchange.answer is None
+        assert EMAIL not in repr(exchange) and EMAIL.encode() not in repr(exchange).encode()
+        assert EMAIL.encode().hex() not in repr(exchange)
+
+
 async def test_a_new_session_counts_its_requests_and_its_age_afresh() -> None:
     clock = FakeClock()
     async with _device(clock=clock) as device:

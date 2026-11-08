@@ -95,7 +95,8 @@ class Exchange:
     seconds: float
     """From the last sending to the answer."""
     answer: bytes | None
-    """The answer's datagram from its kind on, the session's ids left out; None without one."""
+    """The answer's datagram from its kind on, the session's ids left out; None without one, and
+    for a ping, whose answer carries the email."""
     at: float = 0.0
     """Monotonic time the exchange ended."""
     session_age: float | None = None
@@ -226,8 +227,8 @@ class MicroNabtoConnection:
 
     @property
     def last_exchange(self) -> Exchange | None:
-        """How the last request sent went; None before the first. The answer to a ping carries
-        the email, so an answer is logged only by whoever knows what it answers."""
+        """How the last request sent went; None before the first. The answer to a ping, which
+        carries the email, is not kept."""
         return self._last_exchange
 
     async def open(self) -> Identity | None:
@@ -410,7 +411,7 @@ class MicroNabtoConnection:
         self._refusal_logged = None
         self._session_started = now
         self._session_requests = 0
-        answer = await self._data(wire.ping())
+        answer = await self._data(wire.ping(), keep_answer=False)
         found = wire.identity(answer) if answer is not None else None
         if found is None:
             self._server_id = None
@@ -420,18 +421,21 @@ class MicroNabtoConnection:
 
     # ------------------------------------------------------------------------ exchange
 
-    async def _data(self, command: bytes, accept: Callable[[bytes], bool] | None = None) -> bytes | None:
+    async def _data(self, command: bytes, accept: Callable[[bytes], bool] | None = None, *,
+                    keep_answer: bool = True) -> bytes | None:
         server_id = self._server_id
         if server_id is None:
             return None
         self._session_requests += 1
         answer = await self._exchange(
-            lambda sequence: wire.data_request(self._client_id, server_id, sequence, command), accept)
+            lambda sequence: wire.data_request(self._client_id, server_id, sequence, command), accept,
+            keep_answer=keep_answer)
         return answer.payload if isinstance(answer, wire.DataReply) else None
 
     async def _exchange(self, packet: Callable[[int], bytes], accept: Callable[[bytes], bool] | None = None,
-                        ) -> wire.ConnectReply | wire.DataReply | None:
-        """Send a packet and wait for its reply, sending it again while none comes."""
+                        *, keep_answer: bool = True) -> wire.ConnectReply | wire.DataReply | None:
+        """Send a packet and wait for its reply, sending it again while none comes; `keep_answer`
+        False leaves the answer out of `last_exchange`."""
         sequence = self._next_sequence()
         datagram = packet(sequence)
         loop = asyncio.get_running_loop()
@@ -480,8 +484,8 @@ class MicroNabtoConnection:
                 if later is not None and accept(later.payload):
                     answer, set_aside = later, True
                     self._later_answers_taken += 1
-            self._exchanged(sequence, attempt + 1, acknowledged, started,
-                            answer.raw if isinstance(answer, wire.DataReply) else None, set_aside, waited)
+            kept = answer.raw if keep_answer and isinstance(answer, wire.DataReply) else None
+            self._exchanged(sequence, attempt + 1, acknowledged, started, kept, set_aside, waited)
             return answer
         self._exchanged(sequence, self._retries + 1, acknowledged, started, None)
         return None
@@ -541,8 +545,7 @@ class MicroNabtoConnection:
 
 
 def describe(exchange: Exchange) -> str:
-    """`exchange` in one line for a log, its answer in hex: only for an answer that cannot carry
-    the email, as a ping's does."""
+    """`exchange` in one line for a log, its answer in hex."""
     answer = exchange.answer.hex(" ") if exchange.answer is not None else "none"
     reason = f" ({exchange.session_reason})" if exchange.session_reason else ""
     session = (f"request {exchange.session_request} of a session {exchange.session_age:.1f} s old{reason}"
