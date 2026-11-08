@@ -24,6 +24,7 @@ from event_connect import (
     Transforms,
     Unit,
     WriteKind,
+    WriteRange,
 )
 from modbus_event_connect._data_type import DataType, DataTypeKind
 from modbus_event_connect._device import EncodedWrite, Outcome, ReadResult, WriteResult
@@ -754,3 +755,42 @@ def test_the_poll_rates_climb_from_seconds_to_a_quarter_of_an_hour() -> None:
 
 def test_a_point_is_polled_at_the_medium_rate_unless_it_says_otherwise() -> None:
     assert Point(Key("p", int), read=InputRegister(1)).poll_rate is PollRate.MEDIUM
+
+
+# ============================================================================ write range
+
+
+def _setting(key: Key[Any], **kw: Any) -> Point[Any]:
+    return Point(key, read=HoldingRegister(1), write=HoldingRegister(1), **kw)
+
+
+@pytest.mark.parametrize("point,expected", [
+    (_setting(Key("t", float), data_type=DataType.INT16, scale=0.1, valid_raw=range(-0x8000, 0x7FFF)),
+     WriteRange(-3276.8, 3276.6, 0.1)),
+    (_setting(Key("n", int)), WriteRange(0, 65535, 1)),
+    (_setting(Key("n", int), limits=Limits(min=5)), WriteRange(5, 65535, 1)),
+    (_setting(Key("t", float), data_type=DataType.INT16, scale=0.5, limits=Limits(min=5, max=30, step=1.0)),
+     WriteRange(5, 30, 1.0)),
+    (_setting(Key("m", float), transform=Transforms.SECONDS_AS_MINUTES), WriteRange(0, 65535 / 60, 1 / 60)),
+    (_setting(Key("d", int), scale=-1), WriteRange(-65535, 0, 1)),
+    (_setting(Key("o", float), scale=0.5, offset=-20, valid_raw={0, 7, 100}), WriteRange(-20, 30, 0.5)),
+    (_setting(Key("f", float), data_type=DataType.FLOAT32, limits=Limits(min=0, max=10)), WriteRange(0, 10, None)),
+], ids=["scaled-valid-raw", "data-type", "half-limits", "limits", "transform", "negative-scale", "offset-set",
+        "float-limits"])
+def test_a_points_write_range_is_its_limits_and_else_what_its_registers_carry(
+        point: Point[Any], expected: WriteRange) -> None:
+    found = point.write_range()
+    assert found is not None
+    assert (found.min, found.max) == pytest.approx((expected.min, expected.max))
+    assert found.step == (pytest.approx(expected.step) if expected.step is not None else None)
+
+
+@pytest.mark.parametrize("point", [
+    Point(Key("r", int), read=InputRegister(1)),
+    _setting(Key("s", Mode)),
+    _setting(Key("b", bool), data_type=DataType.BOOL),
+    _setting(Key("f", float), data_type=DataType.FLOAT32),
+    _setting(Key("text", str), data_type=DataType.string(2)),
+], ids=["read-only", "states", "bool", "float-without-limits", "text"])
+def test_a_point_without_a_range_of_numbers_to_write_has_none(point: Point[Any]) -> None:
+    assert point.write_range() is None

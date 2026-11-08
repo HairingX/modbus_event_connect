@@ -14,7 +14,7 @@ from enum import IntEnum
 from types import MappingProxyType
 from typing import Any, ClassVar, Hashable
 
-from event_connect import VALUE_TYPES, Transform, is_key, is_state_type
+from event_connect import VALUE_TYPES, Transform, WriteRange, is_key, is_state_type
 from event_connect import Point as BasePoint
 
 from ._data_type import ByteOrder, DataType, DataTypeKind, WordOrder, raw_bounds
@@ -127,6 +127,40 @@ class Point[T](BasePoint[T]):
             return None
         return max(_decimals(self.scale), _decimals(self.offset))
 
+    def write_range(self) -> WriteRange | None:
+        """The values the point can be written with, in the units a user sees.
+
+        Its `limits`, and where they leave out a bound, the lowest or highest raw number it can
+        carry - its `valid_raw`'s, else its data type's - through `scale`, `offset` and
+        `transform`. The step is the limits' `step`, else what one raw number is worth. A
+        transform is taken to be linear, as `Transforms`' are.
+
+        None for a point that cannot be written or holds no number, and for a float data type
+        whose limits lack a bound: it carries any number.
+        """
+        if not self.writable or self.key.type not in (int, float):
+            return None
+        if not self.data_type.is_integer:
+            return super().write_range()
+        lowest, highest = _raw_span(self)
+        ends = sorted((self._value_of(lowest), self._value_of(highest)))
+        limits = self.limits
+        low = limits.min if limits is not None and limits.min is not None else ends[0]
+        high = limits.max if limits is not None and limits.max is not None else ends[1]
+        if limits is not None and limits.step is not None:
+            step = limits.step
+        else:
+            step = abs(self._value_of(lowest + 1) - self._value_of(lowest))
+        return WriteRange(low, high, step)
+
+    def _value_of(self, raw: int) -> float:
+        """What raw number `raw` reads as, rounded as a read is."""
+        value = raw * self.scale + self.offset
+        if self.transform is not None:
+            value = self.transform.read(value)
+        precision = self.effective_precision
+        return round(value, precision) if precision is not None else value
+
     def problems(self) -> list[str]:
         """Everything wrong with the point, as a point and as registers or bits."""
         return [*super().problems(), *_access_problems(self), *_type_problems(self),
@@ -136,6 +170,19 @@ class Point[T](BasePoint[T]):
         sides = ", ".join(f"{name}={access!r}" for name, access in
                           (("read", self.read), ("write", self.write)) if access is not None)
         return f"Point({self.key!r}, {sides}, data_type={self.data_type!r})"
+
+
+def _raw_span(point: Point[Any]) -> tuple[int, int]:
+    """The lowest and highest raw number an integer point carries: its `valid_raw`'s, else its
+    data type's."""
+    valid = point.valid_raw
+    if valid is None:
+        bounds = raw_bounds(point.data_type.kind)
+        assert bounds is not None
+        return bounds
+    if isinstance(valid, range):
+        return min(valid[0], valid[-1]), max(valid[0], valid[-1])
+    return min(valid), max(valid)
 
 
 def _decimals(number: float) -> int:
@@ -254,7 +301,7 @@ def _valid_raw_problems(point: Point[Any]) -> list[str]:
         return ["valid_raw is empty, so nothing could ever be a value"]
     if any(access is not None and access.bits for access in (point.read, point.write)):
         bounds = (0, 1)
-    low, high = (min(valid[0], valid[-1]), max(valid[0], valid[-1])) if isinstance(valid, range) else (min(valid), max(valid))
+    low, high = _raw_span(point)
     if low < bounds[0] or high > bounds[1]:
         return [f"valid_raw reaches {low}..{high}, but {data_type!r} holds {bounds[0]}..{bounds[1]} here"]
     return []
