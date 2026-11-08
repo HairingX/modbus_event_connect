@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Protocol
 
-from event_connect import DataValue, Labels, ModelError, Selector, SystemClock, Timing
+from event_connect import DataValue, ModelError, Selector, SystemClock, Timing, select
 
 from ._device import Identity, ProtocolOptions
 from ._point import Point
@@ -127,13 +127,13 @@ class ResolvedModel:
     """label -> the instance numbers resolved for it (failed factories excluded)."""
 
     def select(self, targets: Selector) -> tuple[Point[Any], ...]:
-        """Every point matching `targets`, in declaration order. May be empty for `Labels`."""
-        if isinstance(targets, Labels):
-            return tuple(point for point in self.points.values() if targets.matches(point.labels))
-        unknown = [key for key in targets if key not in self.points]
-        if unknown:
-            raise KeyError("unknown key(s): " + ", ".join(repr(key) for key in unknown))
-        return tuple(self.points[key] for key in targets)
+        """The points `targets` selects: for keys, in the order given; for labels, every point
+        carrying them, in declaration order, which may be none.
+
+        Raises:
+            KeyError: naming every key the model does not have.
+        """
+        return select(tuple(self.points.values()), targets)
 
     def point(self, key: str) -> Point[Any]:
         """The point for `key`. Raises `KeyError` naming the key if this model has none."""
@@ -170,14 +170,11 @@ def _space_name(space: Hashable) -> str:
 def _selection_problem(points: Mapping[str, Point[Any]], targets: Selector) -> str | None:
     """What is wrong with a selector used inside a model (`on_write` / `on_change`): it must
     select at least one point of *this* resolved model. None means it is fine."""
-    if isinstance(targets, Labels):
-        if not any(targets.matches(point.labels) for point in points.values()):
-            return f"{targets!r} selects no point"
-        return None
-    unknown = [key for key in targets if key not in points]
-    if unknown:
-        return "unknown key(s) " + ", ".join(repr(key) for key in unknown)
-    return None
+    try:
+        selected = select(tuple(points.values()), targets)
+    except KeyError as err:
+        return str(err.args[0])
+    return None if selected else f"{targets!r} selects no point"
 
 
 def _overlap_problems(all_points: Sequence[Point[Any]], options: ProtocolOptions) -> list[str]:

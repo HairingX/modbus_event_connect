@@ -23,6 +23,7 @@ from event_connect import (
     Quality,
     Reachability,
     ReadOnlyError,
+    Retry,
     Scheduler,
     Selector,
     Status,
@@ -37,6 +38,8 @@ from event_connect import (
     WriteKind,
     changed,
     is_key,
+    selector,
+    should_poll,
     stale,
     tell,
 )
@@ -100,14 +103,12 @@ class Client:
     `model` is a model, or a selector choosing one from the device's identity.
     """
 
-    def __init__(self, device: Device, model: Model | ModelSelector, *,
+    def __init__(self, device: Device, model: Model | ModelSelector, *, write_retry: Retry,
                  clock: Clock | None = None, read_only: bool = False,
-                 sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-                 write_retry_for: float = 0.0, write_retry_pause: float = 0.5) -> None:
+                 sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
         """Args:
-            write_retry_for: seconds after its first sending that a write the device answered
-                `BUSY` is still sent again; 0 sends every write once.
-            write_retry_pause: seconds between those sendings.
+            write_retry: when a write the device answered `BUSY` is sent again, counting its
+                sendings and the time since the first; `NO_RETRY` sends every write once.
         """
         self._device = device
         self._select_model: ModelSelector = (lambda _identity: model) if isinstance(model, Model) else model
@@ -131,15 +132,13 @@ class Client:
         self._scheduled_polling = True
         self._checks_requested: float | None = None
         """When `refresh(PollRate.SCAN)` asked for the checks, which runs them without the schedule."""
-        self._consecutive_failures: dict[str, int] = {}
         self._reachability = Reachability(self._clock, DEFAULT_TIMING.offline_after)
         self._statuses = StatusBoard(self._clock)
 
         self._passes = Passes()
-        self._writes = WriteQueue(device, clock=self._clock, sleep=sleep, retry_for=write_retry_for,
-                                  retry_pause=write_retry_pause, answered=self._update_reachability,
-                                  written=self._taken,
-                                  pending=lambda pending: self._statuses.set(Status.WRITE_PENDING, pending))
+        self._writes = WriteQueue(device, clock=self._clock, sleep=sleep, retry=write_retry,
+                                  statuses=self._statuses, answered=self._update_reachability,
+                                  written=self._taken)
 
     # ================================================================================= scan
 
@@ -215,7 +214,7 @@ class Client:
         answers = _ScanAnswers()
         scanned: dict[str, ReadResult] = {}
         marked, read_keys = await self._run_scan(resolved, scope, answers, scanned)
-        instance = resolved.select(Labels(**{label: number}))
+        instance = _select(resolved, Labels(**{label: number}))
         self._missing_by_scan[scope] = marked
         for point in instance:
             self._missing_by_read.pop(point.key, None)       # tried again with the instance
@@ -354,7 +353,7 @@ class Client:
         """The numbers of the instances of `label` of which this unit has at least one point."""
         resolved = self._require_model()
         return tuple(n for n in resolved.instances.get(label, ())
-                     if any(self._is_available(p.key) for p in resolved.select(Labels(**{label: n}))))
+                     if any(self._is_available(p.key) for p in _select(resolved, Labels(**{label: n}))))
 
     def select(self, targets: Selector | Sequence[str]) -> tuple[Point[Any], ...]:
         """The points `targets` selects, among those this unit has."""
@@ -398,8 +397,13 @@ class Client:
         return self._statuses.value(status)
 
     def consecutive_failures(self, key: str) -> int:
-        """Consecutive failed reads of `key`."""
-        return self._consecutive_failures.get(key, 0)
+        """Consecutive failed reads of `key`, as its schedule counts them.
+
+        Raises:
+            NotConnectedError: the device has not been scanned.
+            KeyError: this unit has no readable point `key`.
+        """
+        return self._require_scheduler().consecutive_failures(key)
 
     @property
     def silent(self) -> bool:
@@ -664,7 +668,6 @@ class Client:
                     # The read asked for it, so it runs without scheduled polling too.
                     self._checks_requested = now if self._checks_requested is None else min(self._checks_requested, now)
             success = answer.outcome is Outcome.OK and data.quality is not Quality.STALE
-            self._consecutive_failures[point.key] = 0 if success else self.consecutive_failures(point.key) + 1
             scheduler.record(point.key, data, success=success, retry_after=answer.retry_after)
             self._store(point, data, previous)
 
@@ -804,20 +807,14 @@ class Client:
             raise TypeError(f"{key!r} names a {key.type.__name__}, but the "
                             f"{self._require_model().model.name} model's point holds a {point.key.type.__name__}")
 
-    def _should_poll(self, point: Point[Any]) -> bool:
-        """Whether anything wants `point` read: the model, its role as a trigger, or a consumer."""
-        return (point.poll_always
-                or point.on_change is not None
-                or point.key in self._polled_keys
-                or self._subscriptions.polled(point.key))
-
     def _update_polling(self, key: str) -> None:
         """Tell the scheduler whether `key` takes part in scheduling."""
         if self._resolved is None or self._scheduler is None or key not in self._resolved.points:
             return
         point = self._resolved.points[key]
         if point.readable:
-            self._scheduler.set_polled(key, self._should_poll(point) and self._is_available(key))
+            self._scheduler.set_polled(key, should_poll(point, self._subscriptions, self._polled_keys)
+                                       and self._is_available(key))
 
 
 class _ScanContext:
@@ -847,11 +844,14 @@ class _ScanContext:
 
 
 def _select(resolved: ResolvedModel, targets: Selector | Sequence[str]) -> tuple[Point[Any], ...]:
-    if isinstance(targets, Labels):
-        return resolved.select(targets)
-    if isinstance(targets, str):
-        raise TypeError(f"give keys as a list or tuple, not the single string {targets!r}")
-    return resolved.select(tuple(targets))
+    """The points of `resolved` that `targets` selects.
+
+    Raises:
+        TypeError: a single string.
+        ValueError: no keys.
+        KeyError: naming every key the model does not have.
+    """
+    return resolved.select(selector(targets))
 
 
 def _record_availability(record: dict[str, str], points: Iterable[Point[Any]], available: bool, reason: str) -> None:

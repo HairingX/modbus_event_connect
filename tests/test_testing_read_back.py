@@ -5,7 +5,7 @@ from collections.abc import Mapping, Sequence
 
 import pytest
 
-from event_connect import InvalidValueError, Key, Limits, ReadOnlyError, Timing
+from event_connect import NO_RETRY, InvalidValueError, Key, Limits, ReadOnlyError, Timing
 from modbus_event_connect._client import Client
 from modbus_event_connect._device import (
     EncodedWrite,
@@ -72,7 +72,7 @@ def _measure(lag: float, *, applies: bool = True, read_only: bool = False,
              delays: Sequence[float] = (1, 2, 3, 4)) -> tuple[ReadBackMeasurement, LaggingDevice]:
     clock = FakeClock()
     device = LaggingDevice(clock, lag, applies=applies)
-    client = Client(device, MODEL, clock=clock, read_only=read_only)
+    client = Client(device, MODEL, clock=clock, read_only=read_only, write_retry=NO_RETRY)
 
     async def sleep(seconds: float) -> None:
         clock.advance(seconds)
@@ -126,7 +126,7 @@ def test_a_measurement_that_cannot_tell_anything_is_refused(key: Key[int], value
                                                              delays: tuple[float, ...]) -> None:
     clock = FakeClock()
     device = LaggingDevice(clock, 0)
-    client = Client(device, MODEL, clock=clock)
+    client = Client(device, MODEL, clock=clock, write_retry=NO_RETRY)
 
     async def run() -> None:
         await client.connect()
@@ -143,7 +143,7 @@ def test_a_value_the_point_refuses_is_found_before_anything_is_written() -> None
                   timing=Timing(read_back_after=1.0))
     clock = FakeClock()
     device = LaggingDevice(clock, 0)
-    client = Client(device, model, clock=clock)
+    client = Client(device, model, clock=clock, write_retry=NO_RETRY)
 
     async def run() -> None:
         await client.connect()

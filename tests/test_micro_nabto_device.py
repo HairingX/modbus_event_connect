@@ -15,6 +15,7 @@ from event_connect import (
     Timing,
     Unit,
     UnsupportedDeviceError,
+    Within,
 )
 from modbus_event_connect import Fixed, Retry, Status
 from modbus_event_connect._client import Client
@@ -390,7 +391,7 @@ def _select(identity: Identity) -> Model | None:
 def _client(simulated: SimulatedMicroNabtoDevice, *, clock: FakeClock | None = None, read_only: bool = False,
             email: str = EMAIL, reconnect: Retry | None = None) -> Client:
     return Client(_device(simulated, clock=clock, email=email, reconnect=reconnect), _select, clock=clock, read_only=read_only,
-                  write_retry_for=15.0, write_retry_pause=0.01)
+                  write_retry=Retry(Fixed(0.01), Within(15.0)))
 
 
 async def test_a_client_picks_its_model_from_the_handshake_and_reads_negative_values() -> None:

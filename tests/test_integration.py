@@ -10,6 +10,7 @@ from typing import Any, TypeVar
 import pytest
 
 from event_connect import (
+    NO_RETRY,
     CannotConnectError,
     DataValue,
     InvalidValueError,
@@ -22,6 +23,7 @@ from event_connect import (
     Refresh,
     Timing,
     Unit,
+    Within,
     WriteKind,
 )
 from modbus_event_connect import Fixed, Retry, Status
@@ -129,19 +131,19 @@ async def _no_wait(seconds: float) -> None:
 
 
 def _stack(units: dict[int, SimulatedModbusDevice] | None = None, *, unit_id: int = 1, read_only: bool = False,
-           delay: float = 0.0, write_retry_for: float = 0.0,
+           delay: float = 0.0, write_retry: Retry = NO_RETRY,
            reconnect: Retry | None = None) -> tuple[Client, SimulatedModbusGateway, FakeClock, ModbusDevice]:
     gateway = SimulatedModbusGateway(units if units is not None else {1: _unit()}, delay=delay)
     clock = FakeClock()
     device = ModbusDevice(gateway, unit_id=unit_id, clock=clock, sleep=_no_wait, reconnect=reconnect)
-    client = Client(device, MODEL, clock=clock, read_only=read_only, sleep=_no_wait, write_retry_for=write_retry_for)
+    client = Client(device, MODEL, clock=clock, read_only=read_only, sleep=_no_wait, write_retry=write_retry)
     return client, gateway, clock, device
 
 
 def _connected(units: dict[int, SimulatedModbusDevice] | None = None, *, unit_id: int = 1, read_only: bool = False,
-               write_retry_for: float = 0.0,
+               write_retry: Retry = NO_RETRY,
                reconnect: Retry | None = None) -> tuple[Client, SimulatedModbusGateway, FakeClock, ModbusDevice]:
-    stack = _stack(units, unit_id=unit_id, read_only=read_only, write_retry_for=write_retry_for, reconnect=reconnect)
+    stack = _stack(units, unit_id=unit_id, read_only=read_only, write_retry=write_retry, reconnect=reconnect)
     asyncio.run(stack[0].connect())
     return stack
 
@@ -443,7 +445,7 @@ def test_two_devices_share_one_gateway_without_mixing_up() -> None:
     second.input_registers[4] = 190
     gateway = SimulatedModbusGateway({1: first, 2: second}, delay=0.001)
     clock = FakeClock()
-    clients = [Client(ModbusDevice(gateway, unit_id=u, clock=clock, sleep=_no_wait, reconnect=None), MODEL, clock=clock)
+    clients = [Client(ModbusDevice(gateway, unit_id=u, clock=clock, sleep=_no_wait, reconnect=None), MODEL, clock=clock, write_retry=NO_RETRY)
                for u in (1, 2)]
 
     async def scenario() -> None:
@@ -502,7 +504,7 @@ def test_a_slow_device_does_not_block_the_event_loop() -> None:
     """Everything else on the host's loop must keep running while the bus is slow."""
     gateway = SimulatedModbusGateway({1: _unit()}, delay=0.05)
     clock = FakeClock()
-    client = Client(ModbusDevice(gateway, unit_id=1, clock=clock, sleep=_no_wait, reconnect=None), MODEL, clock=clock)
+    client = Client(ModbusDevice(gateway, unit_id=1, clock=clock, sleep=_no_wait, reconnect=None), MODEL, clock=clock, write_retry=NO_RETRY)
 
     async def scenario() -> int:
         stop = asyncio.Event()
@@ -523,7 +525,7 @@ def test_a_slow_device_does_not_block_the_event_loop() -> None:
 
 def test_writes_land_in_order_even_when_the_device_is_busy() -> None:
     """A write refused as busy is retried before later writes go out, never after them."""
-    client, gateway, _, _ = _connected(write_retry_for=10.0)
+    client, gateway, _, _ = _connected(write_retry=Retry(Fixed(0.5), Within(10.0)))
     gateway.units[1].busy_for = 3
 
     async def presses() -> None:
@@ -537,7 +539,7 @@ def test_after_an_outage_of_15_s_a_value_read_every_10_s_is_back_20_s_after_it_b
     gateway = SimulatedModbusGateway({1: _unit()})
     clock = FakeClock()
     device = ModbusDevice(gateway, unit_id=1, clock=clock, sleep=_no_wait, reconnect=None)
-    client = Client(device, MODEL, clock=clock, sleep=_no_wait)
+    client = Client(device, MODEL, clock=clock, sleep=_no_wait, write_retry=NO_RETRY)
     asyncio.run(client.connect())
     client.subscribe(TEMP, _nothing)
     client.set_poll_interval(TEMP, 10.0)

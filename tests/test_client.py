@@ -9,9 +9,12 @@ from typing import Any, TypeVar
 import pytest
 
 from event_connect import (
+    NO_RETRY,
+    Attempts,
     CannotConnectError,
     Change,
     DataValue,
+    Fixed,
     InvalidValueError,
     Key,
     Labels,
@@ -22,8 +25,10 @@ from event_connect import (
     Quality,
     ReadOnlyError,
     Refresh,
+    Retry,
     Timing,
     UnsupportedDeviceError,
+    Within,
     WriteKind,
 )
 from modbus_event_connect import _client as client_module
@@ -198,14 +203,14 @@ MODEL = Model(
 
 
 def _client(registers: Mapping[str, tuple[int, ...]] | None = None, *, read_only: bool = False,
-            write_retry_for: float = 0.0) -> tuple[Client, FakeDevice, FakeClock]:
+            write_retry: Retry = NO_RETRY) -> tuple[Client, FakeDevice, FakeClock]:
     device = FakeDevice(REGISTERS if registers is None else registers)
     clock = FakeClock()
 
     async def sleep(seconds: float) -> None:
         clock.advance(seconds)
         await asyncio.sleep(0)
-    return (Client(device, MODEL, clock=clock, read_only=read_only, sleep=sleep, write_retry_for=write_retry_for),
+    return (Client(device, MODEL, clock=clock, read_only=read_only, sleep=sleep, write_retry=write_retry),
             device, clock)
 
 
@@ -215,8 +220,8 @@ def _without(key: str) -> dict[str, tuple[int, ...]]:
 
 
 def _connected(registers: Mapping[str, tuple[int, ...]] | None = None, read_only: bool = False,
-               write_retry_for: float = 0.0) -> tuple[Client, FakeDevice, FakeClock]:
-    client, device, clock = _client(registers, read_only=read_only, write_retry_for=write_retry_for)
+               write_retry: Retry = NO_RETRY) -> tuple[Client, FakeDevice, FakeClock]:
+    client, device, clock = _client(registers, read_only=read_only, write_retry=write_retry)
     asyncio.run(client.connect())
     device.reads.clear()
     return client, device, clock
@@ -244,7 +249,7 @@ class Recorder:
 # =================================================================================== scan
 
 def test_an_unreachable_device_raises_cannot_connect() -> None:
-    client = Client(FakeDevice(REGISTERS, reachable=False), MODEL, clock=FakeClock())
+    client = Client(FakeDevice(REGISTERS, reachable=False), MODEL, clock=FakeClock(), write_retry=NO_RETRY)
     with pytest.raises(CannotConnectError):
         asyncio.run(client.connect())
     assert client.status(Status.CONNECTED).value is False
@@ -252,7 +257,7 @@ def test_an_unreachable_device_raises_cannot_connect() -> None:
 
 def test_a_device_no_model_matches_raises_unsupported_with_what_it_reported() -> None:
     client = Client(FakeDevice(REGISTERS, identity={"device_model": 9999}), lambda identity: None,
-                    clock=FakeClock())
+                    clock=FakeClock(), write_retry=NO_RETRY)
     with pytest.raises(UnsupportedDeviceError) as raised:
         asyncio.run(client.connect())
     assert raised.value.identity == {"device_model": 9999}
@@ -265,13 +270,13 @@ def test_the_selector_sees_the_handshake() -> None:
         seen.append(identity)
         return MODEL
     device = FakeDevice(REGISTERS, identity={"device_model": 1140})
-    asyncio.run(Client(device, select, clock=FakeClock()).connect())
+    asyncio.run(Client(device, select, clock=FakeClock(), write_retry=NO_RETRY).connect())
     assert seen and seen[0]["device_model"] == 1140
 
 
 def test_the_identity_is_the_handshake_with_what_the_identity_points_read() -> None:
     device = FakeDevice({**REGISTERS, "hardware": (2,)}, identity={"device_model": 1140})
-    client = Client(device, MODEL, clock=FakeClock())
+    client = Client(device, MODEL, clock=FakeClock(), write_retry=NO_RETRY)
     asyncio.run(client.connect())
     assert client.identity["device_model"] == 1140
     assert client.identity["hardware"] == 2
@@ -329,7 +334,7 @@ def test_a_scan_read_neither_stores_nor_notifies() -> None:
         seen.append(await context.read(("temp",)))
     model = Model(name="T", manufacturer="T", sections=[Section(BASE)], scan_steps=[peek], options=ModbusOptions(numbering=plain(first_address=1)), timing=Timing(read_back_after=1.0))
     device = FakeDevice(REGISTERS)
-    client = Client(device, model, clock=FakeClock())
+    client = Client(device, model, clock=FakeClock(), write_retry=NO_RETRY)
     recorder = Recorder()
     client.subscribe(TEMP, recorder)                       # allowed before connect
     asyncio.run(client.connect())
@@ -406,6 +411,37 @@ def test_consecutive_failures_are_counted_and_reset_by_success() -> None:
     clock.advance(60)
     asyncio.run(client.poll())
     assert client.consecutive_failures("temp") == 0
+
+
+def test_failures_are_counted_afresh_once_a_device_counted_as_lost_answers_again() -> None:
+    client, device, clock = _connected()
+    client.subscribe(TEMP, Recorder())
+    client.subscribe(MODE, Recorder())
+    for key in REGISTERS:
+        device.fail(key, Outcome.NO_ANSWER)
+    for _ in range(3):
+        clock.advance(60)
+        asyncio.run(client.poll())
+    assert client.status(Status.CONNECTED).value is False
+    device.answer("mode", 2)
+    clock.advance(60)
+    asyncio.run(client.poll())
+    assert client.consecutive_failures("temp") == 1, "the count the schedule acts on, not one kept apart"
+
+
+def test_consecutive_failures_need_a_scanned_device_and_a_point_it_reads() -> None:
+    client, _, _ = _client()
+    with pytest.raises(NotConnectedError):
+        client.consecutive_failures("temp")
+    asyncio.run(client.connect())
+    with pytest.raises(KeyError):
+        client.consecutive_failures("step_up")
+
+
+def test_an_empty_list_of_keys_selects_nothing_and_says_so() -> None:
+    client, _, _ = _connected()
+    with pytest.raises(ValueError):
+        client.select([])
 
 
 def test_registers_that_do_not_fit_the_point_read_as_stale() -> None:
@@ -535,7 +571,7 @@ def test_a_point_named_like_a_status_is_an_ordinary_point() -> None:
     model = Model(name="TEST", manufacturer="TEST",
                   sections=[Section([Point(Key("status:connected", int), read=InputRegister(1))])],
                   options=OPTIONS, timing=Timing(read_back_after=1.0))
-    client = Client(FakeDevice({"status:connected": (7,)}), model, clock=FakeClock())
+    client = Client(FakeDevice({"status:connected": (7,)}), model, clock=FakeClock(), write_retry=NO_RETRY)
     asyncio.run(client.connect())
     current = client.value(Key("status:connected", int))
     assert current is not None and current.value == 7
@@ -640,7 +676,7 @@ def test_the_next_poll_is_counted_in_seconds_from_now() -> None:
 def test_with_nothing_to_poll_there_is_no_next_poll() -> None:
     model = Model(name="TEST", manufacturer="TEST", sections=[
         Section([Point(SERIAL, read=InputRegister(10), data_type=DataType.UINT32, poll_rate=PollRate.STATIC)])], options=ModbusOptions(numbering=plain(first_address=1)), timing=Timing(read_back_after=1.0))
-    client = Client(FakeDevice({"serial": (0, 1)}), model, clock=FakeClock())
+    client = Client(FakeDevice({"serial": (0, 1)}), model, clock=FakeClock(), write_retry=NO_RETRY)
     asyncio.run(client.connect())
     assert client.seconds_until_next_poll() is None
 
@@ -855,7 +891,7 @@ def test_what_the_scan_read_is_not_read_again() -> None:
     model = Model(name="S", manufacturer="S", sections=[Section(points)], scan_steps=[first, second],
                   options=OPTIONS, timing=Timing(read_back_after=1.0))
     device = FakeDevice({"a": (1,), "b": (2,), "c": (3,)})
-    client = Client(device, model, clock=FakeClock())
+    client = Client(device, model, clock=FakeClock(), write_retry=NO_RETRY)
     asyncio.run(client.connect())
     assert sorted(key for batch in device.reads for key in batch) == ["a", "b", "c", "gone"]
     assert {key: value.value for key, value in client.values.items()} == {"a": 1, "b": 2, "c": 3}
@@ -878,7 +914,7 @@ def test_a_written_point_is_read_back_at_the_devices_delay_and_what_it_disturbs_
     model = Model(name="S", manufacturer="S", sections=[Section([fan, speed])], options=OPTIONS,
                   timing=Timing(read_back_after=1.0))
     device, clock = FakeDevice({"fan": (0,), "speed": (0,)}), FakeClock()
-    client = Client(device, model, clock=clock)
+    client = Client(device, model, clock=clock, write_retry=NO_RETRY)
     asyncio.run(client.connect())
     client.subscribe(Key("fan", int), Recorder())
     client.subscribe(Key("speed", int), Recorder())
@@ -917,7 +953,7 @@ def test_a_refused_write_returns_false() -> None:
     assert asyncio.run(client.write(MODE, 2)) is False
 
 
-def test_without_write_retry_for_a_busy_write_is_sent_once() -> None:
+def test_with_no_retry_a_busy_write_is_sent_once() -> None:
     client, device, _ = _connected()
     device.busy_writes["mode"] = 1
     assert asyncio.run(client.write(MODE, 2)) is False
@@ -925,14 +961,22 @@ def test_without_write_retry_for_a_busy_write_is_sent_once() -> None:
 
 
 def test_a_busy_write_is_sent_again_until_the_device_takes_it() -> None:
-    client, device, _ = _connected(write_retry_for=10.0)
+    client, device, _ = _connected(write_retry=Retry(Fixed(0.5), Within(10.0)))
     device.busy_writes["mode"] = 3
     assert asyncio.run(client.write(MODE, 2)) is True
     assert [value.registers for _, value in device.writes] == [(2,)] * 4
 
 
-def test_a_busy_write_is_given_up_write_retry_for_seconds_after_it_was_first_sent() -> None:
-    client, device, clock = _connected(write_retry_for=10.0)
+def test_a_busy_write_is_sent_as_often_as_its_retry_allows() -> None:
+    client, device, clock = _connected(write_retry=Retry(Fixed(2.0), Attempts(3)))
+    device.busy_writes["mode"] = 1000
+    started = clock.monotonic()
+    assert asyncio.run(client.write(MODE, 2)) is False
+    assert len(device.writes) == 3 and clock.monotonic() - started == 4.0
+
+
+def test_a_busy_write_is_given_up_when_its_retry_stops() -> None:
+    client, device, clock = _connected(write_retry=Retry(Fixed(0.5), Within(10.0)))
     device.busy_writes["mode"] = 1000
     started = clock.monotonic()
     assert asyncio.run(client.write(MODE, 2)) is False
@@ -941,7 +985,7 @@ def test_a_busy_write_is_given_up_write_retry_for_seconds_after_it_was_first_sen
 
 
 def test_a_newer_setting_overtakes_a_write_the_device_keeps_refusing() -> None:
-    client, device, _ = _connected(write_retry_for=10.0)
+    client, device, _ = _connected(write_retry=Retry(Fixed(0.5), Within(10.0)))
     device.busy_writes["mode"] = 2
 
     async def taps() -> list[bool]:
@@ -970,7 +1014,7 @@ def test_a_setting_the_device_did_not_take_leaves_the_value_as_it_was() -> None:
 
 
 def test_a_point_is_not_read_while_it_is_being_written() -> None:
-    client, device, clock = _connected(write_retry_for=10.0)
+    client, device, clock = _connected(write_retry=Retry(Fixed(0.5), Within(10.0)))
     client.subscribe(MODE, Recorder())
     client.subscribe(TEMP, Recorder())
     device.busy_writes["mode"] = 2

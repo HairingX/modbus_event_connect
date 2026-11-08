@@ -8,7 +8,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from event_connect import Clock, WriteKind
+from event_connect import Clock, Retry, Status, StatusBoard, WriteKind
 
 from ._conversion import encode
 from ._device import Device, EncodedWrite, Outcome, WriteResult
@@ -32,35 +32,31 @@ class _Write:
 class WriteQueue:
     """The writes to one device, sent one at a time and in order.
 
-    A write the device answers `BUSY` is sent again until it is taken or `retry_for` seconds have
-    passed. A setting overtaken by a newer one before the device took it is not sent again, and
+    A write the device answers `BUSY` is sent again as `retry` says, until it is taken. A setting overtaken by a newer one before the device took it is not sent again, and
     returns the newer one's outcome; a command is always sent. A pulse writes its idle value back
     after its time.
     """
 
     def __init__(self, device: Device, *, clock: Clock, sleep: Callable[[float], Awaitable[None]],
-                 retry_for: float, retry_pause: float, answered: Callable[[bool], None],
-                 written: Callable[[Point[Any], object], None], pending: Callable[[bool], None]) -> None:
+                 retry: Retry, statuses: StatusBoard, answered: Callable[[bool], None],
+                 written: Callable[[Point[Any], object], None]) -> None:
         """Args:
-            retry_for: seconds after its first sending that a write is no longer sent again.
-            retry_pause: seconds between sendings of a write the device answered `BUSY`.
+            retry: when a write the device answered `BUSY` is sent again, counting its sendings
+                and the time since the first.
+            statuses: holds `Status.WRITE_PENDING` from the first queued write until the last one
+                has finished.
             answered: told after every sending whether the device answered it.
             written: told the point and the value of every accepted write.
-            pending: told when the first write is queued and when the last one has finished.
         """
-        if retry_for < 0 or retry_pause < 0:
-            raise ValueError("retry_for and retry_pause cannot be negative")
         self._device = device
         self._clock = clock
         self._sleep = sleep
-        self._retry_for = retry_for
-        self._retry_pause = retry_pause
+        self._retry = retry
+        self._statuses = statuses
         self._answered = answered
         self._written = written
-        self._pending = pending
         self._lock = asyncio.Lock()
         self._latest_setting: dict[str, _Write] = {}
-        self._in_flight = 0
         self._writing: Counter[str] = Counter()
         self._changes: Counter[str] = Counter()
         self._pulses: set[asyncio.Task[None]] = set()
@@ -74,17 +70,21 @@ class WriteQueue:
         keys = [point.key for point, _ in writes]
         self._begin(keys)
         try:
-            async with self._lock:
-                for point, value in writes:
-                    result = await self._until_taken(point, encode(point, value), lambda: False)
-                    assert result is not None
-                    if not result.ok:
-                        _LOGGER.warning("write sequence stopped at '%s': %s", point.key, result.outcome.name)
-                        return False
-                    self._written(point, value)
-                return True
+            with self._statuses.holding(Status.WRITE_PENDING):
+                return await self._send_sequence(writes)
         finally:
             self._end(keys)
+
+    async def _send_sequence(self, writes: Sequence[tuple[Point[Any], object]]) -> bool:
+        async with self._lock:
+            for point, value in writes:
+                result = await self._until_taken(point, encode(point, value), lambda: False)
+                assert result is not None
+                if not result.ok:
+                    _LOGGER.warning("write sequence stopped at '%s': %s", point.key, result.outcome.name)
+                    return False
+                self._written(point, value)
+            return True
 
     def cancel_pulses(self) -> None:
         for task in list(self._pulses):
@@ -111,22 +111,23 @@ class WriteQueue:
             self._latest_setting[key] = write
         self._begin([key])
         try:
-            async with self._lock:
-                if not write.superseded:
-                    try:
-                        ok = await self._send(write)
-                    except BaseException as err:
-                        for future in write.followers:
-                            if not future.done():
-                                future.set_exception(err)
-                        raise
-                    if ok is not None:
-                        for future in write.followers:
-                            if not future.done():
-                                future.set_result(ok)
-                        return ok
-            # Waited for outside the lock: the write that overtook this one needs the lock.
-            return await write.result
+            with self._statuses.holding(Status.WRITE_PENDING):
+                async with self._lock:
+                    if not write.superseded:
+                        try:
+                            ok = await self._send(write)
+                        except BaseException as err:
+                            for future in write.followers:
+                                if not future.done():
+                                    future.set_exception(err)
+                            raise
+                        if ok is not None:
+                            for future in write.followers:
+                                if not future.done():
+                                    future.set_result(ok)
+                            return ok
+                # Waited for outside the lock: the write that overtook this one needs the lock.
+                return await write.result
         finally:
             # A write overtaken while it was sent ends by itself; the newer one must not answer it.
             if not write.result.done():
@@ -151,16 +152,22 @@ class WriteQueue:
 
     async def _until_taken(self, point: Point[Any], value: EncodedWrite,
                            overtaken: Callable[[], bool]) -> WriteResult | None:
-        """Write, and send again while the device answers `BUSY`; None once `overtaken()`."""
+        """Write, and send again as `retry` says while the device answers `BUSY`; None once
+        `overtaken()`."""
         started = self._clock.monotonic()
+        sendings = 0
         while True:
             result = await self._device.write(point, value)
+            sendings += 1
             self._answered(result.outcome is not Outcome.NO_ANSWER)
+            if result.outcome is not Outcome.BUSY:
+                return result
             waited = self._clock.monotonic() - started
-            if result.outcome is not Outcome.BUSY or waited >= self._retry_for:
+            delay = self._retry.next_delay(sendings, waited)
+            if delay is None:
                 return result
             _LOGGER.debug("'%s' was not taken %.1f s after it was first sent: %s", point.key, waited, result.detail)
-            await self._sleep(self._retry_pause)
+            await self._sleep(delay)
             if overtaken():
                 return None
 
@@ -179,14 +186,8 @@ class WriteQueue:
         for key in keys:
             self._writing[key] += 1
             self._changes[key] += 1
-        self._in_flight += 1
-        if self._in_flight == 1:
-            self._pending(True)
 
     def _end(self, keys: Sequence[str]) -> None:
         for key in keys:
             self._writing[key] -= 1
             self._changes[key] += 1
-        self._in_flight -= 1
-        if self._in_flight == 0:
-            self._pending(False)

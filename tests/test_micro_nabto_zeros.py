@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from event_connect import AuthenticationError, Key, Quality, Timing
+from event_connect import NO_RETRY, AuthenticationError, Key, Quality, Timing
 from modbus_event_connect._client import Client
 from modbus_event_connect._data_type import DataType
 from modbus_event_connect._device import Identity, Outcome, ReadResult
@@ -317,7 +317,7 @@ def _select(identity: Identity) -> Model | None:
 async def test_a_client_shows_the_last_values_while_zeros_are_read_again_and_reads_them_on_time() -> None:
     clock = FakeClock()
     async with _simulated(clock) as simulated:
-        client = Client(_device(simulated, clock), _select, clock=clock)
+        client = Client(_device(simulated, clock), _select, clock=clock, write_retry=NO_RETRY)
         await client.connect()
         for point in POINTS:
             client.subscribe(point.key, lambda key, old, new: None)

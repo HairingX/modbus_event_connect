@@ -29,7 +29,7 @@ import pytest
 import pytest_asyncio
 
 from conftest import live_or_skip, live_setting
-from event_connect import DataValue, Key, Quality, Timing
+from event_connect import NO_RETRY, DataValue, Key, Quality, Timing
 from modbus_event_connect._client import Client
 from modbus_event_connect._data_type import DataType
 from modbus_event_connect._device import Outcome
@@ -97,7 +97,7 @@ async def live() -> AsyncGenerator[Live, None]:
         return await read(command)
     setattr(connection, "request", refuse_writes)
     device = MicroNabtoDevice(connection, owns_connection=True)
-    client = Client(device, LIVE_MODEL, read_only=True)
+    client = Client(device, LIVE_MODEL, read_only=True, write_retry=NO_RETRY)
     try:
         await client.connect()
     except Exception as err:
