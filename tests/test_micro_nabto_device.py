@@ -534,3 +534,8 @@ async def test_a_restarted_device_goes_unnoticed_by_the_client() -> None:
         await client.poll()
         temp = client.value(Key("temp_outside", float))
         assert client.status(Status.CONNECTED).value is True and temp is not None and temp.quality is Quality.GOOD
+
+
+def test_the_simulator_counts_nothing_no_test_reads() -> None:
+    simulated = SimulatedMicroNabtoDevice()
+    assert not hasattr(simulated, "discoveries") and not hasattr(simulated, "bad_checksums")

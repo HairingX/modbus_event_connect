@@ -10,6 +10,7 @@ DEVICE_PORT = 5570
 BROADCAST = ("255.255.255.255", DEVICE_PORT)
 
 HEADER_LENGTH = 16
+DISCOVERY_REQUEST = b"\x00\x00\x00\x01"
 DISCOVERY_REPLY = b"\x00\x80\x00\x01"
 CRYPT_PAYLOAD = 0x36
 NOTIFY_PAYLOAD = 0x34
@@ -26,9 +27,9 @@ CONNECT_STATUSES = {REFUSED_ACCESS: "access refused", BUSY: "busy, no session fr
 PONG = b"pong"
 _DEVICE_ID_AT = 19
 
-_U_CONNECT, _DATA = 0x83, 0x16
-_IPX, _CP_ID = 0x35, 0x3F
-_PING, _DATAPOINT_READ, _SETPOINT_READ, _SETPOINT_WRITE = 0x11, 0x2D, 0x2A, 0x2B
+U_CONNECT, DATA = 0x83, 0x16
+_IPX, CP_ID = 0x35, 0x3F
+PING, DATAPOINT_READ, SETPOINT_READ, SETPOINT_WRITE = 0x11, 0x2D, 0x2A, 0x2B
 _NO_SERVER_ID = bytes(4)
 
 
@@ -63,38 +64,38 @@ class DataReply:
 
 def discovery_request(device_id: str | None = None) -> bytes:
     """A discovery broadcast; only the device with `device_id` answers, or every device if None."""
-    return b"\x00\x00\x00\x01" + bytes(8) + (device_id or "*").encode("ascii") + b"\x00"
+    return DISCOVERY_REQUEST + bytes(8) + (device_id or "*").encode("ascii") + b"\x00"
 
 
 def connect_request(client_id: bytes, sequence: int, email: str) -> bytes:
     ipx = bytes([_IPX, 0x00]) + (17).to_bytes(2, "big") + bytes(12) + b"\xa0"
-    cp_id = bytes([_CP_ID, 0x00]) + (5 + len(email)).to_bytes(2, "big") + b"\x01" + email.encode("ascii")
-    return _packet(client_id, _NO_SERVER_ID, _U_CONNECT, sequence, ipx + cp_id, checksum=False)
+    cp_id = bytes([CP_ID, 0x00]) + (5 + len(email)).to_bytes(2, "big") + b"\x01" + email.encode("ascii")
+    return _packet(client_id, _NO_SERVER_ID, U_CONNECT, sequence, ipx + cp_id, checksum=False)
 
 
 def data_request(client_id: bytes, server_id: bytes, sequence: int, command: bytes) -> bytes:
     crypt = (bytes([CRYPT_PAYLOAD, 0x00]) + (6 + len(command) + 3).to_bytes(2, "big")
              + b"\x00\x0a" + command + b"\x02")
-    return _packet(client_id, server_id, _DATA, sequence, crypt, checksum=True)
+    return _packet(client_id, server_id, DATA, sequence, crypt, checksum=True)
 
 
 def ping() -> bytes:
-    return _command(_PING) + b"ping"
+    return _command(PING) + b"ping"
 
 
 def datapoint_read(items: Sequence[tuple[int, int]]) -> bytes:
     """Reads (object, address) datapoints."""
-    return _list(_DATAPOINT_READ, [bytes([obj]) + address.to_bytes(4, "big") for obj, address in items])
+    return _list(DATAPOINT_READ, [bytes([obj]) + address.to_bytes(4, "big") for obj, address in items])
 
 
 def setpoint_read(items: Sequence[tuple[int, int]]) -> bytes:
     """Reads (object, address) setpoints."""
-    return _list(_SETPOINT_READ, [bytes([obj]) + address.to_bytes(2, "big") for obj, address in items])
+    return _list(SETPOINT_READ, [bytes([obj]) + address.to_bytes(2, "big") for obj, address in items])
 
 
 def setpoint_write(items: Sequence[tuple[int, int, int]]) -> bytes:
     """Writes (object, address, register) setpoints."""
-    return _list(_SETPOINT_WRITE, [bytes([obj]) + address.to_bytes(4, "big") + value.to_bytes(2, "big")
+    return _list(SETPOINT_WRITE, [bytes([obj]) + address.to_bytes(4, "big") + value.to_bytes(2, "big")
                                    for obj, address, value in items])
 
 
@@ -147,15 +148,15 @@ def reply(datagram: bytes, client_id: bytes) -> ConnectReply | DataReply | Recei
         return None
     kind = datagram[8]
     sequence = int.from_bytes(datagram[12:14], "big")
-    if kind == _U_CONNECT:
+    if kind == U_CONNECT:
         if len(datagram) < 28:
             return None
         return ConnectReply(sequence, datagram[20:24] == ACCEPTED, datagram[24:28],
                             int.from_bytes(datagram[20:24], "big"))
-    if (kind == _DATA and len(datagram) >= 24 and datagram[16] == NOTIFY_PAYLOAD
+    if (kind == DATA and len(datagram) >= 24 and datagram[16] == NOTIFY_PAYLOAD
             and int.from_bytes(datagram[20:24], "big") == NOTIFY_MICRO_ACK):
         return Received(sequence)
-    if kind == _DATA and len(datagram) > 24 and datagram[16] == CRYPT_PAYLOAD:
+    if kind == DATA and len(datagram) > 24 and datagram[16] == CRYPT_PAYLOAD:
         if (int.from_bytes(datagram[18:20], "big") != len(datagram) - HEADER_LENGTH
                 or int.from_bytes(datagram[-2:], "big") != sum(datagram[:-2]) & 0xFFFF):
             return None

@@ -582,9 +582,7 @@ class Client:
         now = self._clock.monotonic()
         interval = self._require_scheduler().rate_interval(PollRate.SCAN)
         for scope in [scope for scope, check in self._checks.items() if check.due <= now]:
-            check = self._checks.get(scope)
-            if check is None:
-                continue                                   # a scan of the whole unit replaced it
+            check = self._checks[scope]
             check.due = now + interval if interval is not None else math.inf
             resolved = self._require_model()
             points = [resolved.points[key] for key in check.read]
@@ -887,11 +885,9 @@ def _scopes(resolved: ResolvedModel) -> list[_Scope]:
 
 
 def _instance_scan(model: Model, label: str) -> InstanceScanStep:
-    """The scan of the repeated section labelled `label`."""
-    for section in model.sections:
-        if isinstance(section, RepeatedSection) and section.label == label and section.scan is not None:
-            return section.scan
-    raise KeyError(f"no repeated section labelled {label!r} has a scan")
+    """The scan of the repeated section labelled `label`, which must have one."""
+    return next(section.scan for section in model.sections
+                if isinstance(section, RepeatedSection) and section.label == label and section.scan is not None)
 
 
 def _union(marks: Iterable[Mapping[str, str]]) -> dict[str, str]:

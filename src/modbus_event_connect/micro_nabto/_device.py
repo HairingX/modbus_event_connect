@@ -228,7 +228,7 @@ class MicroNabtoDevice:
             access = _read_side(point)
             if point.registers > self.max_registers:
                 raise ValueError(f"point {point.key!r} spans more registers than max_registers")
-            spaces.setdefault((type(access), _obj(access)), []).append(point)
+            spaces.setdefault((type(access), access.obj), []).append(point)
 
         batches = [batch for (space, obj), members in spaces.items() for batch in self._batches(space, obj, members)]
         self._this_read = [len(batch.items) for batch in batches]
@@ -537,20 +537,14 @@ def _requests(sizes: Sequence[int]) -> str:
 
 
 def _library() -> str:
-    try:
-        return f"modbus_event_connect {metadata.version('modbus_event_connect')}"
-    except metadata.PackageNotFoundError:
-        return "modbus_event_connect, version unknown"
+    return f"modbus_event_connect {metadata.version('modbus_event_connect')}"
 
 
-def _read_side(point: Point[Any]) -> Access:
+def _read_side(point: Point[Any]) -> DatapointRegister | SetpointRegister:
     access = point.read
     if access is None:
         raise TypeError(f"point {point.key!r} has no read side")
-    if type(access) not in _READS:
+    if not isinstance(access, DatapointRegister | SetpointRegister):
         raise TypeError(f"point {point.key!r}: the read side is {type(access).__name__}, not a micro_nabto space")
     return access
 
-
-def _obj(access: Access) -> int:
-    return access.obj if isinstance(access, DatapointRegister | SetpointRegister) else 0
