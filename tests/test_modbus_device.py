@@ -1,10 +1,12 @@
 """The Modbus protocol layer: `ModbusDevice` against simulated units behind a simulated gateway,
 with a fake clock and a `sleep` that does not wait."""
 import asyncio
+from collections.abc import Callable
 import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+import pymodbus.client
 import pytest
 from pymodbus.exceptions import ModbusIOException
 
@@ -902,7 +904,7 @@ def test_tcp_owns_a_pymodbus_connection_and_passes_it_the_link_settings() -> Non
     assert (connection._timeout, connection._frame_gap, connection._clock, connection._sleep) == (1.5, 0.02, clock, sleeps)
     assert (device.unit_id, device._clock, device._sleep, device.reconnect) == (4, clock, sleeps, NEVER_AGAIN)
     assert device.use(MODEL) is profile
-    assert connection.client is None                               # nothing opened yet
+    assert connection._client is None                              # nothing opened yet
 
 
 # =========================================================================== diagnostics
@@ -943,6 +945,13 @@ async def test_diagnostics_count_what_happened_and_hold_no_host() -> None:
     assert isinstance(latency, float) and abs(latency - 0.05) < 1e-9
 
 
+def making(client: object) -> Callable[..., object]:
+    """Stands in for pymodbus's client class: whatever it is asked to make, it gives `client`."""
+    def make(*args: Any, **kwargs: Any) -> object:
+        return client
+    return make
+
+
 class LeakyClient:
     """A pymodbus client whose every failure names the host, as real ones do."""
     connected = True
@@ -960,11 +969,10 @@ class LeakyClient:
         raise TimeoutError(f"no reply from {HOST}:1502")
 
 
-async def test_nothing_a_device_reports_names_its_host() -> None:
+async def test_nothing_a_device_reports_names_its_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(pymodbus.client, "AsyncModbusTcpClient", making(LeakyClient()))
     device = used(ModbusDevice.tcp(HOST, 1502, 1, reconnect=NEVER_AGAIN, profiles=[modbus(MODEL)], clock=FakeClock(),
-                                         sleep=Sleeps()))
-    assert isinstance(device._connection, ModbusTcpConnection)
-    device._connection._client = LeakyClient()                      # no network
+                                   sleep=Sleeps()))
     raw = (await device.read([u16("a", HoldingRegister(0))]))["a"]
     write = await device.write(setting(HoldingRegister(0)), EncodedWrite((1,)))
     assert raw.outcome is Outcome.NO_ANSWER and write.outcome is Outcome.NO_ANSWER
@@ -991,13 +999,13 @@ class SilentClient:
         raise ModbusIOException("No response received after 0 retries, continue with next request")
 
 
-async def test_a_silent_device_is_reconnected_to_only_until_the_backoff_and_once_per_probe() -> None:
+async def test_a_silent_device_is_reconnected_to_only_until_the_breaker_opens_and_once_per_probe(
+        monkeypatch: pytest.MonkeyPatch) -> None:
     clock = FakeClock()
-    device = used(ModbusDevice.tcp(HOST, 502, 1, reconnect=CircuitBreaker(after=3, retry=Retry(Fixed(60.0))),
-                                         profiles=[modbus(MODEL)], clock=clock, sleep=Sleeps()))
-    assert isinstance(device._connection, ModbusTcpConnection)
     client = SilentClient()
-    device._connection._client = client                             # no network
+    monkeypatch.setattr(pymodbus.client, "AsyncModbusTcpClient", making(client))
+    device = used(ModbusDevice.tcp(HOST, 502, 1, reconnect=CircuitBreaker(after=3, retry=Retry(Fixed(60.0))),
+                                   profiles=[modbus(MODEL)], clock=clock, sleep=Sleeps()))
     for _ in range(10):
         await device.read([u16("a", HoldingRegister(0))])
     assert client.connects == 3
