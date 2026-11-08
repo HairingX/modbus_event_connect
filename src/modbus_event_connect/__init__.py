@@ -41,6 +41,7 @@ from event_connect import (
     Wait,
     Within,
     Write,
+    WriteRange,
     WriteKind,
 )
 
@@ -107,5 +108,6 @@ __all__ = [
     "Within",
     "WordOrder",
     "Write",
+    "WriteRange",
     "WriteKind",
 ]

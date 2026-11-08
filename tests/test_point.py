@@ -785,6 +785,13 @@ def test_a_points_write_range_is_its_limits_and_else_what_its_registers_carry(
     assert found.step == (pytest.approx(expected.step) if expected.step is not None else None)
 
 
+@pytest.mark.parametrize("scale", [0.01, 0.1, 0.5])
+def test_a_scaled_points_write_range_steps_by_its_scale_exactly(scale: float) -> None:
+    point = _setting(Key("t", float), data_type=DataType.INT16, scale=scale, valid_raw=range(-0x8000, 0x7FFF))
+    found = point.write_range()
+    assert found is not None and found.step == scale
+
+
 @pytest.mark.parametrize("point", [
     Point(Key("r", int), read=InputRegister(1)),
     _setting(Key("s", Mode)),

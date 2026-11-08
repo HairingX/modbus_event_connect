@@ -151,6 +151,9 @@ class Point[T](BasePoint[T]):
             step = limits.step
         else:
             step = abs(self._value_of(lowest + 1) - self._value_of(lowest))
+            precision = self.effective_precision
+            if precision is not None:
+                step = round(step, precision)  # the difference of two rounded reads carries float noise
         return WriteRange(low, high, step)
 
     def _value_of(self, raw: int) -> float:
