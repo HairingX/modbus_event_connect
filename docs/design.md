@@ -729,7 +729,11 @@ CTS 402 — which other devices may not share.
 - **Every answer is checked** against uNabto's checksum (a 16-bit sum) and padding (to an
   even length); a damaged one counts as lost. Ahead of every answer the CTS 402 sends uNabto's
   NOTIFY_MICRO_ACK, "the Micro has received the request, but the answer isn't ready yet"; after
-  it the request is not sent again, and its answer is waited for up to `answer_wait`.
+  it the request is not sent again, and its answer is waited for up to `answer_wait`: 5 s unless
+  the model's `MicroNabtoOptions(answer_wait=...)` or whoever opens the connection says otherwise.
+  A Nilan CTS 602's gateway answered 21,000 reads within 245 ms, so a model can wait far less.
+- **Each register is asked for once.** Points that share a register share it in the request,
+  and each gets its value from the one answer.
 - **One unknown address refuses a whole read** on the CTS 402, answered with a count of 0.
   A refused read is halved until the refusal is pinned down, as Modbus 0x02 is; any count
   that does not match is treated the same way, so a device that answers differently is not

@@ -129,6 +129,31 @@ async def test_datapoints_and_setpoints_are_read_with_one_request_each() -> None
         assert simulated.received(SETPOINT_READ) == [Command(SETPOINT_READ, ((0, 30), (0, 31)))]
 
 
+@pytest.mark.parametrize("seconds", [0.0, -1.0])
+def test_a_models_answer_wait_must_be_positive(seconds: float) -> None:
+    with pytest.raises(ValueError):
+        MicroNabtoOptions(answer_wait=seconds)
+
+
+def test_a_device_without_a_model_waits_as_its_connection_says() -> None:
+    connection = MicroNabtoConnection(EMAIL, host="device.invalid", reconnect=None)
+    device = MicroNabtoDevice(connection)
+    device.configure(MicroNabtoOptions(answer_wait=2.0))
+    assert connection.answer_wait == 2.0
+    device.configure(None)
+    assert connection.answer_wait == 5.0
+
+
+async def test_points_on_the_same_register_ask_for_it_once_and_each_get_its_value() -> None:
+    async with _simulated() as simulated:
+        device = await _connected(simulated)
+        twin = Point(Key("twin_of_2", int), read=DatapointRegister(2), data_type=DataType.UINT16)
+        answers = await device.read([_dp(1), _dp(2), twin, _dp(3)])
+        assert {k: a.registers for k, a in answers.items()} == {
+            "dp_0_1": (1,), "dp_0_2": (2,), "twin_of_2": (2,), "dp_0_3": (3,)}
+        assert simulated.received(DATAPOINT_READ) == [Command(DATAPOINT_READ, ((0, 1), (0, 2), (0, 3)))]
+
+
 async def test_an_address_the_device_lacks_is_missing_and_the_rest_are_still_read() -> None:
     async with _simulated() as simulated:
         device = await _connected(simulated)

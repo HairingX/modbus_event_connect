@@ -215,6 +215,7 @@ What a model states is about the device itself:
 | `ModbusOptions(busy=Retry(...))` | how a read answered "busy" (0x06) is tried again | `BUSY`: 4 times more, after 0.2 s, doubling |
 | `MicroNabtoOptions(zeros=RereadZeros(...))` | how an answer of only zeros, where values were, is read again before the zeros are taken | `RereadZeros()`: at once, after 0.5 s, then every second; in two halves at 7.5 s |
 | `MicroNabtoOptions(zeros=TAKE_ZEROS)` | zeros are taken as they come | |
+| `MicroNabtoOptions(answer_wait=...)` | how long an answer is waited for once the device has said it has the request | 5 s, never shorter than the connection's timeout |
 
 ```python
 from dataclasses import dataclass
