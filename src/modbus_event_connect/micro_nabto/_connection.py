@@ -78,6 +78,10 @@ async def discover(device_id: str | None = None, *, timeout: float = 2.0, resend
     return list(found.values())
 
 
+ANSWER_WAIT = 5.0
+"""Seconds an answer is waited for once the device has said it has the request, unless the
+connection or the model says otherwise."""
+
 LATER_ANSWER_WAIT = 5.0
 """Seconds a read sent again, answered with what its reader refuses, is kept open for a later
 answer, unless the connection or the model says otherwise."""
@@ -125,7 +129,7 @@ class MicroNabtoConnection:
 
     def __init__(self, email: str, *, host: str | None = None, device_id: str | None = None,
                  reconnect: Retry | None, port: int = wire.DEVICE_PORT, timeout: float = 1.0,
-                 retries: int = 2, answer_wait: float = 5.0, session_idle: float = 12.0,
+                 retries: int = 2, answer_wait: float | None = None, session_idle: float = 12.0,
                  later_answer_wait: float | None = None,
                  discovery_target: tuple[str, int] = wire.BROADCAST, clock: Clock | None = None) -> None:
         """Args:
@@ -135,14 +139,15 @@ class MicroNabtoConnection:
                 before each try. None tries one again only on `open()`.
             timeout: seconds to wait for each answer.
             answer_wait: seconds to wait for an answer once the device has said it has the
-                request; it is not sent again meanwhile.
+                request; it is not sent again meanwhile. None leaves it to the model, and to
+                `ANSWER_WAIT` without one; never shorter than `timeout`.
             later_answer_wait: seconds a request sent again, answered with what its sender
                 refuses, is kept open for a later answer; None leaves it to the model, and to
                 `LATER_ANSWER_WAIT` without one.
         """
         if host is None and device_id is None:
             raise ValueError("a connection needs a host, a device_id, or both")
-        if timeout <= 0 or session_idle <= 0 or retries < 0 or answer_wait < timeout:
+        if timeout <= 0 or session_idle <= 0 or retries < 0 or (answer_wait is not None and answer_wait < timeout):
             raise ValueError("timeout and session_idle must be positive; retries cannot be "
                              "negative; answer_wait cannot be shorter than timeout")
         if later_answer_wait is not None and later_answer_wait < 0:
@@ -152,7 +157,8 @@ class MicroNabtoConnection:
         self._address: tuple[str, int] | None = (host, port) if host is not None else None
         self._timeout = timeout
         self._retries = retries
-        self._answer_wait = answer_wait
+        self._answer_wait_given = answer_wait
+        self._answer_wait_of_model: float | None = None
         self._reconnect = reconnect
         self._session_idle = session_idle
         self._discovery_target = discovery_target
@@ -221,6 +227,21 @@ class MicroNabtoConnection:
         self._later_answer_wait_of_model = seconds
 
     @property
+    def answer_wait(self) -> float:
+        """Seconds an answer is waited for once the device has said it has the request: as the
+        connection was given it, else as the model says, else `ANSWER_WAIT`; never shorter than
+        the timeout."""
+        if self._answer_wait_given is not None:
+            return self._answer_wait_given
+        if self._answer_wait_of_model is not None:
+            return max(self._answer_wait_of_model, self._timeout)
+        return max(ANSWER_WAIT, self._timeout)
+
+    def use_model_answer_wait(self, seconds: float | None) -> None:
+        """Take the model's `answer_wait`, which one given to the connection overrides."""
+        self._answer_wait_of_model = seconds
+
+    @property
     def reconnect(self) -> Retry | None:
         """When a handshake is tried again after one failed; None only on `open()`."""
         return self._reconnect
@@ -283,6 +304,7 @@ class MicroNabtoConnection:
             "rediscoveries": self._rediscoveries,
             "average_latency": self._latency_total / self._answered if self._answered else None,
             "max_latency": self._max_latency if self._answered else None,
+            "answer_wait": self.answer_wait,
             "later_answer_wait": self.later_answer_wait,
             "later_answer_waits": self._later_answer_waits,
             "later_answers_taken": self._later_answers_taken,
@@ -455,7 +477,7 @@ class MicroNabtoConnection:
                 if not future.done() and received.is_set():
                     # uNabto: the device has the request and answers when it is ready; sending it
                     # again would only be acknowledged again.
-                    await asyncio.wait({future}, timeout=self._answer_wait - self._timeout)
+                    await asyncio.wait({future}, timeout=self.answer_wait - self._timeout)
                     if not future.done():
                         self._exchanged(sequence, attempt + 1, True, started, None)
                         return None

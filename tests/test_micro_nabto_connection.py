@@ -167,6 +167,32 @@ async def test_a_new_session_counts_its_requests_and_its_age_afresh() -> None:
         assert exchange is not None and (exchange.session_request, exchange.session_age) == (2, 0.0)
 
 
+def test_the_wait_for_an_acknowledged_answer_is_the_connections_then_the_models_then_five_seconds() -> None:
+    connection = MicroNabtoConnection(EMAIL, host="device.invalid", reconnect=None)
+    assert connection.answer_wait == 5.0
+    connection.use_model_answer_wait(2.0)
+    assert connection.answer_wait == 2.0 and connection.diagnostics()["answer_wait"] == 2.0
+    connection.use_model_answer_wait(0.5)
+    assert connection.answer_wait == 1.0                       # never shorter than the timeout
+    given = MicroNabtoConnection(EMAIL, host="device.invalid", reconnect=None, answer_wait=7.0)
+    given.use_model_answer_wait(2.0)
+    assert given.answer_wait == 7.0
+    with pytest.raises(ValueError):
+        MicroNabtoConnection(EMAIL, host="device.invalid", reconnect=None, answer_wait=0.5)
+
+
+async def test_an_acknowledged_request_is_given_up_after_the_models_answer_wait() -> None:
+    async with SimulatedMicroNabtoDevice(emails=frozenset({EMAIL})) as device:
+        connection = _connection(device)
+        assert await connection.open() is not None
+        connection.use_model_answer_wait(0.2)
+        device.answer_delay = 2.0
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        answer = await connection.request(wire.datapoint_read([(0, 1)]))
+        assert answer is None and loop.time() - started < 1.5
+
+
 def test_the_wait_for_a_later_answer_is_the_connections_then_the_models_then_five_seconds() -> None:
     connection = MicroNabtoConnection(EMAIL, host="device.invalid", reconnect=None)
     assert connection.later_answer_wait == 5.0
