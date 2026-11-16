@@ -66,8 +66,10 @@ class SimulatedMicroNabtoDevice:
         """Send read answers that stop before their last value."""
         self.write_statuses: list[int | None] = []
         """Statuses to answer the next writes with, in order - None for an answer without one; a
-        write answered with anything but 0 is not applied. Once empty, every write is answered 0
-        and applied."""
+        write answered with a status outside `write_taken` is not applied. Once empty, every write
+        is answered 0 and applied."""
+        self.write_taken: frozenset[int] = frozenset({0})
+        """The statuses a write is applied with."""
         self.answer_delay = 0.0
         """Seconds between the receipt of a request and its answer."""
         self.acknowledge = True
@@ -263,7 +265,7 @@ class SimulatedMicroNabtoDevice:
             status = self.write_statuses.pop(0) if self.write_statuses else 0
             if status is None:
                 return b""
-            if status == 0:
+            if status in self.write_taken:
                 for obj, address, value in writes:
                     if (obj, address) in self.setpoint_registers:
                         self.setpoint_registers[(obj, address)] = value

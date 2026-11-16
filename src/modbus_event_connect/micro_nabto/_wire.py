@@ -174,8 +174,7 @@ def identity(payload: bytes) -> Identity | None:
 
 
 def write_status(payload: bytes) -> int | None:
-    """The status a setpoint write's answer starts with - 0 when the device took the write - or
-    None for an empty answer."""
+    """The status a setpoint write's answer starts with, or None for an empty answer."""
     return payload[0] if payload else None
 
 

@@ -738,10 +738,13 @@ CTS 402 — which other devices may not share.
   A refused read is halved until the refusal is pinned down, as Modbus 0x02 is; any count
   that does not match is treated the same way, so a device that answers differently is not
   misread.
-- **A setpoint write waits for its answer**, which starts with a status: 0 when the device took
-  the write. A CTS 402 answered 0x63 and 0x85 to writes it did not take - they are not uNabto's
-  codes, which it sends as exceptions - and took the same write on a later try; so a write
-  answered otherwise is `BUSY`, naming the status, and the client may send it again.
+- **A setpoint write waits for its answer**, which starts with a status. Which statuses mean
+  the device took the write is its model's, `MicroNabtoOptions(write_taken=...)`, and 0 unless
+  it says otherwise: a CTS 402 answered 0 to writes it took, and a Genvex Optima 270 answered
+  0x01 to every write, each of which it took. A CTS 402 answered 0x63 and 0x85 to writes it did
+  not take - they are not uNabto's codes, which it sends as exceptions - and took the same write
+  on a later try; so a write answered otherwise is `BUSY`, naming the status, and the client may
+  send it again.
 
 ---
 
