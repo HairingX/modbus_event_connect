@@ -307,6 +307,28 @@ async def test_a_write_the_device_did_not_take_is_busy_naming_its_status_and_sen
         assert simulated.setpoint_registers[(0, 30)] == 130
 
 
+async def test_a_write_answered_with_a_status_its_model_names_as_taken_is_ok() -> None:
+    """A Genvex Optima 270 answered 0x01 to every write, and took each of them."""
+    async with _simulated() as simulated:
+        device = await _connected(simulated)
+        device.configure(MicroNabtoOptions(write_taken=frozenset({0, 1})))
+        simulated.write_taken = frozenset({0, 1})
+        simulated.write_statuses = [1]
+        result = await device.write(_sp(30), EncodedWrite((5,)))
+        assert result.outcome is Outcome.OK
+        assert len(simulated.received(SETPOINT_WRITE)) == 1
+        assert simulated.setpoint_registers[(0, 30)] == 5
+
+
+async def test_a_status_another_model_names_as_taken_is_busy() -> None:
+    async with _simulated() as simulated:
+        device = await _connected(simulated)
+        simulated.write_statuses = [1]
+        result = await device.write(_sp(30), EncodedWrite((5,)))
+        assert (result.outcome, result.exception_code) == (Outcome.BUSY, 1)
+        assert simulated.setpoint_registers[(0, 30)] == 130
+
+
 async def test_a_write_answered_without_a_status_is_an_error() -> None:
     async with _simulated() as simulated:
         device = await _connected(simulated)

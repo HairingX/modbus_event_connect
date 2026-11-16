@@ -88,6 +88,8 @@ class MicroNabtoOptions(ProtocolOptions):
     zeros: RereadZeros | None = None
     """How an answer of only zeros, where values were, is read again; None leaves `RereadZeros()`.
     One given to the device overrides it."""
+    write_taken: frozenset[int] = frozenset({0})
+    """The statuses the device answers a setpoint write it took with."""
 
     def __post_init__(self) -> None:
         if self.max_registers < 1:
@@ -249,9 +251,9 @@ class MicroNabtoDevice:
         return result
 
     async def write(self, point: Point[Any], value: EncodedWrite) -> WriteResult:
-        """Write once and wait for the device's answer: OK when it took the write, BUSY when it
-        answered another status - a Nilan CTS 402 answered 0x63 and 0x85 to writes it took later -
-        and ERROR for an answer without a status."""
+        """Write once and wait for the device's answer: OK when it answered a status of its model's
+        `write_taken`, BUSY when it answered another - a Nilan CTS 402 answered 0x63 and 0x85 to
+        writes it took later - and ERROR for an answer without a status."""
         access = point.write
         if not isinstance(access, SetpointRegister):
             raise TypeError(f"point {point.key!r}: only a SetpointRegister can be written over micro_nabto")
@@ -266,7 +268,7 @@ class MicroNabtoDevice:
             return self._written(WriteResult(Outcome.NO_ANSWER, detail="no answer from the device"))
         if status is None:
             return self._written(WriteResult(Outcome.ERROR, detail="an answer without a status"))
-        if status == 0:
+        if status in self._configured().write_taken:
             return self._written(WriteResult(Outcome.OK))
         return self._written(WriteResult(Outcome.BUSY, exception_code=status,
                                          detail=f"the device answered with status 0x{status:02x}"))
