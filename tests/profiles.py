@@ -24,11 +24,11 @@ def modbus(model: Model, *, numbering: RegisterNumbering | None = None, max_regi
                          bit_write=bit_write, busy=busy)
 
 
-def micro_nabto(model: Model, *, max_registers: int = 64, later_answer_wait: float = 5.0,
-                zeros: RereadZeros = ZEROS) -> MicroNabtoProfile:
+def micro_nabto(model: Model, *, max_registers: int = 64, answer_wait: float = 5.0,
+                later_answer_wait: float = 5.0, zeros: RereadZeros = ZEROS) -> MicroNabtoProfile:
     """`model` over micro_nabto."""
-    return MicroNabtoProfile(model=model, max_registers=max_registers, later_answer_wait=later_answer_wait,
-                             zeros=zeros)
+    return MicroNabtoProfile(model=model, max_registers=max_registers, answer_wait=answer_wait,
+                             later_answer_wait=later_answer_wait, zeros=zeros)
 
 
 def bare_model(name: str = "Bare") -> Model:

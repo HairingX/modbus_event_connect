@@ -168,6 +168,23 @@ async def test_a_new_session_counts_its_requests_and_its_age_afresh() -> None:
         assert exchange is not None and (exchange.session_request, exchange.session_age) == (2, 0.0)
 
 
+def test_a_connection_waits_no_shorter_for_an_acknowledged_answer_than_its_timeout() -> None:
+    with pytest.raises(ValueError):
+        MicroNabtoConnection(EMAIL, host="device.invalid", reconnect=HANDSHAKE_NEVER_AGAIN, timeout=1.0,
+                             answer_wait=0.5)
+
+
+async def test_an_acknowledged_request_is_given_up_after_the_requests_answer_wait() -> None:
+    async with _device() as device:
+        connection = _connection(device)
+        assert await connection.open() is not None
+        device.answer_delay = 2.0
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        answer = await connection.request(wire.datapoint_read([(0, 1)]), answer_wait=0.2)
+        assert answer is None and loop.time() - started < 1.5
+
+
 async def test_diagnostics_give_the_longest_answer_too() -> None:
     async with _device() as device:
         connection = _connection(device)

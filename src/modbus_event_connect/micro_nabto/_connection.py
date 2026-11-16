@@ -141,6 +141,9 @@ class MicroNabtoConnection:
         self._timeout = timeout
         self._retries = retries
         self._answer_wait = answer_wait
+        self._wait_once_held = answer_wait
+        """How long an acknowledged request is waited for: what the latest request asked for, so
+        that a session established anew for it waits as long."""
         self._reconnect = reconnect
         self._session_idle = session_idle
         self._discovery_target = discovery_target
@@ -223,16 +226,20 @@ class MicroNabtoConnection:
             self._transport = None
 
     async def request(self, command: bytes, *, accept: Callable[[bytes], bool] | None = None,
-                      later_answer_wait: float = 0.0) -> bytes | None:
+                      answer_wait: float | None = None, later_answer_wait: float = 0.0) -> bytes | None:
         """Send `command` and return the device's answer, or None if it gave none.
 
         Args:
+            answer_wait: seconds to wait for an answer once the device has said it has the
+                request, never shorter than the timeout, for this request and any that follow
+                until one asks otherwise; None waits the connection's.
             accept: whether an answer is one to take. An answer it refuses, to a request sent more
                 than once, is set aside while a later answer to the same request is waited for, up
                 to `later_answer_wait` seconds; that one is taken if `accept` takes it, and the
                 first otherwise.
         """
         async with self._lock:
+            self._wait_once_held = self._answer_wait if answer_wait is None else max(answer_wait, self._timeout)
             if not await self._ready():
                 return None
             answer = await self._data(command, accept, later_answer_wait)
@@ -439,7 +446,7 @@ class MicroNabtoConnection:
                 if not future.done() and received.is_set():
                     # uNabto: the device has the request and answers when it is ready; sending it
                     # again would only be acknowledged again.
-                    await asyncio.wait({future}, timeout=self._answer_wait - self._timeout)
+                    await asyncio.wait({future}, timeout=self._wait_once_held - self._timeout)
                     if not future.done():
                         self._exchanged(sequence, attempt + 1, True, started, None)
                         return None

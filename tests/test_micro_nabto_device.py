@@ -65,7 +65,8 @@ def _device(simulated: SimulatedMicroNabtoDevice, *, clock: FakeClock | None = N
     host, port = simulated.address
     device = MicroNabtoDevice(MicroNabtoConnection(email, host=host, port=port, timeout=0.05, retries=1,
                                                    answer_wait=0.5, clock=clock, reconnect=reconnect),
-                              profiles=[micro_nabto(BARE, later_answer_wait=0.2), micro_nabto(CTS, later_answer_wait=0.2)],
+                              profiles=[micro_nabto(BARE, answer_wait=0.5, later_answer_wait=0.2),
+                                        micro_nabto(CTS, answer_wait=0.5, later_answer_wait=0.2)],
                               owns_connection=True)
     device.use(BARE)
     return device
@@ -151,6 +152,47 @@ async def test_datapoints_and_setpoints_are_read_with_one_request_each() -> None
             "dp_0_1": (1,), "dp_0_2": (2,), "dp_0_3": (3,), "sp_30": (130,), "sp_31": (131,)}
         assert simulated.received(DATAPOINT_READ) == [Command(DATAPOINT_READ, ((0, 1), (0, 2), (0, 3)))]
         assert simulated.received(SETPOINT_READ) == [Command(SETPOINT_READ, ((0, 30), (0, 31)))]
+
+
+@pytest.mark.parametrize("seconds", [0.0, -1.0])
+def test_a_profiles_answer_wait_must_be_positive(seconds: float) -> None:
+    with pytest.raises(ValueError):
+        micro_nabto(BARE, answer_wait=seconds)
+
+
+def test_a_device_waits_as_its_profile_says_and_before_a_model_as_long_as_any() -> None:
+    connection = MicroNabtoConnection(EMAIL, host="device.invalid", reconnect=HANDSHAKE_NEVER_AGAIN)
+    device = MicroNabtoDevice(connection, profiles=[micro_nabto(BARE, answer_wait=2.0),
+                                                    micro_nabto(CTS, answer_wait=3.0)])
+    assert device.answer_wait == 3.0
+    device.use(BARE)
+    assert device.answer_wait == 2.0 and device.diagnostics()["answer_wait"] == 2.0
+
+
+async def test_a_read_waits_for_an_acknowledged_answer_as_long_as_the_profile_says() -> None:
+    async with _simulated() as simulated:
+        host, port = simulated.address
+        connection = MicroNabtoConnection(EMAIL, host=host, port=port, timeout=0.05, retries=1, answer_wait=5.0,
+                                          reconnect=HANDSHAKE_NEVER_AGAIN)
+        device = MicroNabtoDevice(connection, profiles=[micro_nabto(BARE, answer_wait=0.2)], owns_connection=True)
+        device.use(BARE)
+        assert await device.connect() is not None
+        simulated.answer_delay = 2.0
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        answers = await device.read([_dp(1)])
+        assert answers["dp_0_1"].outcome is not Outcome.OK and loop.time() - started < 1.5
+        await device.disconnect()
+
+
+async def test_points_on_the_same_register_ask_for_it_once_and_each_get_its_value() -> None:
+    async with _simulated() as simulated:
+        device = await _connected(simulated)
+        twin = Point(Key("twin_of_2", int), read=DatapointRegister(2), data_type=DataType.UINT16)
+        answers = await device.read([_dp(1), _dp(2), twin, _dp(3)])
+        assert {k: a.registers for k, a in answers.items()} == {
+            "dp_0_1": (1,), "dp_0_2": (2,), "twin_of_2": (2,), "dp_0_3": (3,)}
+        assert simulated.received(DATAPOINT_READ) == [Command(DATAPOINT_READ, ((0, 1), (0, 2), (0, 3)))]
 
 
 async def test_an_address_the_device_lacks_is_missing_and_the_rest_are_still_read() -> None:

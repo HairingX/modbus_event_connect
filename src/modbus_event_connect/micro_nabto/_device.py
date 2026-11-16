@@ -78,6 +78,9 @@ class MicroNabtoProfile(Profile):
     later_answer_wait: float
     """Seconds a read sent again and answered with only zeros, where values were, is kept open
     for a later answer."""
+    answer_wait: float
+    """Seconds an answer is waited for once the device has said it has the request; never
+    shorter than the connection's timeout."""
     zeros: RereadZeros
     """How an answer of only zeros, where values were, is read again before the zeros are taken."""
 
@@ -86,6 +89,8 @@ class MicroNabtoProfile(Profile):
             raise ValueError(f"max_registers must be 1-{MAX_REGISTERS_PER_READ}, got {self.max_registers}")
         if not self.later_answer_wait >= 0:
             raise ValueError(f"later_answer_wait cannot be negative, got {self.later_answer_wait}")
+        if not self.answer_wait > 0:
+            raise ValueError(f"answer_wait must be positive, got {self.answer_wait}")
 
     def problems(self, point: Point[Any]) -> list[str]:
         """What is wrong with `point` over micro_nabto: a side outside its two spaces or past their
@@ -198,6 +203,14 @@ class MicroNabtoDevice:
         return max(profile.later_answer_wait for profile in self._profiles)
 
     @property
+    def answer_wait(self) -> float:
+        """Seconds an answer is waited for once the device has said it has the request: the chosen
+        profile's, and before one is chosen, the longest of any profile."""
+        if self._profile is not None:
+            return self._profile.answer_wait
+        return max(profile.answer_wait for profile in self._profiles)
+
+    @property
     def zeros(self) -> RereadZeros:
         """How an answer of only zeros, where values were, is read again: the chosen profile's, and
         before one is chosen, that of the profile that takes the zeros latest."""
@@ -270,6 +283,7 @@ class MicroNabtoDevice:
             "outcomes": {outcome.name: self._outcomes[outcome] for outcome in Outcome},
             "isolated_reads": self._isolated,
             "answers_of_only_zeros": self._only_zeros,
+            "answer_wait": self.answer_wait,
             "later_answer_wait": self.later_answer_wait,
             "zeros_taken_after": self.zeros.within,
             "zero_rereads": self._zero_rereads,
@@ -306,12 +320,18 @@ class MicroNabtoDevice:
 
     async def _request(self, space: type[Access], items: Sequence[tuple[int, int]],
                        accept: Callable[[bytes], bool] | None = None) -> tuple[bool, list[int] | None]:
-        """Read `items` with one request: whether the device answered, and the values it answered
-        with, if the answer could be read. The request is kept for a later warning."""
+        """Read `items` with one request, each register once: whether the device answered, and the
+        values it answered with for every item, if the answer could be read. The request is kept
+        for a later warning."""
         build, parse = _READS[space]
-        answer = await self._connection.request(build(items), accept=accept,
+        asked = list(dict.fromkeys(items))
+        answer = await self._connection.request(build(asked), accept=accept, answer_wait=self.answer_wait,
                                                 later_answer_wait=self.later_answer_wait)
-        values = parse(answer) if answer is not None else None
+        found = parse(answer) if answer is not None else None
+        values = found
+        if found is not None and len(found) == len(asked) and len(asked) != len(items):
+            by_item = dict(zip(asked, found))
+            values = [by_item[item] for item in items]
         registers = [(space, obj, address) for obj, address in items]
         if answer is None:
             what = "no answer"
@@ -321,12 +341,12 @@ class MicroNabtoDevice:
             what = "refused"
         elif self._zeros_where_values_were(registers, values):
             what = "only zeros"
-            self._smallest_of_zeros = min(self._smallest_of_zeros or len(items), len(items))
+            self._smallest_of_zeros = min(self._smallest_of_zeros or len(asked), len(asked))
         else:
             what = "values"
             if any(values):
-                self._largest_with_values = max(self._largest_with_values, len(items))
-        self._recent.append((self._connection.clock.monotonic(), f"{space.__name__} read of {len(items)}: {what}"))
+                self._largest_with_values = max(self._largest_with_values, len(asked))
+        self._recent.append((self._connection.clock.monotonic(), f"{space.__name__} read of {len(asked)}: {what}"))
         return answer is not None, values
 
     async def _checked(self, batch: _Batch, items: Sequence[tuple[int, int]],

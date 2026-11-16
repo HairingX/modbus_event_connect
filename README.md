@@ -235,6 +235,7 @@ What the profile states is about the model's device itself, and has no default e
 | `ModbusProfile(busy=Retry(Exponential(0.2), Attempts(5)))` | how a read answered "busy" (0x06) is tried again: here 4 times more, after 0.2 s, doubling |
 | `MicroNabtoProfile(zeros=RereadZeros(within=7.5, wait=Steps(0.5, then=Fixed(1.0)), at_once=True, halves=True))` | how an answer of only zeros, where values were, is read again before the zeros are taken: here at once, after 0.5 s, then every second, and in two halves at 7.5 s |
 | `MicroNabtoProfile(zeros=TAKE_ZEROS)` | zeros are taken as they come |
+| `MicroNabtoProfile(answer_wait=2.0)` | how long an answer is waited for once the device has said it has the request; never shorter than the connection's timeout |
 
 A retry that checks something before each probe is a subclass with its own `ready`. It is
 frozen, like every `Retry`, so it asks something outside itself:
@@ -512,6 +513,7 @@ from modbus_event_connect.micro_nabto import MicroNabtoProfile, RereadZeros
 VENTILATION_MICRO_NABTO = MicroNabtoProfile(
     model=VENTILATION,
     max_registers=64,                     # a CTS 402 answered 108; this leaves room
+    answer_wait=2.0,                      # seconds an acknowledged request is waited for
     later_answer_wait=5.0,                # seconds a read sent again is kept open for a later answer
     zeros=RereadZeros(within=7.5, wait=Steps(0.5, then=Fixed(1.0)), at_once=True, halves=True),
 )
