@@ -1,53 +1,58 @@
 """Declarative device models over Modbus and micro_nabto, read and written through one client."""
 from importlib.metadata import version as _installed_version
 
-from ._client import Client, PointsCallback
-from ._clock import Clock
-from ._data_type import ByteOrder, DataType, DataTypeKind, WordOrder
-from ._device import Identity
-from ._errors import (
-    AuthenticationError,
-    CannotConnectError,
-    ClientError,
-    InvalidValueError,
-    ModelError,
-    NotConnectedError,
-    ReadOnlyError,
-    UnsupportedDeviceError,
-)
-from ._events import ValueCallback
-from ._key import Key
-from ._model import InstanceScanStep, Model, ModelSelector, RepeatedSection, Scan, ScanStep, Section
-from ._point import (
-    Change,
-    Labels,
-    Limits,
-    Point,
-    PollRate,
-    Pulse,
-    Refresh,
-    Selector,
-    Transform,
-    Transforms,
-    WriteKind,
-)
-from ._resilience import (
+from event_connect import (
     NO_RETRY,
     AnyOf,
     Attempts,
+    AuthenticationError,
+    CannotConnectError,
+    Certainty,
+    Change,
     CircuitBreaker,
+    ClientError,
+    Clock,
+    DataValue,
+    DeviceClient,
     Exponential,
     Fixed,
+    Identity,
+    InvalidValueError,
     Jitter,
+    Key,
+    Labels,
+    Limits,
+    ModelError,
+    ModelInfo,
+    NotConnectedError,
+    PointsCallback,
+    PollRate,
+    Pulse,
+    Quality,
+    ReadOnlyError,
+    Refresh,
     Retry,
+    Selector,
+    Status,
+    StatusCallback,
     Steps,
     Stop,
+    Transform,
+    Transforms,
+    Unit,
+    UnsupportedDeviceError,
+    ValueCallback,
     Wait,
     Within,
+    Write,
+    WriteRange,
+    WriteKind,
 )
-from ._unit import Unit
-from ._value import DataValue, Quality
-from event_connect import Status, StatusCallback, Write
+
+from ._client import Client
+from ._data_type import ByteOrder, DataType, DataTypeKind, WordOrder
+from ._model import InstanceScanStep, Model, ModelSelector, RepeatedSection, Scan, ScanStep, Section
+from ._point import Point
 
 __version__ = _installed_version("modbus_event_connect")
 __all__ = [
@@ -56,6 +61,7 @@ __all__ = [
     "AuthenticationError",
     "ByteOrder",
     "CannotConnectError",
+    "Certainty",
     "Change",
     "CircuitBreaker",
     "Client",
@@ -64,6 +70,7 @@ __all__ = [
     "DataType",
     "DataTypeKind",
     "DataValue",
+    "DeviceClient",
     "Exponential",
     "Fixed",
     "Identity",
@@ -75,6 +82,7 @@ __all__ = [
     "Limits",
     "Model",
     "ModelError",
+    "ModelInfo",
     "ModelSelector",
     "NO_RETRY",
     "NotConnectedError",
@@ -104,5 +112,6 @@ __all__ = [
     "Within",
     "WordOrder",
     "Write",
+    "WriteRange",
     "WriteKind",
 ]

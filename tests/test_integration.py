@@ -3,21 +3,35 @@ proving the layers agree with each other end to end."""
 import asyncio
 import math
 import struct
+from dataclasses import replace
 from enum import IntEnum
 from collections.abc import Awaitable
 from typing import Any, TypeVar
 
 import pytest
 
+from event_connect import (
+    NO_RETRY,
+    CannotConnectError,
+    CircuitBreaker,
+    DataValue,
+    InvalidValueError,
+    Key,
+    Labels,
+    PollRate,
+    Pulse,
+    Quality,
+    ReadOnlyError,
+    Refresh,
+    Unit,
+    Within,
+    WriteKind,
+)
 from modbus_event_connect import Fixed, Retry, Status
 from modbus_event_connect._client import Client
 from modbus_event_connect._data_type import DataType
-from modbus_event_connect._errors import CannotConnectError, InvalidValueError, ReadOnlyError
-from modbus_event_connect._key import Key
-from modbus_event_connect._model import Model, RepeatedSection, Section
-from modbus_event_connect._point import Labels, Point, PollRate, Pulse, Refresh, WriteKind
-from modbus_event_connect._unit import Unit
-from modbus_event_connect._value import DataValue, Quality
+from modbus_event_connect._model import RepeatedSection, Section
+from modbus_event_connect._point import Point
 from modbus_event_connect.modbus import (
     Coil,
     DiscreteInput,
@@ -25,18 +39,20 @@ from modbus_event_connect.modbus import (
     HoldingRegister,
     InputRegister,
     ModbusDevice,
-    ModbusOptions,
+    ModbusModel,
+    BitWrite,
     plain,
 )
 from modbus_event_connect.testing import SimulatedModbusDevice, SimulatedModbusGateway
-from modbus_event_connect.testing._clock import FakeClock
+from event_connect.testing import FakeClock
+from models import NEVER_AGAIN, OFFLINE_AFTER_INTERVALS, TIMEOUT_MARGIN, modbus_model
 
 T = TypeVar("T")
 
 
 def _room(n: int) -> list[Point[Any]]:
     return [Point(Key(f"room_{n}_temp", float), read=InputRegister(100 + n), data_type=DataType.INT16, scale=0.1,
-                  valid_raw=range(-0x8000, 0x7FFF), unit=Unit.CELSIUS)]
+                  valid_raw=range(-0x8000, 0x7FFF), unit=Unit.CELSIUS, poll_rate=PollRate.MEDIUM)]
 
 
 POWER = Key("power", float)
@@ -63,22 +79,19 @@ FAN_SPEED = Key("fan_speed", FanSpeed)
 ALARM_2 = Key("alarm_2", bool)
 
 
-MODEL = Model(
-    name="BMS", manufacturer="TEST",
-    options=ModbusOptions(numbering=plain(first_address=0), max_registers=8),
-    sections=[
+MODEL = modbus_model([
         Section([
-            Point(POWER, read=InputRegister(1), data_type=DataType.FLOAT32, unit=Unit.WATT),
-            Point(ENERGY, read=InputRegister(3), data_type=DataType.UINT32, scale=0.1, unit=Unit.KILOWATT_HOUR),
-            Point(TEMP, read=InputRegister(5), data_type=DataType.INT16, scale=0.1, valid_raw=range(-0x8000, 0x7FFF)),
-            Point(FAN_RPM, read=InputRegister(6), unit=Unit.RPM),
-            Point(STATUS_WORD, read=HoldingRegister(10)),
-            Point(LAMP_ON, read=HoldingRegister(10), write=HoldingRegister(10), data_type=DataType.bit(0)),
-            Point(FAULT, read=HoldingRegister(10), data_type=DataType.bit(3)),
+            Point(POWER, read=InputRegister(1), data_type=DataType.FLOAT32, unit=Unit.WATT, poll_rate=PollRate.MEDIUM),
+            Point(ENERGY, read=InputRegister(3), data_type=DataType.UINT32, scale=0.1, unit=Unit.KILOWATT_HOUR, poll_rate=PollRate.MEDIUM),
+            Point(TEMP, read=InputRegister(5), data_type=DataType.INT16, scale=0.1, valid_raw=range(-0x8000, 0x7FFF), poll_rate=PollRate.MEDIUM),
+            Point(FAN_RPM, read=InputRegister(6), unit=Unit.RPM, poll_rate=PollRate.MEDIUM),
+            Point(STATUS_WORD, read=HoldingRegister(10), poll_rate=PollRate.MEDIUM),
+            Point(LAMP_ON, read=HoldingRegister(10), write=HoldingRegister(10), data_type=DataType.bit(0), poll_rate=PollRate.MEDIUM),
+            Point(FAULT, read=HoldingRegister(10), data_type=DataType.bit(3), poll_rate=PollRate.MEDIUM),
             Point(FAN_SPEED, read=HoldingRegister(11), write=HoldingRegister(11),
-                  on_write=Refresh(["fan_rpm"], after=1.0, until_stable=5.0)),
-            Point(NAME, read=HoldingRegister(20), write=HoldingRegister(20), data_type=DataType.string(4)),
-            Point(RELAY, read=Coil(1), write=Coil(1), data_type=DataType.BOOL),
+                  on_write=Refresh(["fan_rpm"], after=1.0, until_stable=5.0), poll_rate=PollRate.MEDIUM),
+            Point(NAME, read=HoldingRegister(20), write=HoldingRegister(20), data_type=DataType.string(4), poll_rate=PollRate.MEDIUM),
+            Point(RELAY, read=Coil(1), write=Coil(1), data_type=DataType.BOOL, poll_rate=PollRate.MEDIUM),
             Point(BLIND_UP, write=Coil(5), data_type=DataType.BOOL, write_kind=WriteKind.COMMAND,
                   pulse=Pulse(idle=False, after=0.01)),
             Point(ALARM_ANY, read=DiscreteInput(1), data_type=DataType.BOOL, poll_rate=PollRate.FAST,
@@ -87,8 +100,14 @@ MODEL = Model(
             Point(ALARM_2, read=DiscreteInput(3), data_type=DataType.BOOL, poll_rate=PollRate.STATIC, labels={"kind": "alarm"}),
         ]),
         RepeatedSection(_room, range(1, 4), label="room"),
-    ], read_back_after=1.0
-)
+    ], name="BMS", manufacturer="TEST", numbering=plain(first_address=0), max_registers=8,
+                     bit_write=BitWrite.MASK)
+
+
+def _device(gateway: SimulatedModbusGateway, unit_id: int, clock: FakeClock, *, reconnect: CircuitBreaker = NEVER_AGAIN,
+            model: ModbusModel = MODEL) -> ModbusDevice:
+    return ModbusDevice(gateway, unit_id=unit_id, clock=clock, reconnect=reconnect, models=[model],
+                        timeout_margin=TIMEOUT_MARGIN)
 
 
 def _f32(value: float) -> tuple[int, int]:
@@ -113,24 +132,21 @@ def _unit() -> SimulatedModbusDevice:
     )
 
 
-async def _no_wait(seconds: float) -> None:
-    return None
-
-
 def _stack(units: dict[int, SimulatedModbusDevice] | None = None, *, unit_id: int = 1, read_only: bool = False,
-           delay: float = 0.0, write_retry_for: float = 0.0,
-           reconnect: Retry | None = None) -> tuple[Client, SimulatedModbusGateway, FakeClock, ModbusDevice]:
+           delay: float = 0.0, write_retry: Retry = NO_RETRY,
+           reconnect: CircuitBreaker = NEVER_AGAIN) -> tuple[Client, SimulatedModbusGateway, FakeClock, ModbusDevice]:
     gateway = SimulatedModbusGateway(units if units is not None else {1: _unit()}, delay=delay)
-    clock = FakeClock()
-    device = ModbusDevice(gateway, unit_id=unit_id, clock=clock, sleep=_no_wait, reconnect=reconnect)
-    client = Client(device, MODEL, clock=clock, read_only=read_only, sleep=_no_wait, write_retry_for=write_retry_for)
+    clock = FakeClock(autojump=True)
+    model = MODEL if write_retry is NO_RETRY else replace(MODEL, write_retry=write_retry)
+    device = _device(gateway, unit_id, clock, reconnect=reconnect, model=model)
+    client = Client(device, model, offline_after_intervals=OFFLINE_AFTER_INTERVALS, clock=clock, read_only=read_only)
     return client, gateway, clock, device
 
 
 def _connected(units: dict[int, SimulatedModbusDevice] | None = None, *, unit_id: int = 1, read_only: bool = False,
-               write_retry_for: float = 0.0,
-               reconnect: Retry | None = None) -> tuple[Client, SimulatedModbusGateway, FakeClock, ModbusDevice]:
-    stack = _stack(units, unit_id=unit_id, read_only=read_only, write_retry_for=write_retry_for, reconnect=reconnect)
+               write_retry: Retry = NO_RETRY,
+               reconnect: CircuitBreaker = NEVER_AGAIN) -> tuple[Client, SimulatedModbusGateway, FakeClock, ModbusDevice]:
+    stack = _stack(units, unit_id=unit_id, read_only=read_only, write_retry=write_retry, reconnect=reconnect)
     asyncio.run(stack[0].connect())
     return stack
 
@@ -272,7 +288,7 @@ def test_a_device_the_gateway_cannot_reach_does_not_connect() -> None:
 
 def test_a_half_open_link_is_noticed_and_recovered_from() -> None:
     """A pulled cable leaves the socket open. Only the missing answers can tell."""
-    client, gateway, clock, device = _connected(reconnect=Retry(Fixed(30.0)))
+    client, gateway, clock, device = _connected(reconnect=CircuitBreaker(after=3, retry=Retry(Fixed(30.0), None)))
     client.subscribe(TEMP, _nothing)
     gateway.half_open = True
     for _ in range(3):
@@ -281,7 +297,7 @@ def test_a_half_open_link_is_noticed_and_recovered_from() -> None:
     assert gateway.connected is True, "test premise: the link still reports itself connected"
     assert client.status(Status.CONNECTED).value is False
     assert _value(client, TEMP).quality is Quality.STALE
-    assert device.diagnostics()["backing_off"] is True
+    assert device.diagnostics()["open"] is True
 
     gateway.half_open = False
     clock.advance(30)
@@ -303,7 +319,7 @@ def test_a_busy_device_is_waited_out() -> None:
 
 
 def test_a_pulled_cable_goes_stale_backs_off_and_recovers() -> None:
-    client, gateway, clock, device = _connected(reconnect=Retry(Fixed(30.0)))
+    client, gateway, clock, device = _connected(reconnect=CircuitBreaker(after=3, retry=Retry(Fixed(30.0), None)))
     client.subscribe(TEMP, _nothing)
     good = _value(client, TEMP)
 
@@ -315,8 +331,8 @@ def test_a_pulled_cable_goes_stale_backs_off_and_recovers() -> None:
     assert (stale.value, stale.quality, stale.timestamp) == (good.value, Quality.STALE, good.timestamp)
     assert client.status(Status.CONNECTED).value is False
     diagnostics = device.diagnostics()
-    assert diagnostics["backing_off"] is True
-    assert isinstance(diagnostics["refused_while_backing_off"], int) and diagnostics["refused_while_backing_off"] > 0
+    assert diagnostics["open"] is True
+    assert isinstance(diagnostics["refused_while_open"], int) and diagnostics["refused_while_open"] > 0
 
     gateway.link_down = False
     gateway.units[1].input_registers[4] = 230
@@ -345,7 +361,7 @@ def test_a_lamp_bit_is_set_atomically_leaving_its_neighbours() -> None:
     [(_, mask)] = [(u, r) for u, r in gateway.requests if r.function is FunctionCode.MASK_WRITE_REGISTER]
     assert (mask.address, mask.and_mask, mask.or_mask) == (9, 0xFFFE, 0x0001)
     assert gateway.units[1].holding_registers[9] == 0b1001, "the fault bit next to it was disturbed"
-    clock.advance(MODEL.read_back_after)
+    clock.advance(MODEL.timing.read_back_after)
     asyncio.run(client.poll())
     assert _value(client, LAMP_ON).value is True
     assert _value(client, FAULT).value is True
@@ -432,7 +448,7 @@ def test_two_devices_share_one_gateway_without_mixing_up() -> None:
     second.input_registers[4] = 190
     gateway = SimulatedModbusGateway({1: first, 2: second}, delay=0.001)
     clock = FakeClock()
-    clients = [Client(ModbusDevice(gateway, unit_id=u, clock=clock, sleep=_no_wait, reconnect=None), MODEL, clock=clock)
+    clients = [Client(_device(gateway, u, clock), MODEL, offline_after_intervals=OFFLINE_AFTER_INTERVALS, clock=clock)
                for u in (1, 2)]
 
     async def scenario() -> None:
@@ -491,7 +507,7 @@ def test_a_slow_device_does_not_block_the_event_loop() -> None:
     """Everything else on the host's loop must keep running while the bus is slow."""
     gateway = SimulatedModbusGateway({1: _unit()}, delay=0.05)
     clock = FakeClock()
-    client = Client(ModbusDevice(gateway, unit_id=1, clock=clock, sleep=_no_wait, reconnect=None), MODEL, clock=clock)
+    client = Client(_device(gateway, 1, clock), MODEL, offline_after_intervals=OFFLINE_AFTER_INTERVALS, clock=clock)
 
     async def scenario() -> int:
         stop = asyncio.Event()
@@ -512,7 +528,7 @@ def test_a_slow_device_does_not_block_the_event_loop() -> None:
 
 def test_writes_land_in_order_even_when_the_device_is_busy() -> None:
     """A write refused as busy is retried before later writes go out, never after them."""
-    client, gateway, _, _ = _connected(write_retry_for=10.0)
+    client, gateway, _, _ = _connected(write_retry=Retry(Fixed(0.5), Within(10.0)))
     gateway.units[1].busy_for = 3
 
     async def presses() -> None:
@@ -522,14 +538,14 @@ def test_writes_land_in_order_even_when_the_device_is_busy() -> None:
 
 
 def test_after_an_outage_of_15_s_a_value_read_every_10_s_is_back_20_s_after_it_began() -> None:
-    """A device's own backoff decides when it is asked again; nothing on top of it may delay that."""
+    """A device's own breaker decides when it is asked again; nothing on top of it may delay that."""
     gateway = SimulatedModbusGateway({1: _unit()})
-    clock = FakeClock()
-    device = ModbusDevice(gateway, unit_id=1, clock=clock, sleep=_no_wait, reconnect=None)
-    client = Client(device, MODEL, clock=clock, sleep=_no_wait)
+    clock = FakeClock(autojump=True)
+    every_10_s = replace(MODEL, poll_intervals={**MODEL.poll_intervals, PollRate.MEDIUM: 10.0})
+    client = Client(_device(gateway, 1, clock, model=every_10_s), every_10_s,
+                    offline_after_intervals=OFFLINE_AFTER_INTERVALS, clock=clock)
     asyncio.run(client.connect())
     client.subscribe(TEMP, _nothing)
-    client.set_poll_interval(TEMP, 10.0)
     gateway.link_down = True
     good_again: int | None = None
     for second in range(1, 41):

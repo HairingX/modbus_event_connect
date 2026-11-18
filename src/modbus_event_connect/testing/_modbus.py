@@ -117,6 +117,8 @@ class SimulatedModbusGateway:
         self.link_down = False
         self.half_open = False
         self.requests: list[tuple[int, Request]] = []
+        self.timeouts: list[float] = []
+        """How long each request was to wait for its answer, in order."""
         self.opens = 0
         self.closes = 0
         self.max_in_flight = 0
@@ -141,8 +143,10 @@ class SimulatedModbusGateway:
             self._open = False
             self.closes += 1
 
-    async def request(self, request: Request) -> Response:
+    async def request(self, request: Request, *, timeout: float) -> Response:
+        """Answer `request` as the unit it names would, after `delay`; `timeout` is recorded."""
         async with self._lock:
+            self.timeouts.append(timeout)
             if not self.connected and not await self.open():
                 return Response(ok=False, no_answer=True, detail="the link is down (simulated)")
             self._in_flight += 1

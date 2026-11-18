@@ -27,10 +27,16 @@ pip install modbus-event-connect
 ## How the pieces fit
 
 ```text
-Model   what the device has: its points, where they live, how to decode them   (Part 2)
-Device  how to reach it: ModbusDevice or MicroNabtoDevice                      (Part 1)
-Client  joins the two: connect, subscribe, poll, write                          (Part 1)
+Model    what the device is and how it is talked to: ModbusModel or        (Part 2)
+         MicroNabtoModel - its points, how to decode them, its timing
+Device   where it is: ModbusDevice or MicroNabtoDevice, given the models      (Part 1)
+Client   joins them: connect, subscribe, run, write                           (Part 1)
 ```
+
+A model is locked to one protocol and says everything about how its unit behaves on it, read top
+to bottom in one file. A device library keeps each model in a file of its own and lists the
+models once; its `create_client` writes out what is needed before the model is known. An
+application only says where the device is.
 
 A *point* is one value the device has, such as a temperature or a setting. Its *key*,
 `Key("temperature", float)`, names it everywhere and says what its value is. A key is its text
@@ -59,67 +65,96 @@ any release.
 
 ```python
 import asyncio
-from modbus_event_connect import Client, Exponential, Retry
-from modbus_event_connect.modbus import ModbusDevice
-from my_devices import TARGET, TEMPERATURE, THERMOSTAT   # a model and its keys, see Part 2
+from my_devices import TARGET, TEMPERATURE, create_client   # see Part 2
 
 def on_change(key, old, new):
     print(f"{key}: {new.value} ({new.quality.name})")
 
 async def main():
-    client = Client(ModbusDevice.tcp("<device-ip>", reconnect=Retry(Exponential(2.0, max=10.0))), THERMOSTAT)
+    client = create_client(host="<device-ip>", unit_id=1)
     await client.connect()                  # reads every point once
     client.subscribe(TEMPERATURE, on_change)
     await client.write(TARGET, 21.5)
+    polling = asyncio.create_task(client.run())   # reads whatever is due, until cancelled
     try:
-        while True:
-            await client.poll()             # reads whatever is due
-            await asyncio.sleep(1)
+        await asyncio.sleep(3600)
     finally:
+        polling.cancel()
         await client.disconnect()
 
 asyncio.run(main())
 ```
 
-The client never reads on its own. **Your program calls `poll()`**, and each call reads the
-points that are due. A call when nothing is due returns at once without contacting the device,
-so calling it every second is cheap.
+**`run()` reads whatever is due, whenever it is due**, until it is cancelled - it never ends by
+itself - and is woken when a subscription, a refresh or a write makes something due sooner. While
+the client is not connected - before `connect()`, or after `disconnect()` - it waits until it is.
+A poll that raises is logged, the first of a run of failures as an error with its traceback, and
+polling goes on after a pause. It waits on the client's clock, as every pause the client makes
+does: a test that gives the client a `FakeClock` moves it on with `clock.advance()`.
 
-`client.seconds_until_next_poll()` says how long until something is due, if you would rather
-sleep longer. A subscription made while you sleep can make a point due sooner, so wake up at
-least as often as your fastest poll rate.
+A program with its own loop calls `poll()` instead, which reads the points that are due. A call
+when nothing is due returns at once without contacting the device; `seconds_until_next_poll()`
+says how long until something is.
 
 ## Connecting
 
+A device library's `create_client` does this for you. Building one by hand, every value is
+written out; none has a default but a protocol's own facts, such as its port:
+
 ```python
-from modbus_event_connect import Exponential, Fixed, Retry
+from modbus_event_connect import CircuitBreaker, Exponential, Fixed, Retry
 from modbus_event_connect.modbus import ModbusDevice, ModbusTcpConnection
 from modbus_event_connect.micro_nabto import MicroNabtoDevice
+import my_blinds, my_heating, my_devices, my_ventilation   # each lists its models
 
-# Modbus TCP, one device, asked again 2, 4 and 8 s after it stopped answering, then every 10 s
-device = ModbusDevice.tcp("<device-ip>", unit_id=1, reconnect=Retry(Exponential(2.0, max=10.0)))
+# Modbus TCP, one device; once 3 requests in a row went unanswered, asked again 2, 4 and 8 s
+# later, then every 10 s. A request waits as long as the model says its unit answers within,
+# and timeout_margin more, for the network.
+device = ModbusDevice.tcp("<device-ip>", unit_id=1, models=my_devices.MODELS, timeout_margin=2.5,
+                          connect_timeout=3.0, frame_gap=0.0,
+                          reconnect=CircuitBreaker(after=3, retry=Retry(Exponential(2.0, factor=2.0, max=10.0), None)))
 
-# Several Modbus devices behind one gateway, sharing its connection, each with its own reconnect
-gateway = ModbusTcpConnection("<gateway-ip>")
-heating = ModbusDevice(gateway, unit_id=1, reconnect=Retry(Exponential(10.0, max=120.0)))
-blinds = ModbusDevice(gateway, unit_id=3, reconnect=Retry(Exponential(10.0, max=120.0)))
+# Several Modbus devices behind one gateway, sharing its connection, each with its own breaker
+gateway = ModbusTcpConnection("<gateway-ip>", connect_timeout=3.0, frame_gap=0.0)
+slowly = CircuitBreaker(after=3, retry=Retry(Exponential(10.0, factor=2.0, max=120.0), None))
+heating = ModbusDevice(gateway, 1, reconnect=slowly, models=my_heating.MODELS, timeout_margin=2.5)
+blinds = ModbusDevice(gateway, 3, reconnect=slowly, models=my_blinds.MODELS, timeout_margin=2.5)
 
 # micro_nabto; with device_id, the device is found again if its address changes
 ventilation = MicroNabtoDevice.udp("<email-paired-with-the-device>", host="<device-ip>",
-                                   device_id="<device-id>", reconnect=Retry(Fixed(5.0)))
+                                   device_id="<device-id>", models=my_ventilation.MODELS,
+                                   timeout=1.0, retries=2, session_idle=12.0, rediscovery_timeout=3.0,
+                                   rediscovery_resend=0.5, answer_wait=5.0,
+                                   reconnect=CircuitBreaker(after=1, retry=Retry(Fixed(5.0), None)))
 ```
 
-Behind a gateway, a device that stops answering does not slow down the others.
+Behind a gateway, a device that stops answering does not slow down the others, and each request
+waits as long as its own unit needs.
+
+A device is given every model it may turn out to be, of its own protocol only: a type checker
+refuses a `MicroNabtoModel` given to a `ModbusDevice`. Once the client has chosen the model, it
+tells the device with `use(model)`, and the device talks to it as that model says. Until then it
+asks as cautiously as any of its models needs: the fewest registers in one read, the longest
+wait for an answer. A model the device was not given raises `ModelError`, and so does one given
+twice.
 
 A micro_nabto device says what it is when you connect. Give the client a function instead of a
-model, and it picks the model from that:
+model, and it picks one of the device's models from that:
 
 ```python
 def pick_model(identity):
     return VENTILATION if identity["device_model"] == 1140 else None
 
-client = Client(ventilation, pick_model)
+client = Client(ventilation, pick_model, offline_after_intervals=1)
 ```
+
+`offline_after_intervals` is how many reads of the chosen model's fastest poll rate the device
+may leave unanswered before it counts as not answering; see
+[Connection state](#connection-state).
+
+micro_nabto devices on the local network are found with `discover`, which writes out how long
+it searches and how often it asks again: `await discover(timeout=2.0, resend=0.5,
+target=BROADCAST)`. Each answer is a `DiscoveredDevice` with its `device_id`, `host` and `port`.
 
 Once connected, `client.model` is the model chosen and `client.identity` what the device reported
 about itself, with what the model's identity points read.
@@ -138,7 +173,7 @@ about itself, with what the model's identity points read.
 value, then on every change. `old` is `None` the first time. It returns a function that
 unsubscribes.
 
-`client.value(key)` gives the current value at any time, or `None` before the first read.
+`client.value(key)` gives the current value at any time, or `None` while the unit has none.
 Its type follows the key: `client.value(TEMPERATURE)` is a `DataValue[float]`, and a key of
 another type than the model gives the point raises `TypeError`.
 
@@ -155,32 +190,15 @@ device answered, before it was decoded.
 
 ## How often values are read
 
-Every point is read once when connecting. After that, a point is read on its poll rate while
-someone subscribes to it:
-
-| Poll rate | Read every |
-|---|---|
-| `FAST` | 10 s |
-| `MEDIUM` (the default) | 30 s |
-| `SLOW` | 60 s |
-| `RARE` | 15 min |
-| `STATIC` | once, when connecting |
-| `SCAN` | what each scan read, read again to find changes (see [When the unit changes](#when-the-unit-changes)) |
-
-These are the library's defaults; a model may set its own. You can change them:
-
-```python
-client.set_poll_interval(PollRate.FAST, 5)       # every FAST point
-client.set_poll_interval(TEMPERATURE, 2)         # one point
-client.set_poll_interval(TEMPERATURE, None)      # back to the model's interval
-```
-
-A model can set a floor, the shortest interval its device copes with. `set_poll_interval`
-returns the interval actually used.
+Every point is read once when connecting. After that, a point is read on its poll rate -
+`FAST`, `MEDIUM`, `SLOW`, `RARE`, or `STATIC`, once when connecting - while someone subscribes
+to it. How many seconds each rate is, the model says, for its own unit; nothing outside the
+model changes it.
 
 To read now, call `await client.refresh([TEMPERATURE])`. `refresh(PollRate.SLOW)` reads a
 whole poll rate, and `refresh()` reads everything. `subscribe(key, callback, poll=False)` is
-told about changes without asking for the point to be read on a timer.
+told about changes without asking for the point to be read on a timer. A key no model of the
+client has raises `KeyError`, before `connect()` too.
 
 `client.set_scheduled_polling(False)` stops reading on the schedule - every poll rate, and the
 checks for whether the unit has changed. `poll()` then reads only what `refresh()` and writes ask
@@ -190,52 +208,59 @@ for, and a read that finds a point gone still has its part of the unit checked.
 ## Riding out failures
 
 How a device is asked again is assembled from standard parts that every protocol shares: waits
-(`Fixed`, `Exponential`, `Steps`, `Jitter`), stops (`Attempts`, `Within`, combined with `|`) and
-`Retry`, which puts a wait and a stop together.
+(`Fixed`, `Exponential`, `Steps`, `Jitter`), stops (`Attempts`, `Within`, combined with `|`),
+`Retry`, which puts a wait and a stop together, and `CircuitBreaker`, which stops asking a device
+that has left requests unanswered.
 
-**Reconnecting** is stated by whoever creates the device, as `reconnect`, and nowhere else: how
-soon a silent device should be asked again depends on how it is reached, not on what it is. It
-has no default. A Modbus device is not asked again once 3 requests in a row went unanswered, and
-a micro_nabto device once a handshake failed, until `reconnect` says; asking again reopens a
-closed link. `None` asks again only on `connect()`. Before each try, `await reconnect.ready()` is
-asked: a subclass of `Retry` can check something first, and a try it refuses waits another pause.
+**Reconnecting** is stated by whoever creates the device, as `reconnect`, a `CircuitBreaker`, and
+nowhere else: how soon a silent device should be asked again depends on how it is reached, not on
+what it is. It has no default. The breaker opens once `after` requests in a row went unanswered -
+for micro_nabto, handshakes - and the device is not asked until its `retry` lets a probe through;
+asking again reopens a closed link, and an answer closes the breaker. `connect()` closes it too.
+Before each probe, `await retry.ready()` is asked: a subclass of `Retry` can check something
+first, and a probe it refuses keeps the breaker open as long again.
 
-| `reconnect=` | Asks again |
+| `reconnect=CircuitBreaker(after=3, retry=...)` | Once 3 requests in a row went unanswered, asks again |
 |---|---|
-| `Retry(Exponential(2.0, max=10.0))` | after 2, 4 and 8 s, then every 10 s |
-| `Retry(Fixed(60.0))` | every minute |
-| `Retry(Exponential(2.0, max=10.0), Attempts(8))` | as the first, and gives up after 8 tries |
+| `Retry(Exponential(2.0, factor=2.0, max=10.0), None)` | after 2, 4 and 8 s, then every 10 s |
+| `Retry(Fixed(60.0), None)` | every minute |
+| `Retry(Exponential(2.0, factor=2.0, max=10.0), Attempts(8))` | as the first, and gives up at the eighth opening |
 | `Retry(Steps(2.0, 5.0, then=Fixed(60.0)), Within(3600.0))` | after 2 and 5 s, then every minute, for an hour |
-| `None` | only on `connect()` |
+| `NO_RETRY` | only on `connect()` |
 
-What a model states is about the device itself:
+What the model states is about its unit itself, and has no default either:
 
-| Option | What it does | Default |
-|---|---|---|
-| `ModbusOptions(busy=Retry(...))` | how a read answered "busy" (0x06) is tried again | `BUSY`: 4 times more, after 0.2 s, doubling |
-| `MicroNabtoOptions(zeros=RereadZeros(...))` | how an answer of only zeros, where values were, is read again before the zeros are taken | `RereadZeros()`: at once, after 0.5 s, then every second; in two halves at 7.5 s |
-| `MicroNabtoOptions(zeros=TAKE_ZEROS)` | zeros are taken as they come | |
-| `MicroNabtoOptions(answer_wait=...)` | how long an answer is waited for once the device has said it has the request | 5 s, never shorter than the connection's timeout |
+| Model field | What it does |
+|---|---|
+| `ModbusModel(busy=Retry(Exponential(0.2, factor=2.0, max=None), Attempts(5)))` | how a read answered "busy" (0x06) is tried again: here 4 times more, after 0.2 s, doubling |
+| `ModbusModel(answers_within=0.5)` | seconds the unit takes at most to answer; a request waits this and the device's `timeout_margin` |
+| `write_retry=Retry(Fixed(0.5), Within(15.0))` | how a write the unit answered busy is sent again: here every half second for 15 s; `NO_RETRY` sends it once |
+| `MicroNabtoModel(zeros=RereadZeros(within=7.5, wait=Steps(0.5, then=Fixed(1.0)), at_once=True, halves=True))` | how an answer of only zeros, where values were, is read again before the zeros are taken: here at once, after 0.5 s, then every second, and in two halves at 7.5 s |
+| `MicroNabtoModel(zeros=TAKE_ZEROS)` | zeros are taken as they come |
+| `MicroNabtoModel(answer_wait=2.0)` | how long an answer is waited for once the device has said it has the request; never shorter than the connection's timeout |
+
+A retry that checks something before each probe is a subclass with its own `ready`. It is
+frozen, like every `Retry`, so it asks something outside itself:
 
 ```python
+from collections.abc import Callable
 from dataclasses import dataclass
 
-from modbus_event_connect import Exponential, Fixed, Retry, Steps
-from modbus_event_connect.micro_nabto import MicroNabtoOptions, RereadZeros
-
-patient = MicroNabtoOptions(zeros=RereadZeros(within=15.0, wait=Steps(0.5, then=Fixed(2.0))))
+from modbus_event_connect import CircuitBreaker, Exponential, Retry
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class WhenOnline(Retry):
     """Asks again only while the application says the network is up."""
-    online: bool = True
+    online: Callable[[], bool]
 
     async def ready(self) -> bool:
-        return self.online
+        return self.online()
 
 
-reconnect = WhenOnline(Exponential(2.0, max=10.0))
+network = {"up": True}
+reconnect = CircuitBreaker(after=3, retry=WhenOnline(Exponential(2.0, factor=2.0, max=10.0), None,
+                                                    online=lambda: network["up"]))
 ```
 
 ## Writing
@@ -251,35 +276,41 @@ against the point's limits, or its states, and `InvalidValueError` says why it w
 - Writes are sent one at a time, in order.
 - If a setting is written several times while earlier writes are still waiting, only the newest
   value is sent. Commands are always all sent.
-- A write the device answers busy is sent again until `Client(..., write_retry_for=...)` seconds
-  have passed since it was first sent, `write_retry_pause` apart; 0, the default, sends it once.
-  A newer setting takes over from one being sent again.
+- A write the device answers busy is sent again as the model's `write_retry` says, a `Retry`
+  that counts the sendings and the time since the first: `Retry(Fixed(0.5), Within(15.0))`
+  sends it every half second for 15 s, and `NO_RETRY` sends it once. A newer setting takes over
+  from one being sent again.
 - A point is not read while it is being written. Once the device takes a setting, subscribers
   see the value written; then the point is read back, so they see what the device really did.
 - `await client.write_sequence([Write(MODE, Mode.HEAT), Write(TARGET, 21.5)])` checks every
   value first, then writes them in order and stops at the first refusal.
 - `client.status(Status.WRITE_PENDING).value` is `True` while writes are waiting or being sent.
 
-`Client(device, model, read_only=True)` refuses every write with `ReadOnlyError` before it
-reaches the device. Use it while developing against a real installation.
+`Client(device, model, offline_after_intervals=3, read_only=True)` refuses every write with
+`ReadOnlyError` before it reaches the device. Use it while developing against a real
+installation.
 
 ## Connection state
 
 After `connect()`, the client follows whether the device answers. You do not need to connect
 again after an outage.
 
-- `client.status(Status.CONNECTED).value` is `False` once the device has not answered for the
-  model's `offline_after`, 30 seconds unless it says otherwise, so one lost answer does not make it
-  unavailable. Meanwhile its values are `STALE`, and `client.silent` and `client.silent_for` say
-  whether the latest request went unanswered, and for how long the device has been silent.
+- `client.status(Status.CONNECTED).value` is `False` once the device has stayed silent for
+  `offline_after_intervals` of its model's fastest interval - `Client(...,
+  offline_after_intervals=3)` with a fastest rate of 10 s gives 30 s - so one lost answer does
+  not make it unavailable. Meanwhile its values are `STALE`, and `client.silent` and
+  `client.silent_for` say whether the latest request went unanswered, and for how long the
+  device has been silent.
 - A read that fails waits for its next regular read; the protocol rides out a busy or silent
-  device itself, as its model's options say (see "Riding out failures"), and nothing is added on
-  top of that.
+  device itself, as its model and its breaker say (see "Riding out failures"), and nothing is
+  added on top of that.
 - `client.subscribe_status(Status.CONNECTED, callback)` tells you when that changes. A status is
   not a point, so a model's keys never collide with it.
 - When the device answers after a silence, whatever failed meanwhile is read at once; once it
   counted as not answering, every polled point is.
-- `await client.disconnect()` lets go of the device.
+- `await client.disconnect()` lets go of the device: `Status.CONNECTED` turns `False`, and
+  `poll()`, `refresh()` and `write()` raise `NotConnectedError` until `connect()` again. Nothing
+  reopens the link by itself.
 
 ## What this unit has
 
@@ -296,14 +327,17 @@ rooms. After `connect()`:
 
 ## In a larger application
 
-- Run the poll loop as a task on the application's event loop. When the device is removed,
+- Run `client.run()` as a task on the application's event loop. When the device is removed,
   cancel the task, then `await client.disconnect()`.
+- The client is a `DeviceClient`, the surface every client of event_connect's devices shares, and
+  its `model` a `ModelInfo`: an application written against those uses any of them alike.
 - Subscription callbacks run on that event loop, from within the client's own calls, never on
   another thread, so they may update the application's state directly.
 - Turn the errors `connect()` raises into the application's own: try again later after
   `CannotConnectError`, ask the user for new credentials after `AuthenticationError`.
-- How a value's quality is shown is the application's choice. `client.consecutive_failures(key)`
-  lets it wait a few failed reads before calling a `STALE` value unavailable.
+- How a value's quality is shown is the application's choice. `client.consecutive_failures(key)`,
+  the schedule's count, lets it wait a few failed reads before calling a `STALE` value
+  unavailable.
 
 ## Errors
 
@@ -312,10 +346,11 @@ rooms. After `connect()`:
 | `CannotConnectError` | `connect()` | The device could not be reached, or left a read unanswered. |
 | `AuthenticationError` | `connect()` | A micro_nabto device refused the email. |
 | `UnsupportedDeviceError` | `connect()`, `poll()` | No model matches the device, or no longer does after it changed. |
-| `NotConnectedError` | most methods | Used before `connect()` succeeded. |
+| `NotConnectedError` | most methods | Used before `connect()` succeeded; `poll()`, `refresh()` and `write()` also after `disconnect()`. |
 | `InvalidValueError` | `write()` | The point cannot take the value. |
 | `ReadOnlyError` | `write()` | The client is read-only. |
-| `KeyError` | `subscribe()`, `write()` | This unit has no such key. |
+| `ModelError` | creating a model, `connect()` | The model contradicts itself, or the device was not given it. |
+| `KeyError` | `subscribe()`, `write()` | No model of the client has the key, or this unit does not. |
 | `TypeError` | `value()`, `subscribe()`, `write()` | The key names another type than the model gives the point. |
 
 ---
@@ -323,46 +358,121 @@ rooms. After `connect()`:
 # Part 2: Describing a device
 
 A model is plain data: a list of points, each saying where its value lives and how to decode
-it. You write it once, from the device's manual, and every app uses it.
+it, and everything about how its unit behaves over its protocol - how often each poll rate is
+read, how long a write takes to show, how its manual numbers registers, how many it takes in one
+read, how long it takes to answer, how a busy answer is tried again. You write it once, from the
+device's manual and from what you measure, and every app uses it. Every setting is written out;
+none has a default to forget, and nothing outside the model changes it.
 
-## A first model
+Write where each number comes from on its own line, so the next reader knows what may be changed:
+
+- `# measured on <unit>: <result> (<owner/repo>#<n>)`, where a record of the measurement exists,
+- `# manual: "<quote>"`,
+- `# reported: <what, where>`,
+- `# guess`, optionally with how it could be measured.
+
+## One file per model
+
+A device library keeps each model in a file of its own:
 
 ```python
+"""my_devices/_thermostat.py: the Example Thermostat, as it is talked to over Modbus."""
 from enum import IntEnum
-from modbus_event_connect import DataType, Key, Limits, Model, Point, PollRate, Section, Unit
-from modbus_event_connect.modbus import HoldingRegister, InputRegister, ModbusOptions, plain
 
-class Mode(IntEnum):                      # the states the device documents
+from modbus_event_connect import (NO_RETRY, Attempts, DataType, Exponential, Key, Limits, Point,
+                                  PollRate, Retry, Section, Unit)
+from modbus_event_connect.modbus import (HoldingRegister, InputRegister, ModbusModel, SingleWrite,
+                                         plain)
+
+
+class Mode(IntEnum):                      # the states the manual documents
     OFF = 0
     HEAT = 1
     COOL = 2
+
 
 TEMPERATURE = Key("temperature", float)
 TARGET = Key("target", float)
 MODE = Key("mode", Mode)
 SERIAL_NUMBER = Key("serial_number", int)
 
-THERMOSTAT = Model(name="Thermostat", manufacturer="Example",
-                   options=ModbusOptions(numbering=plain(first_address=1)),  # the manual gives addresses
-                   read_back_after=2.0,   # seconds before a write shows in a read
-                   sections=[Section([
-    Point(TEMPERATURE,
-          read=InputRegister(10),         # where the value is
-          data_type=DataType.INT16,       # a signed 16-bit number
-          scale=0.1,                      # the device sends 215 for 21.5
-          unit=Unit.CELSIUS,
-          valid_raw=range(-0x8000, 0x7FFF)),   # all but 0x7FFF, what it sends with no reading
-    Point(TARGET,
-          read=HoldingRegister(20), write=HoldingRegister(20),
-          data_type=DataType.INT16, scale=0.1, unit=Unit.CELSIUS,
-          limits=Limits(min=5, max=30, step=0.5)),   # checked before anything is written
-    Point(MODE,
-          read=HoldingRegister(21), write=HoldingRegister(21)),   # 0, 1 or 2; nothing else
-    Point(SERIAL_NUMBER,
-          read=InputRegister(1), data_type=DataType.UINT32,
-          poll_rate=PollRate.STATIC),     # read once, when connecting
-                   ])])
+THERMOSTAT = ModbusModel(
+    "Thermostat", "Example",
+    [Section([
+        Point(TEMPERATURE,
+              read=InputRegister(10),     # where the value is
+              data_type=DataType.INT16,   # a signed 16-bit number
+              scale=0.1,                  # the device sends 215 for 21.5
+              unit=Unit.CELSIUS,
+              valid_raw=range(-0x8000, 0x7FFF),   # all but 0x7FFF, what it sends with no reading
+              poll_rate=PollRate.MEDIUM),
+        Point(TARGET,
+              read=HoldingRegister(20), write=HoldingRegister(20),
+              data_type=DataType.INT16, scale=0.1, unit=Unit.CELSIUS,
+              limits=Limits(min=5, max=30, step=0.5),   # checked before anything is written
+              poll_rate=PollRate.SLOW),
+        Point(MODE,
+              read=HoldingRegister(21), write=HoldingRegister(21),   # 0, 1 or 2; nothing else
+              poll_rate=PollRate.SLOW),
+        Point(SERIAL_NUMBER,
+              read=InputRegister(1), data_type=DataType.UINT32,
+              poll_rate=PollRate.STATIC),   # read once, when connecting
+    ])],
+    poll_intervals={
+        PollRate.MEDIUM: 30.0,            # guess
+        PollRate.SLOW: 60.0,              # guess
+    },
+    read_back_after=2.0,                  # measured on the Example Thermostat: shown 2 s after (example/thermostat#1)
+    write_retry=NO_RETRY,                 # manual: "a write is never answered busy"
+    scan_check=None,                      # it has nothing to scan
+    identity_points=(),
+    scan_steps=(),
+    numbering=plain(first_address=1),     # manual: "registers are numbered by their address"
+    max_registers=125,                    # manual: "reads of up to 125 registers"
+    max_bits=2000,                        # manual: "reads of up to 2000 coils"
+    single_write=SingleWrite.FC06,        # manual: "function codes 3, 4, 6 and 16"
+    bit_write=None,                       # it writes no single bit of a register
+    busy=Retry(Exponential(0.2, factor=2.0, max=None), Attempts(5)),   # guess
+    answers_within=0.5,                   # manual: "replies within 500 ms"
+)
 ```
+
+A model checks itself when it is made, and raises `ModelError` naming every problem: a poll rate
+its readable points use with no interval, an interval of a rate nothing is read at, a
+`scan_check` missing where it scans or given where it does not, a `bit_write` missing where a
+point writes one bit of a holding register or given where none does, and a count or a time its
+protocol cannot have.
+
+The package lists every model once, and creates a client with only what depends on the
+installation, writing out what is needed before the model is known:
+
+```python
+"""my_devices/__init__.py"""
+from modbus_event_connect import Client, CircuitBreaker, Clock, Exponential, Retry
+from modbus_event_connect.modbus import PORT, ModbusDevice
+
+from ._thermostat import MODE, SERIAL_NUMBER, TARGET, TEMPERATURE, THERMOSTAT, Mode
+
+MODELS = [THERMOSTAT]
+
+
+def create_client(*, host: str, unit_id: int, port: int = PORT, read_only: bool = False,
+                  clock: Clock | None = None) -> Client:
+    """A client for the thermostat at `host`; call `connect()` on it."""
+    device = ModbusDevice.tcp(
+        host, port=port, unit_id=unit_id, models=MODELS,
+        reconnect=CircuitBreaker(after=3, retry=Retry(Exponential(2.0, factor=2.0, max=10.0), None)),   # guess
+        timeout_margin=2.5,               # guess: the network's share of a request's wait
+        connect_timeout=3.0,              # guess
+        frame_gap=0.0,                    # manual: "no pause is needed between requests"
+        clock=clock)
+    return Client(device, THERMOSTAT,
+                  offline_after_intervals=3,   # guess: three missed reads of MEDIUM, 90 s
+                  read_only=read_only, clock=clock)
+```
+
+A second model is a second file, added to `MODELS`. A model reached over another protocol is a
+model of that protocol, in a list of its own: a device takes the models of its own protocol only.
 
 A key's type is what the point's value is: `bool` for `BOOL` or a bit, `str` for text, `int` for
 an integer that stays whole after scaling, `float` for any number, `date` and `datetime` for a
@@ -371,9 +481,9 @@ points, with their types.
 
 A mistake in a point, such as limits on a point that cannot be written, or a key type its
 registers cannot hold, raises `ValueError` when the point is created, naming every problem at
-once. A mistake between points, such as two
-overlapping, raises `ModelError` from `connect()`; test for it first, see
-[Testing a model](#testing-a-model).
+once; so does a model setting its protocol cannot meet. A mistake between points for one unit,
+such as two overlapping, or one the protocol cannot carry, raises `ModelError` from `connect()`;
+test for it first, see [Testing a model](#testing-a-model).
 
 **Keys are forever.** Applications store them, for example in the ids of what they build. Choose them
 carefully, and never rename one. The names of a state's members are forever too: an
@@ -389,8 +499,8 @@ application may show or store them.
 A point has a read side, a write side, or both. They may differ, for a device that reports a
 setting in one place and takes it in another.
 
-**Every model states** its protocol's options, `ModbusOptions(...)` or `MicroNabtoOptions()`,
-and `read_back_after`, see [Writing](#writing). A model without them cannot be created.
+**Every model states** every setting of its protocol, see [One file per model](#one-file-per-model);
+it cannot be created without them.
 
 **Modbus addresses.** Manuals number registers in different ways, and a wrong guess shifts
 every value by one register while still looking plausible. So there is no default: the model
@@ -410,26 +520,49 @@ A `RegisterNumbering` lists, for each table, ranges of numbers and the address e
 starts at. A manual that continues a table in another range gets one `NumberRange` for each.
 
 ```python
-from modbus_event_connect.modbus import ModbusOptions, NumberRange, RegisterNumbering
+from modbus_event_connect.modbus import InputRegister, ModbusModel, NumberRange, RegisterNumbering
 
 NUMBERING = RegisterNumbering(
     input_registers=[NumberRange(first=30001, last=39999, address=0)],
     holding_registers=[NumberRange(first=40001, last=49999, address=0)],
 )
-Model(..., options=ModbusOptions(numbering=NUMBERING))
+ModbusModel(..., numbering=NUMBERING, ...)
 
-Point("temperature", read=InputRegister(30011))     # sent as address 10
+Point(Key("temperature", float), read=InputRegister(30011), data_type=DataType.INT16, scale=0.1,
+      poll_rate=PollRate.MEDIUM)   # sent as address 10
 ```
 
 A number in none of its table's ranges is a mistake in the model. It is reported before
 anything is read, never guessed at.
 
-`ModbusOptions` also says how many registers the device takes in one read. The Modbus
-specification allows 125 registers or 2000 bits; set `max_registers` lower for a device that
-takes fewer. Neighbouring points are read together, up to that limit.
+The model also says how many registers the device takes in one read. The Modbus
+specification allows 125 registers or 2000 bits; `max_registers` and `max_bits` say how many of
+them the device takes. Neighbouring points are read together, up to that limit.
 
 **micro_nabto** points name an object and an address, `DatapointRegister(27, obj=0)`, as the
-device's documentation gives them.
+device's documentation gives them. A `MicroNabtoModel` states how many registers one read asks
+for, at most as many as one UDP datagram can ask for, how long an acknowledged request is waited
+for, how long a later answer to a read sent again is waited for, and how an answer of only zeros
+is read again:
+
+```python
+from modbus_event_connect import Fixed, PollRate, Retry, Steps, Within
+from modbus_event_connect.micro_nabto import MicroNabtoModel, RereadZeros
+
+VENTILATION = MicroNabtoModel(
+    "Ventilation", "Example", VENTILATION_SECTIONS,
+    poll_intervals={PollRate.FAST: 10.0, PollRate.RARE: 900.0},   # guess
+    read_back_after=1.0,                  # guess
+    write_retry=Retry(Fixed(0.5), Within(15.0)),   # reported: writes answered busy, taken when sent again
+    scan_check=None,                      # it has nothing to scan
+    identity_points=(),
+    scan_steps=(),
+    max_registers=64,                     # guess: one read of 108 was answered; this leaves room
+    answer_wait=2.0,                      # guess
+    later_answer_wait=5.0,                # guess
+    zeros=RereadZeros(within=7.5, wait=Steps(0.5, then=Fixed(1.0)), at_once=True, halves=True),   # guess
+)
+```
 
 ## How a value is decoded
 
@@ -501,12 +634,14 @@ for a setting people think of in hours gets `transform=Transforms.MINUTES_AS_HOU
 
 | Field | What it does |
 |---|---|
-| `poll_rate` | `FAST`, `MEDIUM` (the default), `SLOW`, `RARE` or `STATIC`; see the table in Part 1 |
+| `poll_rate` | `FAST`, `MEDIUM`, `SLOW`, `RARE` or `STATIC`; every point that can be read has one, and no other |
 | `poll_always=True` | read even when no one subscribes, for a value the model itself relies on |
 | `deadband=0.2` | changes smaller than this are not reported |
-| `Model(poll_intervals=...)` | this device's own seconds per poll rate |
-| `Model(min_poll_interval=5)` | the shortest interval this device copes with; apps cannot go below it |
-| `Model(offline_after=30.0)` | seconds without an answer before the device counts as not answering |
+| `poll_intervals={PollRate.FAST: 10.0, ...}`, on the model | its own seconds per poll rate: for exactly the rates its readable points and its scan check use; `STATIC` has none |
+| `scan_check=PollRate.RARE`, on the model | the rate at which what its scans read is read again; see [When the unit changes](#when-the-unit-changes) |
+
+How long a device may stay silent before it counts as not answering is the client's
+`offline_after_intervals`, counted in the model's fastest interval.
 
 Pick the rate from how fast the value changes, not from how often it is looked at:
 temperatures `MEDIUM`, on/off states `FAST`, settings `SLOW`, firmware versions `STATIC`.
@@ -519,25 +654,29 @@ temperatures `MEDIUM`, on/off states `FAST`, settings `SLOW`, firmware versions 
 | `write_kind=WriteKind.STATE` | a setting (the default): writes that queue up collapse to the newest |
 | `write_kind=WriteKind.COMMAND` | an action: every write is sent |
 | `pulse=Pulse(idle=0, after=1.0)` | a `COMMAND` that is written back to `idle` after 1 s |
-| `read_back_after=5.0` | this point takes longer than its device to show a write |
 | `on_write=Refresh(["mode", "target"])` | also read these after writing, since the write changes them |
 | `on_change=Refresh(Labels(room=3))` | read these when this point's value changes |
 
 After a write, the written point is read back, so apps see what the device holds. How long a
 device takes before a read shows a write differs from device to device, and only you can know
-it for yours. So every model states it: `Model(read_back_after=...)`, in seconds. A point that
-is slower than the rest of its device gets its own `read_back_after`.
+it for yours. So every model states its `read_back_after`, in seconds as measured.
 
-A point with `on_write` is read back together with its targets, after the same delay, or after
-`Refresh(targets, after=...)` seconds. With `until_stable=30`, the targets are read again while
-they keep changing, for up to 30 s, for a device that moves slowly to a new value.
+The targets of a point's `on_write` are read after the same delay, or after
+`Refresh(targets, after=...)` seconds; the written point itself is read back after
+`read_back_after` either way. With `until_stable=30`, the targets are read again while they keep
+changing, for up to 30 s, for a device that moves slowly to a new value.
+
+`point.write_range()` gives the lowest and highest value a point can be written with, and the
+step between them: its limits, and where they leave a bound out, what its registers carry
+through `scale`, `offset` and `transform`. A float data type carries any number, so it has a
+range only where its limits give both bounds.
 
 **Measure it** on your device, with a point you may change and two values it may take:
 
 ```python
 from modbus_event_connect.testing import measure_read_back
 
-measured = await measure_read_back(client, TARGET, (20.0, 21.0), delays=(1, 2, 3, 4, 5))
+measured = await measure_read_back(client, TARGET, (20.0, 21.0), delays=(1, 2, 3, 4, 5), repeats=3)
 print(measured)
 ```
 
@@ -561,10 +700,11 @@ A model can cover several variants. The *identity* says which one this unit is: 
 device reported when connecting, plus any `identity_points` the model reads first.
 
 ```python
-Model(...,
-      identity_points=[Point(Key("firmware", int), read=InputRegister(0), poll_rate=PollRate.STATIC)],
-      sections=[Section(common_points),
-                Section(cooling_points, when=lambda identity: identity["firmware"] >= 20)])
+ModbusModel("Heat pump", "Example",
+            [Section(common_points),
+             Section(cooling_points, when=lambda identity: identity["firmware"] >= 20)],
+            identity_points=[Point(Key("firmware", int), read=InputRegister(0), poll_rate=PollRate.STATIC)],
+            ...)
 ```
 
 For devices so different that they deserve their own model, give the client a function that
@@ -582,16 +722,17 @@ def room(n):
     return [Point(Key(f"room_{n}_installed", int), read=InputRegister(100 + 10 * n),
                   poll_rate=PollRate.STATIC),
             Point(Key(f"room_{n}_temperature", float), read=InputRegister(101 + 10 * n),
-                  data_type=DataType.INT16, scale=0.1, unit=Unit.CELSIUS)]
+                  data_type=DataType.INT16, scale=0.1, unit=Unit.CELSIUS, poll_rate=PollRate.MEDIUM)]
 
 async def scan_room(scan: Scan, n: int):
     installed = await scan.read([f"room_{n}_installed"])
     if installed[f"room_{n}_installed"].value == 0:
         scan.set_available(Labels(room=n), False, reason="no room")
 
-HEATING = Model(name="Heating", manufacturer="Example",
-                options=ModbusOptions(numbering=plain(first_address=1)), read_back_after=2.0,
-                sections=[RepeatedSection(room, range(1, 9), label="room", scan=scan_room)])
+HEATING = ModbusModel("Heating", "Example", [RepeatedSection(room, range(1, 9), label="room", scan=scan_room)],
+                      poll_intervals={PollRate.MEDIUM: 30.0, PollRate.RARE: 900.0},   # guess
+                      scan_check=PollRate.RARE,   # guess: rooms are seldom set up
+                      ...)
 ```
 
 Every point `room(n)` returns is labelled `room=n`, so `Labels(room=3)` selects room 3's points.
@@ -608,35 +749,42 @@ installed.
 
 A room set up later, or one taken away, is found while polling; nobody needs to connect again.
 
-- What each scan read is read again at `PollRate.SCAN`, the scans spread evenly over it. A
-  scan reads only what decides what the unit has, so that is all that is read.
+- What each scan read is read again at the model's `scan_check` rate - one of its own poll
+  rates, whose interval it states - the scans spread evenly over it. A scan reads only what
+  decides what the unit has, so that is all that is read. A model that scans states a
+  `scan_check`; one that does not, states `None`. `PollRate.STATIC` checks only when asked.
 - Where that has changed, only that scan runs again: one room's. A change to what the whole
   unit's `scan_steps` read scans everything again, choosing the model afresh.
 - A register a read finds missing is no longer read, and its room is checked at once.
 - An unanswered read never changes anything; the check is tried again later.
 - `client.subscribe_points(callback)` is told the keys gained and lost. A lost key's
   subscribers are told `MISSING`.
-- `await client.refresh(PollRate.SCAN)` checks now; `set_poll_interval(PollRate.SCAN, ...)`
-  sets how often. To find out everything afresh, `disconnect()` and `connect()`.
+- `await client.refresh(rate)`, given the model's `scan_check` rate, checks now, as well as
+  reading that rate's points. To find out everything afresh, `disconnect()` and `connect()`.
 
 ## Testing a model
 
 Test a model without the device. `assert_models_valid` resolves each model against every
-identity you expect to meet, and fails listing every problem: overlapping registers, a refresh
-naming a key that does not exist, a transform that does not convert back, a section no identity
-includes.
+identity you expect to meet, and fails listing every problem: a model given twice, overlapping
+registers, a register the protocol cannot carry, a refresh naming a key that does not exist, a
+transform that does not convert back, a section no identity includes.
 
 ```python
+from modbus_event_connect import NO_RETRY, CircuitBreaker, Client
+from modbus_event_connect.modbus import ModbusDevice
 from modbus_event_connect.testing import (SimulatedModbusDevice, SimulatedModbusGateway,
                                           assert_models_valid)
+from my_devices import MODELS, TEMPERATURE, THERMOSTAT
 
 def test_models_are_valid():
-    assert_models_valid(THERMOSTAT, identities=[{}])
+    assert_models_valid(MODELS, identities=[{}])
 
 async def test_temperature_is_read():
-    device = SimulatedModbusDevice(input_registers={1: 0, 2: 1234, 10: 215},
-                                   holding_registers={20: 210})
-    client = Client(ModbusDevice(SimulatedModbusGateway({1: device}), reconnect=None), THERMOSTAT)
+    unit = SimulatedModbusDevice(input_registers={1: 0, 2: 1234, 10: 215},
+                                 holding_registers={20: 210, 21: 1})
+    device = ModbusDevice(SimulatedModbusGateway({1: unit}), 1, models=MODELS, timeout_margin=0.0,
+                          reconnect=CircuitBreaker(after=3, retry=NO_RETRY))
+    client = Client(device, THERMOSTAT, offline_after_intervals=3)
     await client.connect()
     assert client.value(TEMPERATURE).value == 21.5
 ```

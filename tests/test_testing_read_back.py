@@ -5,31 +5,28 @@ from collections.abc import Mapping, Sequence
 
 import pytest
 
+from event_connect import Identity, InvalidValueError, Key, Limits, PollRate, ReadOnlyError
 from modbus_event_connect._client import Client
 from modbus_event_connect._device import (
     EncodedWrite,
-    Identity,
     Outcome,
-    ProtocolOptions,
     ReadResult,
     WriteResult,
 )
-from modbus_event_connect._errors import InvalidValueError, ReadOnlyError
-from modbus_event_connect._key import Key
 from modbus_event_connect._model import Model, Section
-from modbus_event_connect._point import Limits, Point
+from modbus_event_connect._point import Point
 from modbus_event_connect.modbus._access import HoldingRegister, InputRegister
-from modbus_event_connect.testing._clock import FakeClock
+from event_connect.testing import FakeClock
 from modbus_event_connect.testing._read_back import (
     ReadBackMeasurement,
     ReadBackTrial,
     measure_read_back,
 )
+from models import OFFLINE_AFTER_INTERVALS, modbus_model
 
-SETTING = Point(Key("setting", int), read=HoldingRegister(1), write=HoldingRegister(1))
-SENSOR = Point(Key("sensor", int), read=InputRegister(2))
-MODEL = Model(name="Lagging", manufacturer="Test", sections=[Section([SETTING, SENSOR])],
-              options=ProtocolOptions(), read_back_after=1.0)
+SETTING = Point(Key("setting", int), read=HoldingRegister(1), write=HoldingRegister(1), poll_rate=PollRate.MEDIUM)
+SENSOR = Point(Key("sensor", int), read=InputRegister(2), poll_rate=PollRate.MEDIUM)
+MODEL = modbus_model([Section([SETTING, SENSOR])], name="Lagging", manufacturer="Test")
 
 
 class LaggingDevice:
@@ -49,8 +46,12 @@ class LaggingDevice:
     async def disconnect(self) -> None:
         pass
 
-    def configure(self, options: ProtocolOptions) -> None:
-        pass
+    @property
+    def models(self) -> tuple[Model, ...]:
+        return (MODEL,)
+
+    def use(self, model: Model) -> None:
+        return None
 
     async def read(self, points: Sequence[Point[Any]]) -> Mapping[str, ReadResult]:
         now = self.clock.monotonic()
@@ -71,16 +72,13 @@ class LaggingDevice:
 
 def _measure(lag: float, *, applies: bool = True, read_only: bool = False,
              delays: Sequence[float] = (1, 2, 3, 4)) -> tuple[ReadBackMeasurement, LaggingDevice]:
-    clock = FakeClock()
+    clock = FakeClock(autojump=True)
     device = LaggingDevice(clock, lag, applies=applies)
-    client = Client(device, MODEL, clock=clock, read_only=read_only)
-
-    async def sleep(seconds: float) -> None:
-        clock.advance(seconds)
+    client = Client(device, MODEL, clock=clock, read_only=read_only, offline_after_intervals=OFFLINE_AFTER_INTERVALS)
 
     async def run() -> ReadBackMeasurement:
         await client.connect()
-        return await measure_read_back(client, SETTING.key, (10, 20), delays=delays, repeats=3, sleep=sleep)
+        return await measure_read_back(client, SETTING.key, (10, 20), delays=delays, repeats=3, clock=clock)
     return asyncio.run(run()), device
 
 
@@ -127,11 +125,11 @@ def test_a_measurement_that_cannot_tell_anything_is_refused(key: Key[int], value
                                                              delays: tuple[float, ...]) -> None:
     clock = FakeClock()
     device = LaggingDevice(clock, 0)
-    client = Client(device, MODEL, clock=clock)
+    client = Client(device, MODEL, clock=clock, offline_after_intervals=OFFLINE_AFTER_INTERVALS)
 
     async def run() -> None:
         await client.connect()
-        await measure_read_back(client, key, values, delays=delays)
+        await measure_read_back(client, key, values, delays=delays, repeats=3)
     with pytest.raises(ValueError):
         asyncio.run(run())
     assert device.writes == []
@@ -139,16 +137,15 @@ def test_a_measurement_that_cannot_tell_anything_is_refused(key: Key[int], value
 
 def test_a_value_the_point_refuses_is_found_before_anything_is_written() -> None:
     """The point holds 0, below its limits, so it could not be written back at the end."""
-    limited = Point(Key("limited", int), read=HoldingRegister(1), write=HoldingRegister(1), limits=Limits(min=5, max=30))
-    model = Model(name="L", manufacturer="Test", sections=[Section([limited])], options=ProtocolOptions(),
-                  read_back_after=1.0)
+    limited = Point(Key("limited", int), read=HoldingRegister(1), write=HoldingRegister(1), limits=Limits(min=5, max=30), poll_rate=PollRate.MEDIUM)
+    model = modbus_model([Section([limited])], name="L", manufacturer="Test")
     clock = FakeClock()
     device = LaggingDevice(clock, 0)
-    client = Client(device, model, clock=clock)
+    client = Client(device, model, clock=clock, offline_after_intervals=OFFLINE_AFTER_INTERVALS)
 
     async def run() -> None:
         await client.connect()
-        await measure_read_back(client, Key("limited", int), (10, 20), delays=(1,))
+        await measure_read_back(client, Key("limited", int), (10, 20), delays=(1,), repeats=3)
     with pytest.raises(InvalidValueError):
         asyncio.run(run())
     assert device.writes == []

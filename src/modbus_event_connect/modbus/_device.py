@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from collections import Counter
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
+
+from event_connect import NO_RETRY, Breaker, CircuitBreaker, Clock, Identity, SystemClock
 
 from ._access import (
     MAX_REGISTERS_PER_WRITE,
@@ -16,10 +19,10 @@ from ._access import (
     DiscreteInput,
     HoldingRegister,
     InputRegister,
-    ModbusOptions,
     SingleWrite,
 )
 from ._connection import (
+    PORT,
     ExceptionCode,
     FunctionCode,
     ModbusConnection,
@@ -27,10 +30,10 @@ from ._connection import (
     Request,
     Response,
 )
-from .._clock import Clock, SystemClock
-from .._device import EncodedWrite, Identity, Outcome, ProtocolOptions, ReadResult, WriteResult
+from ._model import ModbusModel
+from .._device import EncodedWrite, Outcome, ReadResult, WriteResult
+from .._model import Model, checked_models, model_among
 from .._point import Access, Point
-from .._resilience import NO_RETRY, Attempts, Breaker, CircuitBreaker, Exponential, Retry
 
 _READ_FUNCTION: Mapping[type[Access], FunctionCode] = {
     Coil: FunctionCode.READ_COILS,
@@ -50,15 +53,7 @@ _OUTCOME_BY_CODE: Mapping[int, Outcome] = {
 }
 """Exception codes the core can act on. 0x03, 0x0A and anything unlisted are ERROR."""
 
-BUSY = Retry(Exponential(0.2), Attempts(5))
-"""A read answered "busy" is tried 4 times more, after 0.2 s, doubling each time."""
-_UNANSWERED_BEFORE_PAUSE = 3
-"""Requests in a row left unanswered before the device is not asked until its reconnect says."""
-
 _LOGGER = logging.getLogger(__name__)
-
-_CONNECTION_KEYWORDS = ("timeout", "frame_gap")
-"""`ModbusDevice.tcp()` keywords that belong to the connection rather than the device."""
 
 
 @dataclass(frozen=True)
@@ -84,7 +79,7 @@ class _Batch:
 class _Answer:
     """What came of one request after busy retries.
 
-    `response` is None when it was never sent because the device is backing off.
+    `response` is None when it was never sent because the device's breaker is open.
     """
     outcome: Outcome
     response: Response | None
@@ -96,85 +91,101 @@ class _Answer:
 
 
 class ModbusDevice:
-    """One unit on a Modbus connection; several may share one, each with its own retries and backoff."""
+    """One unit on a Modbus connection; several may share one, each with its own busy retries and
+    its own breaker."""
 
-    def __init__(self, connection: ModbusConnection, unit_id: int = 1, *,
-                 owns_connection: bool = False, clock: Clock | None = None,
-                 sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-                 reconnect: Retry | None, busy: Retry | None = None,
-                 busy_retries: int | None = None, busy_delay: float | None = None) -> None:
+    def __init__(self, connection: ModbusConnection, unit_id: int, *, reconnect: CircuitBreaker,
+                 models: Sequence[ModbusModel], timeout_margin: float, owns_connection: bool = False,
+                 clock: Clock | None = None) -> None:
         """Args:
-            reconnect: when the device is asked again once 3 requests in a row went unanswered,
-                which also reopens a closed connection; its `ready()` is asked before each try.
-                None asks it again only after `connect()`.
+            reconnect: when the device is no longer asked, after requests in a row went
+                unanswered, and when it is asked again, which also reopens a closed connection;
+                its retry's `ready()` is asked before each try.
+            models: every model the device may be; `use()` chooses one.
+            timeout_margin: seconds a request waits beyond the time the model's unit answers
+                within, for the network and whatever relays the request.
             owns_connection: whether `disconnect()` also closes the shared connection.
-            busy: how a read answered 0x06 is tried again; None leaves it to the model, and to
-                `BUSY`. A write answered 0x06 is not sent again: it is `BUSY`.
-            busy_retries, busy_delay: `busy` as retries doubling from a delay.
 
         Raises:
-            ValueError: an argument cannot be meant, or a part is given both ways.
+            ValueError: `unit_id` is not 0-255, or `timeout_margin` is not a finite number >= 0.
+            ModelError: no model, or one given twice.
         """
         if not 0 <= unit_id <= 255:
             raise ValueError(f"a unit id is 0-255, got {unit_id}")
-        if busy_retries is not None or busy_delay is not None:
-            if busy is not None:
-                raise ValueError("give busy, or busy_retries and busy_delay, not both")
-            busy = Retry(Exponential(0.2 if busy_delay is None else busy_delay),
-                         Attempts(5 if busy_retries is None else busy_retries + 1))
+        if not (math.isfinite(timeout_margin) and timeout_margin >= 0):
+            raise ValueError(f"timeout_margin must be a finite number >= 0, got {timeout_margin}")
         self._connection = connection
         self._unit = unit_id
         self._owns_connection = owns_connection
         self._clock: Clock = clock if clock is not None else SystemClock()
-        self._sleep = sleep
-        self._own_busy = busy
         self._reconnect = reconnect
-        self._options: ModbusOptions | None = None
+        self._timeout_margin = timeout_margin
+        self._models = checked_models(models)
+        self._model: ModbusModel | None = None
         self._bit_locks: dict[int, asyncio.Lock] = {}
-        self._breaker: Breaker = CircuitBreaker(
-            after=_UNANSWERED_BEFORE_PAUSE, retry=NO_RETRY if reconnect is None else reconnect).breaker()
+        self._breaker: Breaker = reconnect.breaker()
 
         self._requests = 0
         self._busy_repeats = 0
-        self._refused_while_backing_off = 0
+        self._refused_while_open = 0
         self._outcomes: Counter[Outcome] = Counter()
         self._latency_total = 0.0
 
     @classmethod
-    def tcp(cls, host: str, port: int = 502, unit_id: int = 1, *, reconnect: Retry | None,
-            **kwargs: Any) -> ModbusDevice:
-        """A device on a Modbus TCP connection of its own. `timeout` and `frame_gap` go to the
-        connection, `clock` to both, everything else to the device."""
-        connection_kwargs: dict[str, Any] = {k: kwargs.pop(k) for k in _CONNECTION_KEYWORDS if k in kwargs}
-        if "clock" in kwargs:
-            connection_kwargs["clock"] = kwargs["clock"]
-        connection = ModbusTcpConnection(host, port, **connection_kwargs)
-        return cls(connection, unit_id, reconnect=reconnect, owns_connection=True, **kwargs)
+    def tcp(cls, host: str, *, port: int = PORT, unit_id: int, reconnect: CircuitBreaker,
+            models: Sequence[ModbusModel], timeout_margin: float, connect_timeout: float, frame_gap: float,
+            clock: Clock | None = None) -> ModbusDevice:
+        """A device on a Modbus TCP connection of its own, which `disconnect()` closes;
+        `connect_timeout` and `frame_gap` are the connection's, `clock` both's."""
+        connection = ModbusTcpConnection(host, port, connect_timeout=connect_timeout, frame_gap=frame_gap,
+                                         clock=clock)
+        return cls(connection, unit_id, reconnect=reconnect, models=models, timeout_margin=timeout_margin,
+                   owns_connection=True, clock=clock)
 
     # ---------------------------------------------------------------- Device
 
     @property
     def unit_id(self) -> int:
+        """The unit id every request carries."""
         return self._unit
 
     @property
-    def options(self) -> ModbusOptions | None:
-        """The model's options; None until `configure()`."""
-        return self._options
+    def models(self) -> tuple[ModbusModel, ...]:
+        """Every model the device may be."""
+        return self._models
 
     @property
-    def busy(self) -> Retry:
-        """How a read answered "busy" is tried again: the device's when given, else the model's,
-        else `BUSY`."""
-        if self._own_busy is not None:
-            return self._own_busy
-        if self._options is not None and self._options.busy is not None:
-            return self._options.busy
-        return BUSY
+    def model(self) -> ModbusModel | None:
+        """The model `use()` chose; None before it chose one."""
+        return self._model
 
     @property
-    def reconnect(self) -> Retry | None:
-        """When the device is asked again after it stopped answering; None only after `connect()`."""
+    def max_registers(self) -> int:
+        """Most registers asked for in one read: the chosen model's, and before one is chosen,
+        the fewest any model takes."""
+        if self._model is not None:
+            return self._model.max_registers
+        return min(model.max_registers for model in self._models)
+
+    @property
+    def max_bits(self) -> int:
+        """Most coils or discrete inputs asked for in one read: the chosen model's, and before one
+        is chosen, the fewest any model takes."""
+        if self._model is not None:
+            return self._model.max_bits
+        return min(model.max_bits for model in self._models)
+
+    @property
+    def timeout(self) -> float:
+        """Seconds a request waits for its answer: the time the unit answers within, the chosen
+        model's, and before one is chosen, the longest any model takes, plus `timeout_margin`."""
+        answers_within = (self._model.answers_within if self._model is not None
+                          else max(model.answers_within for model in self._models))
+        return answers_within + self._timeout_margin
+
+    @property
+    def reconnect(self) -> CircuitBreaker:
+        """When the device is no longer asked after it stopped answering, and when it is asked again."""
         return self._reconnect
 
     async def connect(self) -> Identity | None:
@@ -189,18 +200,24 @@ class ModbusDevice:
         if self._owns_connection:
             await self._connection.close()
 
-    def configure(self, options: ProtocolOptions | None) -> None:
-        if options is None:
-            self._options: ModbusOptions | None = None
-        elif isinstance(options, ModbusOptions):
-            self._options = options
-        else:
-            raise TypeError(f"a Modbus device needs ModbusOptions, not {type(options).__name__}")
+    def use(self, model: Model) -> None:
+        """Talk to the device as `model` says.
 
-    def _configured(self) -> ModbusOptions:
-        if self._options is None:
-            raise RuntimeError("configure() the device with its model's options before using it")
-        return self._options
+        Raises:
+            ModelError: `model` is not one of `models`.
+        """
+        self._model = model_among(self._models, model)
+
+    def _chosen(self) -> ModbusModel:
+        """The chosen model: without it, no register has an address.
+
+        Raises:
+            RuntimeError: `use()` has not chosen one.
+        """
+        if self._model is None:
+            raise RuntimeError("use() the device with its model first: how its registers are numbered "
+                               "is the model's")
+        return self._model
 
     async def read(self, points: Sequence[Point[Any]]) -> Mapping[str, ReadResult]:
         tables: dict[type[Access], dict[_Span, list[Point[Any]]]] = {}
@@ -209,12 +226,12 @@ class ModbusDevice:
             if access is None:
                 raise TypeError(f"point {point.key!r} has no read side")
             table = _table(access, point, "read")
-            span = _Span(self._configured().address(access), 1 if access.bits else point.registers)
+            span = _Span(self._chosen().address(access), 1 if access.bits else point.registers)
             tables.setdefault(table, {}).setdefault(span, []).append(point)
 
         result: dict[str, ReadResult] = {}
         for table, spans in tables.items():
-            limit = self._configured().max_bits if table.bits else self._configured().max_registers
+            limit = self.max_bits if table.bits else self.max_registers
             for batch in _batches(spans, limit):
                 await self._read_batch(_READ_FUNCTION[table], batch, result)
         return result
@@ -227,7 +244,7 @@ class ModbusDevice:
         table = _table(access, point, "write")
         if not access.writable:
             raise TypeError(f"point {point.key!r}: {table.__name__} cannot be written")
-        address = self._configured().address(access)
+        address = self._chosen().address(access)
 
         if table is Coil:
             if value.bit_index is not None or len(value.registers) != 1 or value.registers[0] not in (0, 1):
@@ -245,20 +262,25 @@ class ModbusDevice:
         return WriteResult(answer.outcome, answer.exception_code, answer.detail)
 
     def diagnostics(self) -> Mapping[str, object]:
-        """Counters for a bug report; never a host or port. `outcomes` counts every exchange (a
-        request plus its busy retries) by how it ended."""
-        backing_off = self._backing_off()
+        """Counters for a bug report; never a host or port.
+
+        `outcomes` counts every exchange (a request plus its busy retries) by how it ended. Of the
+        breaker: whether it is `open`, and for how many seconds more (`open_for`, infinite once it
+        gave up), its `openings` since the last answer, whether it `gave_up`, and the requests
+        refused while it was open.
+        """
+        open_for = self._breaker.open_for(self._clock.monotonic())
         return {
             "unit_id": self._unit,
             "requests": self._requests,
             "outcomes": {outcome.name: self._outcomes[outcome] for outcome in Outcome},
             "busy_retries": self._busy_repeats,
             "consecutive_no_answers": self._breaker.unanswered_in_a_row,
-            "backing_off": backing_off,
-            "backing_off_for": self._breaker.open_for(self._clock.monotonic()),
-            "backoffs": self._breaker.opened,
+            "open": open_for > 0,
+            "open_for": open_for,
+            "openings": self._breaker.openings,
             "gave_up": self._breaker.gave_up,
-            "refused_while_backing_off": self._refused_while_backing_off,
+            "refused_while_open": self._refused_while_open,
             "average_latency": self._latency_total / self._requests if self._requests else None,
         }
 
@@ -281,14 +303,17 @@ class ModbusDevice:
     # ---------------------------------------------------------------------- writing
 
     def _register_write(self, address: int, registers: tuple[int, ...]) -> Request:
-        if len(registers) == 1 and self._configured().single_write is SingleWrite.FC06:
+        if len(registers) == 1 and self._chosen().single_write is SingleWrite.FC06:
             return Request(self._unit, FunctionCode.WRITE_SINGLE_REGISTER, address, values=registers)
         return Request(self._unit, FunctionCode.WRITE_MULTIPLE_REGISTERS, address,
                        count=len(registers), values=registers)
 
     async def _write_bit(self, address: int, bit: int, on: bool) -> _Answer:
         mask = 1 << bit
-        if self._configured().bit_write is BitWrite.MASK:
+        bit_write = self._chosen().bit_write
+        if bit_write is None:
+            raise ValueError("the model writes no single bit of a holding register: it has no bit_write")
+        if bit_write is BitWrite.MASK:
             return await self._exchange(Request(self._unit, FunctionCode.MASK_WRITE_REGISTER, address,
                                                 and_mask=~mask & 0xFFFF, or_mask=mask if on else 0),
                                         retry=False)
@@ -304,21 +329,21 @@ class ModbusDevice:
             register = register | mask if on else register & ~mask & 0xFFFF
             return await self._exchange(self._register_write(address, (register,)), retry=False)
 
-    # ------------------------------------------------------------- one exchange, backoff
+    # ------------------------------------------------------------ one exchange, the breaker
 
     async def _exchange(self, request: Request, *, retry: bool = True) -> _Answer:
-        """Send `request`, trying "busy" again as `busy` says unless `retry` is False. Never raises
-        for the device's doing."""
-        rule = self.busy if retry else NO_RETRY
+        """Send `request`, trying "busy" again as the model's `busy` says unless `retry` is False.
+        Never raises for the device's doing."""
+        rule = self._chosen().busy if retry else NO_RETRY
         started = self._clock.monotonic()
         tries = 0
         while True:
             response = await self._send(request)
             if response is None:
-                self._refused_while_backing_off += 1
+                self._refused_while_open += 1
                 return _Answer(Outcome.NO_ANSWER, None,
-                               f"{_where(request)}: not sent, backing off after "
-                               f"{_UNANSWERED_BEFORE_PAUSE} unanswered requests")
+                               f"{_where(request)}: not sent, the breaker is open after "
+                               f"{self._reconnect.after} unanswered requests")
             tries += 1
             if response.exception_code != ExceptionCode.SERVER_DEVICE_BUSY:
                 break
@@ -326,14 +351,14 @@ class ModbusDevice:
             if delay is None:
                 break
             self._busy_repeats += 1
-            await self._sleep(delay)
+            await self._clock.sleep(delay)
         outcome = _outcome(response)
         self._outcomes[outcome] += 1
         return _Answer(outcome, response, _describe(request, response, outcome, tries - 1))
 
     async def _send(self, request: Request) -> Response | None:
         """Puts one request on the connection, or returns `None` while the breaker is open. Once
-        its pause is over, one probe request goes through if `reconnect` is ready; others wait
+        its time is up, it lets one probe through if `reconnect`'s retry is ready; the others wait
         for its answer."""
         if not await self._ready_to_probe(request):
             return None
@@ -342,7 +367,7 @@ class ModbusDevice:
             return None
         with attempt:
             started = self._clock.monotonic()
-            response = await self._connection.request(request)
+            response = await self._connection.request(request, timeout=self.timeout)
             self._requests += 1
             self._latency_total += self._clock.monotonic() - started
             # A gateway only answers 0x0B after waiting out its own timeout on the bus, so a device
@@ -351,25 +376,25 @@ class ModbusDevice:
                 openings = self._breaker.openings
                 attempt.unanswered(self._clock.monotonic())
                 if self._breaker.openings != openings:
-                    self._log_pause(request)
+                    self._log_opening(request)
             else:
                 attempt.answered()
         return response
 
     async def _ready_to_probe(self, request: Request) -> bool:
-        """Whether a probe that is due may go, as `reconnect.ready()` says; True when none is due."""
+        """Whether a probe that is due may go, as `reconnect`'s retry says; True when none is due."""
         now = self._clock.monotonic()
         breaker = self._breaker
-        if self._reconnect is None or not breaker.is_open or breaker.open_for(now) > 0:
+        if not breaker.is_open or breaker.open_for(now) > 0:
             return True
-        if await self._reconnect.ready():
+        if await self._reconnect.retry.ready():
             return True
         breaker.postpone(self._clock.monotonic())
         _LOGGER.debug("unit %d: reconnect not ready; asking again in %.1f s",
                       request.unit_id, breaker.open_for(self._clock.monotonic()))
         return False
 
-    def _log_pause(self, request: Request) -> None:
+    def _log_opening(self, request: Request) -> None:
         breaker = self._breaker
         if breaker.gave_up:
             _LOGGER.debug("unit %d: no answer after try %d; not asked again until connected",
@@ -377,9 +402,6 @@ class ModbusDevice:
         else:
             _LOGGER.debug("unit %d: no answer after try %d; asking again in %.1f s",
                           request.unit_id, breaker.openings, breaker.open_for(self._clock.monotonic()))
-
-    def _backing_off(self) -> bool:
-        return self._breaker.open_for(self._clock.monotonic()) > 0
 
 
 # ================================================================================ helpers

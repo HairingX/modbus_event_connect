@@ -1,11 +1,10 @@
-"""Modbus: address spaces and model options, the connection, and one device on it."""
+"""Modbus: address spaces, a model of a Modbus unit, the connection, and one device on it."""
 from ._access import (
     BitWrite,
     Coil,
     DiscreteInput,
     HoldingRegister,
     InputRegister,
-    ModbusOptions,
     NumberRange,
     RegisterNumbering,
     SingleWrite,
@@ -13,6 +12,7 @@ from ._access import (
     plain,
 )
 from ._connection import (
+    PORT,
     ExceptionCode,
     FunctionCode,
     ModbusConnection,
@@ -20,10 +20,11 @@ from ._connection import (
     Request,
     Response,
 )
-from ._device import BUSY, ModbusDevice
+from ._device import ModbusDevice
+from ._model import ModbusModel
 
 __all__ = [
-    "BUSY",
+    "PORT",
     "BitWrite",
     "Coil",
     "DiscreteInput",
@@ -33,7 +34,7 @@ __all__ = [
     "InputRegister",
     "ModbusConnection",
     "ModbusDevice",
-    "ModbusOptions",
+    "ModbusModel",
     "ModbusTcpConnection",
     "NumberRange",
     "RegisterNumbering",

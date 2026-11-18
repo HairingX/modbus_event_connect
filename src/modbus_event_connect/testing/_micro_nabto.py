@@ -9,13 +9,9 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from .._clock import Clock, SystemClock
-from ..micro_nabto import _wire as wire
+from event_connect import Clock, SystemClock
 
-_DISCOVERY_REQUEST = b"\x00\x00\x00\x01"
-_U_CONNECT, _DATA = 0x83, 0x16
-_CP_ID = 0x3F
-_PING, _DATAPOINT_READ, _SETPOINT_READ, _SETPOINT_WRITE = 0x11, 0x2D, 0x2A, 0x2B
+from ..micro_nabto import _wire as wire
 
 
 @dataclass(frozen=True)
@@ -92,8 +88,6 @@ class SimulatedMicroNabtoDevice:
         self.commands: list[Command] = []
         self.handshakes: list[bytes] = []
         """The client id of every accepted handshake."""
-        self.discoveries = 0
-        self.bad_checksums = 0
 
         self._sessions: dict[bytes, _Session] = {}
         self._next_server_id = 0x1A0
@@ -159,19 +153,18 @@ class SimulatedMicroNabtoDevice:
         if self.drop > 0:
             self.drop -= 1
             return
-        if data.startswith(_DISCOVERY_REQUEST) and len(data) > 12:
+        if data.startswith(wire.DISCOVERY_REQUEST) and len(data) > 12:
             self._discovery(data, addr)
         elif retired:
             return
-        elif len(data) >= wire.HEADER_LENGTH and data[8] == _U_CONNECT:
+        elif len(data) >= wire.HEADER_LENGTH and data[8] == wire.U_CONNECT:
             self._connect(data, addr)
-        elif len(data) >= wire.HEADER_LENGTH and data[8] == _DATA:
+        elif len(data) >= wire.HEADER_LENGTH and data[8] == wire.DATA:
             self._data(data, addr)
 
     def _discovery(self, data: bytes, addr: tuple[str, int]) -> None:
         wanted = data[12:].split(b"\x00", 1)[0].decode("ascii", "replace")
         if wanted in ("*", self.device_id):
-            self.discoveries += 1
             self._send(wire.DISCOVERY_REPLY + bytes(15) + self.device_id.encode("ascii") + b"\x00", addr)
 
     def _connect(self, data: bytes, addr: tuple[str, int]) -> None:
@@ -190,11 +183,10 @@ class SimulatedMicroNabtoDevice:
             server_id, status = bytes(4), wire.REFUSED_ACCESS.to_bytes(4, "big")
         body = (b"\x34\x00\x00\x0c" + status + server_id
                 + b"\x3b\x00\x00\x0d" + bytes(4) + b"\x3c\x00\x00\x03\x3c")
-        self._send(_header(client_id, bytes(4), _U_CONNECT, sequence, 16 + len(body)) + body, addr)
+        self._send(_header(client_id, bytes(4), wire.U_CONNECT, sequence, 16 + len(body)) + body, addr)
 
     def _data(self, data: bytes, addr: tuple[str, int]) -> None:
         if int.from_bytes(data[-2:], "big") != sum(data[:-2]) & 0xFFFF:
-            self.bad_checksums += 1
             return
         client_id, server_id, sequence = data[:4], data[4:8], data[12:14]
         session = self._sessions.get(client_id)
@@ -207,7 +199,7 @@ class SimulatedMicroNabtoDevice:
         session.last_seen = now
         if self.acknowledge:
             receipt = b"\x34\x00\x00\x08\x00\x00\x00\x03"
-            self._send(_header(client_id, server_id, _DATA, sequence, 16 + len(receipt)) + receipt, addr)
+            self._send(_header(client_id, server_id, wire.DATA, sequence, 16 + len(receipt)) + receipt, addr)
         repeat = sequence in session.sequences
         session.sequences.add(sequence)
 
@@ -238,25 +230,25 @@ class SimulatedMicroNabtoDevice:
         code = command[3]
         count = int.from_bytes(command[4:6], "big")
         body = command[6:]
-        if code == _PING:
+        if code == wire.PING:
             self.commands.append(Command(code, ()))
             ids = self.identity
             return (wire.PONG + _u32(ids["device_number"]) + _u32(ids["device_model"]) + _u32(0)
                     + _u32(ids["slave_device_number"]) + _u32(ids["slave_device_model"])
                     + b"\x00\x22us#1:" + session.email.encode("ascii") + b":")
-        if code == _DATAPOINT_READ:
+        if code == wire.DATAPOINT_READ:
             items = [(body[i], int.from_bytes(body[i + 1:i + 5], "big")) for i in range(0, 5 * count, 5)]
             self.commands.append(Command(code, tuple(items)))
             values = self._cut(_lookup(self.datapoint_registers, items))
             return (b"\x00\x00\x00\x04" if values is None
                     else count.to_bytes(2, "big") + b"".join(v.to_bytes(2, "big") for v in values))
-        if code == _SETPOINT_READ:
+        if code == wire.SETPOINT_READ:
             items = [(body[i], int.from_bytes(body[i + 1:i + 3], "big")) for i in range(0, 3 * count, 3)]
             self.commands.append(Command(code, tuple(items)))
             values = self._cut(_lookup(self.setpoint_registers, items))
             return (b"\x00\x00\x00\x04" if values is None
                     else b"\x00" + count.to_bytes(2, "big") + b"".join(v.to_bytes(2, "big") for v in values))
-        if code == _SETPOINT_WRITE:
+        if code == wire.SETPOINT_WRITE:
             writes = [(body[i], int.from_bytes(body[i + 1:i + 5], "big"), int.from_bytes(body[i + 5:i + 7], "big"))
                       for i in range(0, 7 * count, 7)]
             self.commands.append(Command(code, tuple(writes)))
@@ -300,7 +292,7 @@ def _email(packet: bytes) -> str | None:
         kind, length = packet[at], int.from_bytes(packet[at + 2:at + 4], "big")
         if length < 4:
             return None
-        if kind == _CP_ID:
+        if kind == wire.CP_ID:
             return packet[at + 5:at + length].decode("ascii", "replace")
         at += length
     return None
@@ -319,7 +311,7 @@ def _u32(value: int) -> bytes:
 def _answer_packet(client_id: bytes, server_id: bytes, sequence: bytes, answer: bytes) -> bytes:
     padding = 2 - len(answer) % 2
     total = 22 + len(answer) + padding + 2
-    packet = (_header(client_id, server_id, _DATA, sequence, total)
+    packet = (_header(client_id, server_id, wire.DATA, sequence, total)
               + b"\x36\x00" + (total - 16).to_bytes(2, "big") + b"\x00\x0a"
               + answer + bytes([padding]) * padding)
     return packet + (sum(packet) & 0xFFFF).to_bytes(2, "big")
@@ -327,10 +319,10 @@ def _answer_packet(client_id: bytes, server_id: bytes, sequence: bytes, answer: 
 
 def _registers_in(code: int, answer: bytes) -> int:
     """How many registers `answer` to a read holds."""
-    return (len(answer) - {_DATAPOINT_READ: 2, _SETPOINT_READ: 3}[code]) // 2
+    return (len(answer) - {wire.DATAPOINT_READ: 2, wire.SETPOINT_READ: 3}[code]) // 2
 
 
 def _only_zeros(code: int, answer: bytes) -> bytes | None:
     """`answer` to a read with every value 0, or None if it is no read's answer."""
-    start = {_DATAPOINT_READ: 2, _SETPOINT_READ: 3}.get(code)
+    start = {wire.DATAPOINT_READ: 2, wire.SETPOINT_READ: 3}.get(code)
     return answer[:start] + bytes(len(answer) - start) if start is not None else None

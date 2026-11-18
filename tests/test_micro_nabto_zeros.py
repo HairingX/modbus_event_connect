@@ -1,34 +1,44 @@
 """Answers of only zeros, where registers held values, and what the warnings alone tell of each
 outcome: against a simulated device on localhost UDP, on a fake clock."""
 import logging
+from dataclasses import replace
 from typing import Any
 
 import pytest
 
+from event_connect import AuthenticationError, CircuitBreaker, Identity, Key, PollRate, Quality
 from modbus_event_connect._client import Client
 from modbus_event_connect._data_type import DataType
-from modbus_event_connect._device import Identity, Outcome, ReadResult
-from modbus_event_connect._errors import AuthenticationError
-from modbus_event_connect._key import Key
-from modbus_event_connect._model import Model, Section
+from modbus_event_connect._device import Outcome, ReadResult
+from modbus_event_connect._model import Section
 from modbus_event_connect._point import Point
-from modbus_event_connect._value import Quality
 from modbus_event_connect.micro_nabto._access import DatapointRegister
 from modbus_event_connect.micro_nabto._connection import MicroNabtoConnection
-from modbus_event_connect.micro_nabto._device import TAKE_ZEROS, MicroNabtoDevice, MicroNabtoOptions, RereadZeros
+from modbus_event_connect.micro_nabto._device import MicroNabtoDevice
+from modbus_event_connect.micro_nabto._model import TAKE_ZEROS, MicroNabtoModel, RereadZeros
 from modbus_event_connect import Exponential, Fixed, Retry, Steps
-from modbus_event_connect.testing._clock import FakeClock
+from event_connect.testing import FakeClock
 from modbus_event_connect.testing._micro_nabto import SimulatedMicroNabtoDevice
+from models import HANDSHAKE_NEVER_AGAIN, OFFLINE_AFTER_INTERVALS, ZEROS, micro_nabto_model
 
 EMAIL = "user@example.invalid"
 LOGGER = "modbus_event_connect.micro_nabto"
 
 
 def _dp(address: int) -> Point[Any]:
-    return Point(Key(f"dp_{address}", int), read=DatapointRegister(address), data_type=DataType.UINT16)
+    return Point(Key(f"dp_{address}", int), read=DatapointRegister(address), data_type=DataType.UINT16, poll_rate=PollRate.MEDIUM)
 
 
 POINTS = [_dp(1), _dp(2), _dp(3)]
+
+
+def _model(zeros: RereadZeros) -> MicroNabtoModel:
+    """The unit's model, reading zeros again as `zeros` says."""
+    return micro_nabto_model([Section(POINTS)], name="Unit", manufacturer="Example", later_answer_wait=0.2,
+                             zeros=zeros)
+
+
+MODEL = _model(ZEROS)
 
 
 def _simulated(clock: FakeClock) -> SimulatedMicroNabtoDevice:
@@ -36,21 +46,19 @@ def _simulated(clock: FakeClock) -> SimulatedMicroNabtoDevice:
                                      datapoint_registers={(0, a): a for a in range(1, 11)})
 
 
-def _device(simulated: SimulatedMicroNabtoDevice, clock: FakeClock, *,
-            reread_zeros_for: float | None = None, zeros: RereadZeros | None = None,
-            reconnect: Retry | None = None) -> MicroNabtoDevice:
+def _device(simulated: SimulatedMicroNabtoDevice, clock: FakeClock, *, zeros: RereadZeros = ZEROS,
+            reconnect: CircuitBreaker = HANDSHAKE_NEVER_AGAIN) -> MicroNabtoDevice:
     host, port = simulated.address
     device = MicroNabtoDevice(MicroNabtoConnection(EMAIL, host=host, port=port, timeout=0.05, retries=1,
-                                                   answer_wait=0.5, clock=clock, reconnect=reconnect),
-                              owns_connection=True, reread_zeros_for=reread_zeros_for)
-    device.configure(MicroNabtoOptions(later_answer_wait=0.2, zeros=zeros))
+                                                   answer_wait=0.5, clock=clock, reconnect=reconnect, session_idle=12.0, rediscovery_timeout=0.1, rediscovery_resend=0.5),
+                              models=[MODEL if zeros is ZEROS else _model(zeros)], owns_connection=True)
+    device.use(device.models[0])
     return device
 
 
-async def _connected(simulated: SimulatedMicroNabtoDevice, clock: FakeClock, *,
-                     reread_zeros_for: float | None = None, zeros: RereadZeros | None = None,
-                     reconnect: Retry | None = None) -> MicroNabtoDevice:
-    device = _device(simulated, clock, reread_zeros_for=reread_zeros_for, zeros=zeros, reconnect=reconnect)
+async def _connected(simulated: SimulatedMicroNabtoDevice, clock: FakeClock, *, zeros: RereadZeros = ZEROS,
+                     reconnect: CircuitBreaker = HANDSHAKE_NEVER_AGAIN) -> MicroNabtoDevice:
+    device = _device(simulated, clock, zeros=zeros, reconnect=reconnect)
     assert await device.connect() is not None
     await device.read(POINTS)
     return device
@@ -144,7 +152,7 @@ async def test_a_read_in_between_neither_restarts_nor_extends_the_wait() -> None
         assert sum(retries) == pytest.approx(7.0)
 
 
-async def test_zeros_that_stay_are_taken_at_reread_zeros_for_after_a_reading_in_halves(
+async def test_zeros_that_stay_are_taken_when_the_rule_says_after_a_reading_in_halves(
         caplog: pytest.LogCaptureFixture) -> None:
     clock = FakeClock()
     async with _simulated(clock) as simulated:
@@ -164,7 +172,7 @@ async def test_a_read_too_large_for_the_device_is_shown_to_be_so_by_its_halves(
         caplog: pytest.LogCaptureFixture) -> None:
     clock = FakeClock()
     async with _simulated(clock) as simulated:
-        device = await _connected(simulated, clock, reread_zeros_for=1.0)
+        device = await _connected(simulated, clock, zeros=replace(ZEROS, within=1.0))
         simulated.zeros_above = 2
         with caplog.at_level(logging.WARNING, logger=LOGGER):
             answers, retries = await _until_taken(device, clock)
@@ -179,7 +187,7 @@ async def test_a_read_too_large_for_the_device_is_shown_to_be_so_by_its_halves(
 async def test_with_no_time_to_wait_zeros_are_read_again_at_once_then_in_halves_and_taken() -> None:
     clock = FakeClock()
     async with _simulated(clock) as simulated:
-        device = await _connected(simulated, clock, reread_zeros_for=0)
+        device = await _connected(simulated, clock, zeros=replace(ZEROS, within=0.0))
         simulated.zeros_until = clock.monotonic() + 100
         answers = await device.read(POINTS)
         assert {(a.outcome, a.registers) for a in answers.values()} == {(Outcome.OK, (0,))}
@@ -204,7 +212,7 @@ async def test_a_model_that_takes_zeros_takes_them_at_once_without_reading_again
 async def test_a_model_states_when_zeros_are_read_again_and_how_long_until_they_are_taken() -> None:
     clock = FakeClock()
     async with _simulated(clock) as simulated:
-        patient = RereadZeros(within=20.0, wait=Steps(1.0, then=Exponential(2.0)), halves=False)
+        patient = RereadZeros(within=20.0, wait=Steps(1.0, then=Exponential(2.0, factor=2.0, max=None)), at_once=True, halves=False)
         device = await _connected(simulated, clock, zeros=patient)
         for address in (1, 2, 3):
             simulated.datapoint_registers[(0, address)] = 0
@@ -216,36 +224,24 @@ async def test_a_model_states_when_zeros_are_read_again_and_how_long_until_they_
 async def test_a_wait_of_nothing_reads_zeros_again_at_the_next_read() -> None:
     clock = FakeClock()
     async with _simulated(clock) as simulated:
-        device = await _connected(simulated, clock, zeros=RereadZeros(within=2.0, wait=Fixed(0)))
+        device = await _connected(simulated, clock, zeros=RereadZeros(within=2.0, wait=Fixed(0), at_once=True, halves=True))
         simulated.zeros_until = clock.monotonic() + 100
         clock.advance(0.1)
         assert (await device.read(POINTS))["dp_1"].retry_after == 0.0
 
 
-def test_a_device_given_its_own_zeros_rule_keeps_it_over_the_models() -> None:
-    connection = MicroNabtoConnection(EMAIL, host="device.invalid", reconnect=None)
-    device = MicroNabtoDevice(connection, zeros=TAKE_ZEROS)
-    device.configure(MicroNabtoOptions(zeros=RereadZeros(within=3.0)))
-    assert device.zeros == TAKE_ZEROS
-    assert MicroNabtoDevice(connection, zeros=TAKE_ZEROS, reread_zeros_for=2.0).zeros.within == 2.0
+def test_the_time_until_zeros_are_taken_cannot_be_negative() -> None:
     with pytest.raises(ValueError):
-        RereadZeros(within=-1.0)
+        RereadZeros(within=-1.0, wait=Fixed(1.0), at_once=True, halves=True)
 
 
-def test_the_time_until_zeros_are_taken_is_the_devices_then_the_models_then_seven_and_a_half_seconds() -> None:
-    connection = MicroNabtoConnection(EMAIL, host="device.invalid", reconnect=None)
-    device = MicroNabtoDevice(connection)
-    assert device.reread_zeros_for == 7.5
-    device.configure(MicroNabtoOptions(reread_zeros_for=3.0))
-    assert device.reread_zeros_for == 3.0
-    given = MicroNabtoDevice(connection, reread_zeros_for=1.0)
-    given.configure(MicroNabtoOptions(reread_zeros_for=3.0))
-    assert given.reread_zeros_for == 1.0 and given.diagnostics()["reread_zeros_for"] == 1.0
-    assert MicroNabtoDevice.udp(EMAIL, host="device.invalid", reconnect=None, reread_zeros_for=2.0).reread_zeros_for == 2.0
-    with pytest.raises(ValueError):
-        MicroNabtoDevice(connection, reread_zeros_for=-1.0)
-    with pytest.raises(ValueError):
-        MicroNabtoOptions(reread_zeros_for=-1.0)
+def test_the_time_until_zeros_are_taken_is_in_the_diagnostics() -> None:
+    clock = FakeClock()
+    device = MicroNabtoDevice(MicroNabtoConnection(EMAIL, host="device.invalid", clock=clock,
+                                                   reconnect=HANDSHAKE_NEVER_AGAIN, timeout=1.0, retries=2, answer_wait=5.0, session_idle=12.0, rediscovery_timeout=3.0, rediscovery_resend=0.5),
+                              models=[_model(replace(ZEROS, within=3.0))])
+    device.use(device.models[0])
+    assert device.diagnostics()["zeros_taken_after"] == 3.0
 
 
 async def test_a_new_session_says_why_it_started_and_how_long_after_the_last_answer(
@@ -263,7 +259,7 @@ async def test_a_new_session_says_why_it_started_and_how_long_after_the_last_ans
 async def test_a_silent_device_is_warned_of_once_and_again_when_it_answers(caplog: pytest.LogCaptureFixture) -> None:
     clock = FakeClock()
     async with _simulated(clock) as simulated:
-        device = await _connected(simulated, clock, reconnect=Retry(Fixed(10.0)))
+        device = await _connected(simulated, clock, reconnect=CircuitBreaker(after=1, retry=Retry(Fixed(10.0), None)))
         simulated.silent = True
         with caplog.at_level(logging.WARNING, logger=LOGGER):
             await device.read(POINTS)
@@ -303,23 +299,21 @@ async def test_an_email_the_device_does_not_know_is_still_refused() -> None:
     async with _simulated(clock) as simulated:
         device = MicroNabtoDevice(MicroNabtoConnection("other@example.invalid", host=simulated.address[0],
                                                        port=simulated.address[1], timeout=0.05, retries=1,
-                                                       clock=clock, reconnect=None), owns_connection=True)
+                                                       clock=clock, reconnect=HANDSHAKE_NEVER_AGAIN, answer_wait=5.0, session_idle=12.0, rediscovery_timeout=0.1, rediscovery_resend=0.5),
+                                  models=[MODEL], owns_connection=True)
         with pytest.raises(AuthenticationError):
             await device.connect()
 
 
-MODEL = Model(name="Unit", manufacturer="Example", sections=[Section(POINTS)], options=MicroNabtoOptions(),
-              read_back_after=1.0)
-
-
-def _select(identity: Identity) -> Model | None:
+def _select(identity: Identity) -> MicroNabtoModel | None:
     return MODEL
 
 
 async def test_a_client_shows_the_last_values_while_zeros_are_read_again_and_reads_them_on_time() -> None:
     clock = FakeClock()
     async with _simulated(clock) as simulated:
-        client = Client(_device(simulated, clock), _select, clock=clock)
+        client = Client(_device(simulated, clock), _select, offline_after_intervals=OFFLINE_AFTER_INTERVALS,
+                        clock=clock)
         await client.connect()
         for point in POINTS:
             client.subscribe(point.key, lambda key, old, new: None)

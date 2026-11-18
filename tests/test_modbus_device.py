@@ -1,23 +1,25 @@
 """The Modbus protocol layer: `ModbusDevice` against simulated units behind a simulated gateway,
-with a fake clock and a `sleep` that does not wait."""
+with a fake clock whose sleeps do not wait."""
 import asyncio
+import math
+from collections.abc import Callable
 import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+import pymodbus.client
 import pytest
 from pymodbus.exceptions import ModbusIOException
 
+from event_connect import NO_RETRY, CircuitBreaker, Key, ModelError, PollRate
 from modbus_event_connect._data_type import DataType
 from modbus_event_connect import Attempts, Exponential, Fixed, Retry, Steps
 from modbus_event_connect._device import (
     Device,
     EncodedWrite,
     Outcome,
-    ProtocolOptions,
     ReadResult,
 )
-from modbus_event_connect._key import Key
 from modbus_event_connect._point import Point
 from modbus_event_connect.micro_nabto._access import DatapointRegister
 from modbus_event_connect.modbus._access import (
@@ -26,13 +28,13 @@ from modbus_event_connect.modbus._access import (
     DiscreteInput,
     HoldingRegister,
     InputRegister,
-    ModbusOptions,
     RegisterNumbering,
     SingleWrite,
     modicon,
     plain,
 )
 from modbus_event_connect.modbus._connection import (
+    PORT,
     ModbusConnection,
     ExceptionCode,
     FunctionCode,
@@ -40,13 +42,16 @@ from modbus_event_connect.modbus._connection import (
     Request,
     Response,
 )
+from modbus_event_connect.modbus._model import ModbusModel
+from modbus_event_connect._model import Section
 from modbus_event_connect.modbus._device import ModbusDevice
-from modbus_event_connect.testing._clock import FakeClock
+from event_connect.testing import FakeClock
 from modbus_event_connect.testing._modbus import (
     NO_ANSWER,
     SimulatedModbusDevice,
     SimulatedModbusGateway,
 )
+from models import CONNECT_TIMEOUT, FRAME_GAP, NEVER_AGAIN, TIMEOUT_MARGIN, modbus_model
 
 FC = FunctionCode
 HOST = "modbus.invalid"
@@ -55,38 +60,36 @@ HOST = "modbus.invalid"
 # ================================================================================ helpers
 
 
-class Sleeps:
-    """An injected `sleep` that records what it was asked to wait, and does not wait."""
-
-    def __init__(self) -> None:
-        self.waits: list[float] = []
-
-    async def __call__(self, seconds: float) -> None:
-        self.waits.append(seconds)
+MODEL = modbus_model()
+BIT_WRITER = Point(Key("bit", bool), write=HoldingRegister(9), data_type=DataType.bit(0))
+"""A point that writes one bit of a holding register, for a model that says how one is written."""
 
 
-def modbus_device(connection: ModbusConnection, unit_id: int = 1, *, reconnect: Retry | None = None,
-                  **kwargs: Any) -> ModbusDevice:
-    return ModbusDevice(connection, unit_id, reconnect=reconnect, **kwargs)
+def bits(bit_write: BitWrite) -> ModbusModel:
+    """A model that writes one bit of a holding register as `bit_write` says."""
+    return modbus_model([Section([BIT_WRITER])], bit_write=bit_write)
 
 
-def configured(device: ModbusDevice) -> ModbusDevice:
-    device.configure(ModbusOptions(numbering=plain(first_address=1)))
+def modbus_device(connection: ModbusConnection, unit_id: int = 1, *, reconnect: CircuitBreaker = NEVER_AGAIN,
+                  model: ModbusModel | None = None, **kwargs: Any) -> ModbusDevice:
+    return ModbusDevice(connection, unit_id, reconnect=reconnect, models=[model if model is not None else MODEL],
+                        timeout_margin=TIMEOUT_MARGIN, **kwargs)
+
+
+def used(device: ModbusDevice) -> ModbusDevice:
+    device.use(device.models[0])
     return device
 
 
 class Rig:
     """One device on a simulated gateway, with everything a test wants to look at."""
 
-    def __init__(self, unit: SimulatedModbusDevice, *, unit_id: int = 1,
-                 options: ModbusOptions = ModbusOptions(numbering=plain(first_address=1)),
+    def __init__(self, unit: SimulatedModbusDevice, *, unit_id: int = 1, model: ModbusModel | None = None,
                  delay: float = 0.0, **device: Any) -> None:
         self.unit = unit
         self.gateway = SimulatedModbusGateway({unit_id: unit}, delay=delay)
-        self.clock = FakeClock()
-        self.sleeps = Sleeps()
-        self.device = modbus_device(self.gateway, unit_id, clock=self.clock, sleep=self.sleeps, **device)
-        self.device.configure(options)
+        self.clock = FakeClock(autojump=True)
+        self.device = used(modbus_device(self.gateway, unit_id, model=model, clock=self.clock, **device))
 
     def sent(self) -> list[tuple[FunctionCode, int, int]]:
         """(function, address, count) of every request the unit received."""
@@ -94,7 +97,7 @@ class Rig:
 
 
 def u16(key: str, access: Any, **kw: Any) -> Point[Any]:
-    return Point(Key(key, int), read=access, data_type=DataType.UINT16, **kw)
+    return Point(Key(key, int), read=access, data_type=DataType.UINT16, poll_rate=PollRate.MEDIUM, **kw)
 
 
 def ok(*registers: int) -> ReadResult:
@@ -131,7 +134,7 @@ async def test_each_register_table_is_read_with_its_function_code(access: Any, f
 async def test_each_bit_table_is_read_with_its_function_code(access: Any, function: FunctionCode,
                                                              unit: SimulatedModbusDevice) -> None:
     rig = Rig(unit)
-    result = await rig.device.read([Point(Key("p", bool), read=access, data_type=DataType.BOOL)])
+    result = await rig.device.read([Point(Key("p", bool), read=access, data_type=DataType.BOOL, poll_rate=PollRate.MEDIUM)])
     assert result == {"p": ok(1)}
     assert rig.sent() == [(function, 3, 1)]
 
@@ -140,9 +143,9 @@ async def test_each_point_gets_exactly_its_own_registers_from_a_batch() -> None:
     rig = Rig(SimulatedModbusDevice(holding_registers=image(10, 1, 0xAAAA, 0xBBBB, 4, 0x4142, 0x4300)))
     points = [
         u16("a", HoldingRegister(10)),
-        Point(Key("b", int), read=HoldingRegister(11), data_type=DataType.UINT32),
+        Point(Key("b", int), read=HoldingRegister(11), data_type=DataType.UINT32, poll_rate=PollRate.MEDIUM),
         u16("c", HoldingRegister(13)),
-        Point(Key("d", str), read=HoldingRegister(14), data_type=DataType.string(2)),
+        Point(Key("d", str), read=HoldingRegister(14), data_type=DataType.string(2), poll_rate=PollRate.MEDIUM),
     ]
     result = await rig.device.read(points)
     assert result == {"a": ok(1), "b": ok(0xAAAA, 0xBBBB), "c": ok(4), "d": ok(0x4142, 0x4300)}
@@ -171,7 +174,7 @@ async def test_tables_are_never_merged() -> None:
     rig = Rig(SimulatedModbusDevice(input_registers={10: 1}, holding_registers={10: 2, 11: 3}, coils={10: 1}, discrete_inputs={11: 0}))
     result = await rig.device.read([
         u16("in", InputRegister(10)), u16("h0", HoldingRegister(10)), u16("h1", HoldingRegister(11)),
-        Point(Key("coil", bool), read=Coil(10), data_type=DataType.BOOL), Point(Key("di", bool), read=DiscreteInput(11), data_type=DataType.BOOL),
+        Point(Key("coil", bool), read=Coil(10), data_type=DataType.BOOL, poll_rate=PollRate.MEDIUM), Point(Key("di", bool), read=DiscreteInput(11), data_type=DataType.BOOL, poll_rate=PollRate.MEDIUM),
     ])
     assert result == {"in": ok(1), "h0": ok(2), "h1": ok(3), "coil": ok(1), "di": ok(0)}
     assert sorted(rig.sent()) == sorted([
@@ -180,7 +183,7 @@ async def test_tables_are_never_merged() -> None:
 
 
 async def test_a_batch_stops_at_max_registers() -> None:
-    rig = Rig(SimulatedModbusDevice(holding_registers=image(0, *range(10))), options=ModbusOptions(numbering=plain(first_address=1), max_registers=4))
+    rig = Rig(SimulatedModbusDevice(holding_registers=image(0, *range(10))), model=modbus_model(max_registers=4))
     result = await rig.device.read([u16(f"r{i}", HoldingRegister(i)) for i in range(10)])
     assert result == {f"r{i}": ok(i) for i in range(10)}
     assert rig.sent() == [(FC.READ_HOLDING_REGISTERS, 0, 4), (FC.READ_HOLDING_REGISTERS, 4, 4),
@@ -188,32 +191,32 @@ async def test_a_batch_stops_at_max_registers() -> None:
 
 
 async def test_a_multi_register_point_is_never_split_across_requests() -> None:
-    rig = Rig(SimulatedModbusDevice(holding_registers=image(0, 1, 2, 3, 4)), options=ModbusOptions(numbering=plain(first_address=1), max_registers=3))
+    rig = Rig(SimulatedModbusDevice(holding_registers=image(0, 1, 2, 3, 4)), model=modbus_model(max_registers=3))
     result = await rig.device.read([u16("a", HoldingRegister(0)), u16("b", HoldingRegister(1)),
-                                    Point(Key("c", int), read=HoldingRegister(2), data_type=DataType.UINT32)])
+                                    Point(Key("c", int), read=HoldingRegister(2), data_type=DataType.UINT32, poll_rate=PollRate.MEDIUM)])
     assert result == {"a": ok(1), "b": ok(2), "c": ok(3, 4)}
     assert rig.sent() == [(FC.READ_HOLDING_REGISTERS, 0, 2), (FC.READ_HOLDING_REGISTERS, 2, 2)]
 
 
 async def test_a_batch_stops_at_max_bits() -> None:
-    rig = Rig(SimulatedModbusDevice(coils=image(0, 1, 0, 1, 0, 1)), options=ModbusOptions(numbering=plain(first_address=1), max_bits=2))
-    result = await rig.device.read([Point(Key(f"c{i}", bool), read=Coil(i), data_type=DataType.BOOL) for i in range(5)])
+    rig = Rig(SimulatedModbusDevice(coils=image(0, 1, 0, 1, 0, 1)), model=modbus_model(max_bits=2))
+    result = await rig.device.read([Point(Key(f"c{i}", bool), read=Coil(i), data_type=DataType.BOOL, poll_rate=PollRate.MEDIUM) for i in range(5)])
     assert result == {f"c{i}": ok(1 - i % 2) for i in range(5)}
     assert rig.sent() == [(FC.READ_COILS, 0, 2), (FC.READ_COILS, 2, 2), (FC.READ_COILS, 4, 1)]
 
 
 async def test_max_registers_does_not_limit_a_bit_table() -> None:
-    rig = Rig(SimulatedModbusDevice(discrete_inputs=image(0, *[1] * 10)), options=ModbusOptions(numbering=plain(first_address=1), max_registers=2))
-    await rig.device.read([Point(Key(f"d{i}", bool), read=DiscreteInput(i), data_type=DataType.BOOL) for i in range(10)])
+    rig = Rig(SimulatedModbusDevice(discrete_inputs=image(0, *[1] * 10)), model=modbus_model(max_registers=2))
+    await rig.device.read([Point(Key(f"d{i}", bool), read=DiscreteInput(i), data_type=DataType.BOOL, poll_rate=PollRate.MEDIUM) for i in range(10)])
     assert rig.sent() == [(FC.READ_DISCRETE_INPUTS, 0, 10)]
 
 
 async def test_two_views_of_one_register_share_one_request() -> None:
     rig = Rig(SimulatedModbusDevice(holding_registers={5: 0b1001}))
     result = await rig.device.read([
-        u16("raw", HoldingRegister(5)), Point(Key("signed", int), read=HoldingRegister(5), data_type=DataType.INT16),
-        Point(Key("bit0", bool), read=HoldingRegister(5), data_type=DataType.bit(0)),
-        Point(Key("bit3", bool), read=HoldingRegister(5), data_type=DataType.bit(3)),
+        u16("raw", HoldingRegister(5)), Point(Key("signed", int), read=HoldingRegister(5), data_type=DataType.INT16, poll_rate=PollRate.MEDIUM),
+        Point(Key("bit0", bool), read=HoldingRegister(5), data_type=DataType.bit(0), poll_rate=PollRate.MEDIUM),
+        Point(Key("bit3", bool), read=HoldingRegister(5), data_type=DataType.bit(3), poll_rate=PollRate.MEDIUM),
     ])
     assert result == {"raw": ok(9), "signed": ok(9), "bit0": ok(9), "bit3": ok(9)}
     assert rig.sent() == [(FC.READ_HOLDING_REGISTERS, 5, 1)]
@@ -221,8 +224,8 @@ async def test_two_views_of_one_register_share_one_request() -> None:
 
 async def test_overlapping_spans_are_read_together() -> None:
     rig = Rig(SimulatedModbusDevice(holding_registers={10: 1, 11: 2}))
-    result = await rig.device.read([Point(Key("wide", int), read=HoldingRegister(10), data_type=DataType.UINT32),
-                                    Point(Key("flag", bool), read=HoldingRegister(11), data_type=DataType.bit(1))])
+    result = await rig.device.read([Point(Key("wide", int), read=HoldingRegister(10), data_type=DataType.UINT32, poll_rate=PollRate.MEDIUM),
+                                    Point(Key("flag", bool), read=HoldingRegister(11), data_type=DataType.bit(1), poll_rate=PollRate.MEDIUM)])
     assert result == {"wide": ok(1, 2), "flag": ok(2)}
     assert rig.sent() == [(FC.READ_HOLDING_REGISTERS, 10, 2)]
 
@@ -245,16 +248,16 @@ async def test_a_register_number_is_sent_as_its_address(
         numbering: RegisterNumbering, access: Any, address: int, function: FunctionCode) -> None:
     everything = {address: 1}
     rig = Rig(SimulatedModbusDevice(coils=everything, discrete_inputs=everything, holding_registers=everything, input_registers=everything),
-              options=ModbusOptions(numbering=numbering))
+              model=modbus_model(numbering=numbering))
     data_type = DataType.BOOL if access.bits else DataType.UINT16
-    result = await rig.device.read([Point(Key("p", bool if access.bits else int), read=access, data_type=data_type)])
+    result = await rig.device.read([Point(Key("p", bool if access.bits else int), read=access, data_type=data_type, poll_rate=PollRate.MEDIUM)])
     assert result == {"p": ok(1)}
     assert rig.sent() == [(function, address, 1)]
 
 
 async def test_a_write_goes_to_the_address_of_its_register_number() -> None:
-    rig = Rig(SimulatedModbusDevice(holding_registers={119: 0}), options=ModbusOptions(numbering=modicon(digits=5, first_address=0)))
-    point = Point(Key("t", int), read=HoldingRegister(40120), write=HoldingRegister(40120), data_type=DataType.UINT16)
+    rig = Rig(SimulatedModbusDevice(holding_registers={119: 0}), model=modbus_model(numbering=modicon(digits=5, first_address=0)))
+    point = Point(Key("t", int), read=HoldingRegister(40120), write=HoldingRegister(40120), data_type=DataType.UINT16, poll_rate=PollRate.MEDIUM)
     assert (await rig.device.write(point, EncodedWrite((215,)))).ok
     assert rig.unit.holding_registers[119] == 215
 
@@ -272,7 +275,7 @@ async def test_a_refused_batch_is_re_read_so_only_the_missing_point_is_missing(
         access: Any, data_type: DataType, unit: SimulatedModbusDevice) -> None:
     rig = Rig(unit)
     value_type = bool if data_type.is_boolean else int
-    result = await rig.device.read([Point(Key(f"p{a}", value_type), read=access(a), data_type=data_type)
+    result = await rig.device.read([Point(Key(f"p{a}", value_type), read=access(a), data_type=data_type, poll_rate=PollRate.MEDIUM)
                                     for a in (10, 11, 12)])
     assert outcomes(result) == {"p10": Outcome.OK, "p11": Outcome.MISSING, "p12": Outcome.OK}
     assert result["p10"] == ok(1) and result["p11"].exception_code == 0x02
@@ -289,9 +292,9 @@ async def test_one_absent_address_among_many_is_found_in_few_requests() -> None:
 async def test_points_sharing_a_refused_span_share_its_re_read() -> None:
     rig = Rig(SimulatedModbusDevice(holding_registers={10: 7}))
     result = await rig.device.read([
-        u16("present", HoldingRegister(10)), Point(Key("present_bit", bool), read=HoldingRegister(10), data_type=DataType.bit(0)),
-        Point(Key("gone0", bool), read=HoldingRegister(11), data_type=DataType.bit(0)),
-        Point(Key("gone1", bool), read=HoldingRegister(11), data_type=DataType.bit(1)),
+        u16("present", HoldingRegister(10)), Point(Key("present_bit", bool), read=HoldingRegister(10), data_type=DataType.bit(0), poll_rate=PollRate.MEDIUM),
+        Point(Key("gone0", bool), read=HoldingRegister(11), data_type=DataType.bit(0), poll_rate=PollRate.MEDIUM),
+        Point(Key("gone1", bool), read=HoldingRegister(11), data_type=DataType.bit(1), poll_rate=PollRate.MEDIUM),
     ])
     assert outcomes(result) == {"present": Outcome.OK, "present_bit": Outcome.OK,
                                 "gone0": Outcome.MISSING, "gone1": Outcome.MISSING}
@@ -301,7 +304,7 @@ async def test_points_sharing_a_refused_span_share_its_re_read() -> None:
 
 async def test_a_refused_single_span_is_missing_without_a_re_read() -> None:
     rig = Rig(SimulatedModbusDevice())
-    result = await rig.device.read([u16("a", HoldingRegister(4)), Point(Key("b", bool), read=HoldingRegister(4), data_type=DataType.bit(2))])
+    result = await rig.device.read([u16("a", HoldingRegister(4)), Point(Key("b", bool), read=HoldingRegister(4), data_type=DataType.bit(2), poll_rate=PollRate.MEDIUM)])
     assert outcomes(result) == {"a": Outcome.MISSING, "b": Outcome.MISSING}
     assert rig.sent() == [(FC.READ_HOLDING_REGISTERS, 4, 1)]
 
@@ -335,7 +338,7 @@ async def test_every_exception_code_has_its_outcome(code: int, outcome: Outcome)
 
 async def test_an_unsupported_function_is_unsupported() -> None:
     rig = Rig(SimulatedModbusDevice(discrete_inputs={0: 1}, unsupported=[FC.READ_DISCRETE_INPUTS]))
-    raw = (await rig.device.read([Point(Key("d", bool), read=DiscreteInput(0), data_type=DataType.BOOL)]))["d"]
+    raw = (await rig.device.read([Point(Key("d", bool), read=DiscreteInput(0), data_type=DataType.BOOL, poll_rate=PollRate.MEDIUM)]))["d"]
     assert (raw.outcome, raw.exception_code) == (Outcome.UNSUPPORTED, 0x01)
 
 
@@ -350,7 +353,7 @@ async def test_asking_for_more_than_the_unit_accepts_is_an_error() -> None:
 async def test_a_unit_the_gateway_cannot_reach_has_not_answered() -> None:
     """0x0B is the gateway speaking for a silent device - NO_ANSWER, not OFFLINE."""
     gateway = SimulatedModbusGateway({1: SimulatedModbusDevice(holding_registers={0: 1})})
-    device = configured(modbus_device(gateway, 9, clock=FakeClock(), sleep=Sleeps()))
+    device = used(modbus_device(gateway, 9, clock=FakeClock(autojump=True)))
     raw = (await device.read([u16("p", HoldingRegister(0))]))["p"]
     assert (raw.outcome, raw.exception_code) == (Outcome.NO_ANSWER, 0x0B)
 
@@ -358,12 +361,12 @@ async def test_a_unit_the_gateway_cannot_reach_has_not_answered() -> None:
 async def test_a_unit_the_gateway_cannot_reach_is_backed_off() -> None:
     """The gateway's bus timeout before saying 0x0B costs every other device on the bus that time."""
     gateway = SimulatedModbusGateway({1: SimulatedModbusDevice(holding_registers={0: 1})})
-    device = configured(modbus_device(gateway, 9, clock=FakeClock(), sleep=Sleeps()))
+    device = used(modbus_device(gateway, 9, clock=FakeClock(autojump=True)))
     for _ in range(3):
         await device.read([u16("p", HoldingRegister(0))])
-    assert device.diagnostics()["backing_off"] is True
+    assert device.diagnostics()["open"] is True
     await device.read([u16("p", HoldingRegister(0))])
-    assert len(gateway.requests) == 3, "a device backing off still put requests on the bus"
+    assert len(gateway.requests) == 3, "a device whose breaker is open still put requests on the bus"
 
 
 async def test_no_answer_is_no_answer() -> None:
@@ -382,18 +385,19 @@ async def test_a_fault_on_one_address_fails_the_whole_batch_that_touches_it() ->
 # ================================================================================== busy
 
 
-async def test_busy_is_retried_with_backoff_until_it_succeeds() -> None:
+async def test_busy_is_retried_with_a_growing_wait_until_it_succeeds() -> None:
     rig = Rig(SimulatedModbusDevice(holding_registers={0: 42}, busy_for=2))
     assert (await rig.device.read([u16("p", HoldingRegister(0))]))["p"] == ok(42)
-    assert rig.sleeps.waits == [0.2, 0.4]
+    assert rig.clock.sleeps == [0.2, 0.4]
     assert len(rig.unit.requests) == 3
 
 
 async def test_busy_gives_up_after_its_retries() -> None:
-    rig = Rig(SimulatedModbusDevice(holding_registers={0: 42}, busy_for=100), busy_retries=4, busy_delay=0.5)
+    rig = Rig(SimulatedModbusDevice(holding_registers={0: 42}, busy_for=100),
+              model=modbus_model(busy=Retry(Exponential(0.5, factor=2.0, max=None), Attempts(5))))
     raw = (await rig.device.read([u16("p", HoldingRegister(0))]))["p"]
     assert (raw.outcome, raw.exception_code) == (Outcome.BUSY, 0x06)
-    assert rig.sleeps.waits == [0.5, 1.0, 2.0, 4.0]
+    assert rig.clock.sleeps == [0.5, 1.0, 2.0, 4.0]
     assert len(rig.unit.requests) == 5
     assert "after 4 busy retries" in raw.detail
 
@@ -403,40 +407,42 @@ async def test_a_write_answered_busy_is_busy_and_sent_once() -> None:
     point = Point(Key("s", int), write=HoldingRegister(0), data_type=DataType.UINT16)
     result = await rig.device.write(point, EncodedWrite((9,)))
     assert (result.outcome, result.exception_code) == (Outcome.BUSY, 0x06)
-    assert rig.unit.holding_registers[0] == 0 and rig.sleeps.waits == []
+    assert rig.unit.holding_registers[0] == 0 and rig.clock.sleeps == []
     assert len(rig.unit.requests) == 1
 
 
 async def test_without_busy_retries_busy_is_answered_at_once() -> None:
-    rig = Rig(SimulatedModbusDevice(holding_registers={0: 42}, busy_for=1), busy_retries=0)
+    rig = Rig(SimulatedModbusDevice(holding_registers={0: 42}, busy_for=1), model=modbus_model(busy=NO_RETRY))
     assert (await rig.device.read([u16("p", HoldingRegister(0))]))["p"].outcome is Outcome.BUSY
-    assert rig.sleeps.waits == []
+    assert rig.clock.sleeps == []
 
 
-async def test_a_model_states_how_its_device_is_tried_again_when_busy() -> None:
-    options = ModbusOptions(numbering=plain(first_address=1), busy=Retry(Steps(1, 3), Attempts(3)))
-    rig = Rig(SimulatedModbusDevice(holding_registers={0: 42}, busy_for=100), options=options)
+async def test_a_model_states_how_its_unit_is_tried_again_when_busy() -> None:
+    rig = Rig(SimulatedModbusDevice(holding_registers={0: 42}, busy_for=100),
+              model=modbus_model(busy=Retry(Steps(1, 3), Attempts(3))))
     await rig.device.read([u16("p", HoldingRegister(0))])
-    assert rig.sleeps.waits == [1, 3]
+    assert rig.clock.sleeps == [1, 3]
 
 
-async def test_a_device_given_its_own_busy_rule_keeps_it_over_the_models() -> None:
-    options = ModbusOptions(numbering=plain(first_address=1), busy=Retry(Fixed(1), Attempts(3)))
-    rig = Rig(SimulatedModbusDevice(holding_registers={0: 42}, busy_for=100), options=options, busy_retries=0)
-    await rig.device.read([u16("p", HoldingRegister(0))])
-    assert rig.sleeps.waits == []
-
-
-def test_a_rule_given_both_as_a_part_and_as_numbers_is_refused() -> None:
-    with pytest.raises(ValueError):
-        modbus_device(SimulatedModbusGateway({}), busy=Retry(Fixed(1), Attempts(2)), busy_retries=1)
+async def test_each_model_is_tried_again_when_busy_as_it_says() -> None:
+    patient = modbus_model(name="Patient", busy=Retry(Fixed(1), Attempts(3)))
+    hasty = modbus_model(name="Hasty", busy=NO_RETRY)
+    unit = SimulatedModbusDevice(holding_registers={0: 42}, busy_for=100)
+    clock = FakeClock(autojump=True)
+    device = ModbusDevice(SimulatedModbusGateway({1: unit}), 1, reconnect=NEVER_AGAIN, timeout_margin=TIMEOUT_MARGIN,
+                          clock=clock, models=[patient, hasty])
+    device.use(hasty)
+    await device.read([u16("p", HoldingRegister(0))])
+    device.use(patient)
+    await device.read([u16("p", HoldingRegister(0))])
+    assert clock.sleeps == [1, 1]
 
 
 # ================================================================================ writing
 
 
 def setting(access: Any, data_type: DataType = DataType.UINT16) -> Point[Any]:
-    return Point(Key("w", bool if data_type.is_boolean else int), read=access, write=access, data_type=data_type)
+    return Point(Key("w", bool if data_type.is_boolean else int), read=access, write=access, data_type=data_type, poll_rate=PollRate.MEDIUM)
 
 
 async def test_one_holding_register_is_written_with_0x06() -> None:
@@ -449,7 +455,7 @@ async def test_one_holding_register_is_written_with_0x06() -> None:
 
 async def test_one_holding_register_is_written_with_0x10_under_the_fc16_policy() -> None:
     rig = Rig(SimulatedModbusDevice(holding_registers={20: 0}, unsupported=[FC.WRITE_SINGLE_REGISTER]),
-              options=ModbusOptions(numbering=plain(first_address=1), single_write=SingleWrite.FC16))
+              model=modbus_model(single_write=SingleWrite.FC16))
     assert (await rig.device.write(setting(HoldingRegister(20)), EncodedWrite((7,)))).ok
     assert rig.unit.requests == [Request(1, FC.WRITE_MULTIPLE_REGISTERS, 20, count=1, values=(7,))]
     assert rig.unit.holding_registers[20] == 7
@@ -469,7 +475,7 @@ async def test_several_holding_registers_are_written_with_0x10() -> None:
     (0, False, 0xFFFE, 0x0000, 0x00F0),
 ])
 async def test_a_bit_is_written_with_mask_write(bit: int, on: bool, and_mask: int, or_mask: int, after: int) -> None:
-    rig = Rig(SimulatedModbusDevice(holding_registers={9: 0x00F0}))
+    rig = Rig(SimulatedModbusDevice(holding_registers={9: 0x00F0}), model=bits(BitWrite.MASK))
     point = setting(HoldingRegister(9), DataType.bit(bit))
     assert (await rig.device.write(point, EncodedWrite(bit_index=bit, bit_value=on))).ok
     assert rig.unit.requests == [Request(1, FC.MASK_WRITE_REGISTER, 9, and_mask=and_mask, or_mask=or_mask)]
@@ -478,7 +484,7 @@ async def test_a_bit_is_written_with_mask_write(bit: int, on: bool, and_mask: in
 
 @pytest.mark.parametrize("bit, on, after", [(3, True, 0x00F8), (4, False, 0x00E0)])
 async def test_a_bit_is_read_modified_and_written_back_without_mask_write(bit: int, on: bool, after: int) -> None:
-    rig = Rig(SimulatedModbusDevice(holding_registers={9: 0x00F0}), options=ModbusOptions(numbering=plain(first_address=1), bit_write=BitWrite.READ_MODIFY_WRITE))
+    rig = Rig(SimulatedModbusDevice(holding_registers={9: 0x00F0}), model=bits(BitWrite.READ_MODIFY_WRITE))
     assert (await rig.device.write(setting(HoldingRegister(9), DataType.bit(bit)), EncodedWrite(bit_index=bit, bit_value=on))).ok
     assert rig.unit.requests == [Request(1, FC.READ_HOLDING_REGISTERS, 9, count=1),
                                  Request(1, FC.WRITE_SINGLE_REGISTER, 9, values=(after,))]
@@ -487,7 +493,7 @@ async def test_a_bit_is_read_modified_and_written_back_without_mask_write(bit: i
 
 async def test_concurrent_read_modify_writes_to_one_register_keep_both_bits() -> None:
     # Unserialised, this is read, read, write, write - and the second write undoes the first.
-    rig = Rig(SimulatedModbusDevice(holding_registers={9: 0}), options=ModbusOptions(numbering=plain(first_address=1), bit_write=BitWrite.READ_MODIFY_WRITE),
+    rig = Rig(SimulatedModbusDevice(holding_registers={9: 0}), model=bits(BitWrite.READ_MODIFY_WRITE),
               delay=0.001)
     results = await asyncio.gather(
         rig.device.write(setting(HoldingRegister(9), DataType.bit(0)), EncodedWrite(bit_index=0, bit_value=True)),
@@ -500,7 +506,7 @@ async def test_concurrent_read_modify_writes_to_one_register_keep_both_bits() ->
 
 
 async def test_read_modify_write_to_different_registers_do_not_wait_for_each_other() -> None:
-    rig = Rig(SimulatedModbusDevice(holding_registers={1: 0, 2: 0}), options=ModbusOptions(numbering=plain(first_address=1), bit_write=BitWrite.READ_MODIFY_WRITE),
+    rig = Rig(SimulatedModbusDevice(holding_registers={1: 0, 2: 0}), model=bits(BitWrite.READ_MODIFY_WRITE),
               delay=0.001)
     await asyncio.gather(
         rig.device.write(setting(HoldingRegister(1), DataType.bit(0)), EncodedWrite(bit_index=0, bit_value=True)),
@@ -511,7 +517,7 @@ async def test_read_modify_write_to_different_registers_do_not_wait_for_each_oth
 
 
 async def test_a_failed_read_in_read_modify_write_writes_nothing() -> None:
-    rig = Rig(SimulatedModbusDevice(), options=ModbusOptions(numbering=plain(first_address=1), bit_write=BitWrite.READ_MODIFY_WRITE))
+    rig = Rig(SimulatedModbusDevice(), model=bits(BitWrite.READ_MODIFY_WRITE))
     result = await rig.device.write(setting(HoldingRegister(9), DataType.bit(0)), EncodedWrite(bit_index=0, bit_value=True))
     assert (result.outcome, result.exception_code) == (Outcome.MISSING, 0x02)
     assert rig.unit.function_codes() == [FC.READ_HOLDING_REGISTERS]
@@ -520,7 +526,7 @@ async def test_a_failed_read_in_read_modify_write_writes_nothing() -> None:
 @pytest.mark.parametrize("value, stored", [(1, 1), (0, 0)])
 async def test_a_coil_is_written_with_0x05(value: int, stored: int) -> None:
     rig = Rig(SimulatedModbusDevice(coils={4: 1 - stored}))
-    point = Point(Key("c", bool), read=Coil(4), write=Coil(4), data_type=DataType.BOOL)
+    point = Point(Key("c", bool), read=Coil(4), write=Coil(4), data_type=DataType.BOOL, poll_rate=PollRate.MEDIUM)
     assert (await rig.device.write(point, EncodedWrite((value,)))).ok
     assert rig.unit.requests == [Request(1, FC.WRITE_SINGLE_COIL, 4, values=(value,))]
     assert rig.unit.coils[4] == stored
@@ -536,7 +542,7 @@ async def test_a_coil_takes_exactly_one_value_of_zero_or_one(value: EncodedWrite
 
 @pytest.mark.parametrize("access", [InputRegister(1), DiscreteInput(1)])
 async def test_a_read_only_table_cannot_be_written(access: Any) -> None:
-    point = Point(Key("p", bool), read=HoldingRegister(1), write=HoldingRegister(1), data_type=DataType.BOOL)
+    point = Point(Key("p", bool), read=HoldingRegister(1), write=HoldingRegister(1), data_type=DataType.BOOL, poll_rate=PollRate.MEDIUM)
     object.__setattr__(point, "write", access)          # a point would refuse this; the device must too
     rig = Rig(SimulatedModbusDevice())
     with pytest.raises(TypeError):
@@ -574,29 +580,79 @@ async def test_a_point_without_a_write_side_is_a_programming_error() -> None:
 async def test_a_point_of_another_protocol_is_a_programming_error() -> None:
     rig = Rig(SimulatedModbusDevice())
     with pytest.raises(TypeError):
-        await rig.device.read([Point(Key("n", int), read=DatapointRegister(3), data_type=DataType.UINT16)])
+        await rig.device.read([Point(Key("n", int), read=DatapointRegister(3), data_type=DataType.UINT16, poll_rate=PollRate.MEDIUM)])
     assert rig.unit.requests == []
 
 
-async def test_a_device_reads_nothing_before_it_knows_the_models_options() -> None:
+async def test_a_device_reads_nothing_before_it_knows_the_model() -> None:
     gateway = SimulatedModbusGateway({1: SimulatedModbusDevice(holding_registers={0: 1})})
     device = modbus_device(gateway)
-    assert device.options is None
+    assert device.model is None
     with pytest.raises(RuntimeError):
-        await device.read([Point(Key("p", int), read=HoldingRegister(0))])
+        await device.read([Point(Key("p", int), read=HoldingRegister(0), poll_rate=PollRate.MEDIUM)])
     assert gateway.requests == []
 
 
-def test_a_device_takes_only_modbus_options() -> None:
+def test_a_device_talks_as_the_model_chosen_says() -> None:
+    small = modbus_model(name="Small", max_registers=8, max_bits=16, answers_within=0.5)
+    large = modbus_model(name="Large", max_registers=100, max_bits=1000, answers_within=4.0)
+    device = ModbusDevice(SimulatedModbusGateway({}), 1, reconnect=NEVER_AGAIN, models=[small, large],
+                          timeout_margin=1.0)
+    device.use(large)
+    assert device.model is large and device.models == (small, large)
+    assert (device.max_registers, device.max_bits, device.timeout) == (100, 1000, 5.0)
+    device.use(small)
+    assert (device.max_registers, device.max_bits, device.timeout) == (8, 16, 1.5)
+
+
+def test_before_a_model_is_chosen_a_device_is_as_cautious_as_any_model_needs() -> None:
+    models = [modbus_model(name="A", max_registers=8, max_bits=1000, answers_within=0.5),
+              modbus_model(name="B", max_registers=125, max_bits=16, answers_within=2.0)]
+    device = ModbusDevice(SimulatedModbusGateway({}), 1, reconnect=NEVER_AGAIN, models=models, timeout_margin=1.0)
+    assert (device.max_registers, device.max_bits, device.timeout) == (8, 16, 3.0)
+
+
+async def test_a_request_waits_as_long_as_its_unit_answers_within_and_the_margin() -> None:
+    gateway = SimulatedModbusGateway({1: SimulatedModbusDevice(holding_registers={0: 1}),
+                                      2: SimulatedModbusDevice(holding_registers={0: 2})})
+    quick = used(ModbusDevice(gateway, 1, reconnect=NEVER_AGAIN, models=[modbus_model(answers_within=0.5)],
+                              timeout_margin=2.5))
+    slow = used(ModbusDevice(gateway, 2, reconnect=NEVER_AGAIN, models=[modbus_model(answers_within=4.0)],
+                             timeout_margin=1.0))
+    await quick.read([u16("p", HoldingRegister(0))])
+    await slow.read([u16("p", HoldingRegister(0))])
+    await quick.write(setting(HoldingRegister(0)), EncodedWrite((5,)))
+    assert gateway.timeouts == [3.0, 5.0, 3.0]
+
+
+@pytest.mark.parametrize("margin", [-0.1, float("inf"), float("nan")])
+def test_a_timeout_margin_is_a_finite_number_of_seconds(margin: float) -> None:
+    with pytest.raises(ValueError, match="timeout_margin"):
+        ModbusDevice(SimulatedModbusGateway({}), 1, reconnect=NEVER_AGAIN, models=[MODEL], timeout_margin=margin)
+
+
+def test_a_model_the_device_was_not_given_is_refused() -> None:
     device = modbus_device(SimulatedModbusGateway({}))
-    options = ModbusOptions(numbering=plain(first_address=1), max_registers=32)
-    device.configure(options)
-    assert device.options is options
-    with pytest.raises(TypeError):
-        device.configure(ProtocolOptions())
+    with pytest.raises(ModelError, match="the model 'Other' is not one the device was given"):
+        device.use(modbus_model(name="Other"))
 
 
-# ============================================================================== backoff
+def test_a_device_is_given_each_model_it_may_meet_once() -> None:
+    with pytest.raises(ModelError, match="the model 'Bare' is given twice"):
+        ModbusDevice(SimulatedModbusGateway({}), 1, reconnect=NEVER_AGAIN, models=[MODEL, MODEL],
+                     timeout_margin=TIMEOUT_MARGIN)
+    with pytest.raises(ModelError, match="given none"):
+        ModbusDevice(SimulatedModbusGateway({}), 1, reconnect=NEVER_AGAIN, models=[], timeout_margin=TIMEOUT_MARGIN)
+
+
+async def test_a_model_that_writes_no_single_bit_does_not_write_one() -> None:
+    rig = Rig(SimulatedModbusDevice(holding_registers={9: 0}))
+    with pytest.raises(ValueError, match="no bit_write"):
+        await rig.device.write(setting(HoldingRegister(9), DataType.bit(0)), EncodedWrite(bit_index=0, bit_value=True))
+    assert rig.unit.requests == []
+
+
+# ========================================================================= the breaker
 
 
 def silent(**kw: Any) -> SimulatedModbusDevice:
@@ -616,42 +672,43 @@ async def unanswered(rig: Rig, times: int = 3) -> None:
 async def test_a_device_backs_off_after_three_no_answers_in_a_row() -> None:
     rig = Rig(silent())
     await unanswered(rig, 2)
-    assert rig.device.diagnostics()["backing_off"] is False
+    assert rig.device.diagnostics()["open"] is False
     await read0(rig)
-    assert rig.device.diagnostics()["backing_off"] is True
+    assert rig.device.diagnostics()["open"] is True
     assert len(rig.unit.requests) == 3
 
 
 async def test_a_silent_device_is_asked_again_as_its_reconnect_says() -> None:
-    rig = Rig(silent(), reconnect=Retry(Steps(2, 4, then=Fixed(10))))
+    rig = Rig(silent(), reconnect=CircuitBreaker(after=3, retry=Retry(Steps(2, 4, then=Fixed(10)), None)))
     await unanswered(rig)
-    pauses: list[float] = []
+    open_times: list[float] = []
     for _ in range(4):
-        pause = rig.device.diagnostics()["backing_off_for"]
-        assert isinstance(pause, float)
-        pauses.append(pause)
-        rig.clock.advance(pause)
+        open_for = rig.device.diagnostics()["open_for"]
+        assert isinstance(open_for, float)
+        open_times.append(open_for)
+        rig.clock.advance(open_for)
         await read0(rig)
-    assert pauses == [2, 4, 10, 10] and len(rig.unit.requests) == 3 + 4
+    assert open_times == [2, 4, 10, 10] and len(rig.unit.requests) == 3 + 4
 
 
 async def test_a_device_silent_for_hours_is_still_asked_again_at_its_reconnect_max() -> None:
-    rig = Rig(silent(), reconnect=Retry(Exponential(2.0, max=10.0)))
+    rig = Rig(silent(), reconnect=CircuitBreaker(after=3, retry=Retry(Exponential(2.0, factor=2.0, max=10.0), None)))
     await unanswered(rig)
     for _ in range(1100):
-        pause = rig.device.diagnostics()["backing_off_for"]
-        assert isinstance(pause, float)
-        rig.clock.advance(pause)
+        open_for = rig.device.diagnostics()["open_for"]
+        assert isinstance(open_for, float)
+        rig.clock.advance(open_for)
         assert (await read0(rig)).outcome is Outcome.NO_ANSWER
-    assert rig.device.diagnostics()["backing_off_for"] == 10.0 and len(rig.unit.requests) == 3 + 1100
+    assert rig.device.diagnostics()["open_for"] == 10.0 and len(rig.unit.requests) == 3 + 1100
 
 
 async def test_a_reconnect_that_gives_up_leaves_the_device_unasked_until_connected() -> None:
-    rig = Rig(silent(), reconnect=Retry(Fixed(5), Attempts(2)))
+    rig = Rig(silent(), reconnect=CircuitBreaker(after=3, retry=Retry(Fixed(5), Attempts(2))))
     await unanswered(rig)
     rig.clock.advance(5)
     await read0(rig)
-    assert rig.device.diagnostics()["gave_up"] is True
+    diagnostics = rig.device.diagnostics()
+    assert (diagnostics["gave_up"], diagnostics["open"], diagnostics["open_for"]) == (True, True, math.inf)
     rig.clock.advance(86400)
     await read0(rig)
     assert len(rig.unit.requests) == 4
@@ -660,19 +717,25 @@ async def test_a_reconnect_that_gives_up_leaves_the_device_unasked_until_connect
     assert len(rig.unit.requests) == 5
 
 
-async def test_without_a_reconnect_a_silent_device_is_asked_again_only_once_connected() -> None:
-    rig = Rig(silent(), reconnect=None)
+def test_the_diagnostics_say_what_the_breaker_does_in_its_own_words() -> None:
+    keys = set(Rig(silent()).device.diagnostics())
+    assert {"open", "open_for", "openings", "gave_up", "refused_while_open"} <= keys
+    assert not {key for key in keys if "back" in key or "paus" in key}
+
+
+async def test_a_reconnect_that_never_asks_again_waits_for_connect() -> None:
+    rig = Rig(silent(), reconnect=NEVER_AGAIN)
     await unanswered(rig)
     rig.clock.advance(86400)
     raw = await read0(rig)
-    assert raw.outcome is Outcome.NO_ANSWER and "backing off" in raw.detail
-    assert len(rig.unit.requests) == 3 and rig.device.reconnect is None
+    assert raw.outcome is Outcome.NO_ANSWER and "the breaker is open" in raw.detail
+    assert len(rig.unit.requests) == 3 and rig.device.reconnect is NEVER_AGAIN
     await rig.device.connect()
     await read0(rig)
     assert len(rig.unit.requests) == 4
 
 
-async def test_connecting_asks_a_device_again_without_waiting_out_its_pause() -> None:
+async def test_connecting_asks_a_device_again_without_waiting_for_its_breaker() -> None:
     rig = Rig(silent())
     await unanswered(rig)
     await rig.device.connect()
@@ -680,7 +743,7 @@ async def test_connecting_asks_a_device_again_without_waiting_out_its_pause() ->
     assert len(rig.unit.requests) == 4
 
 
-async def test_a_reconnect_not_ready_holds_the_probe_back_for_another_pause() -> None:
+async def test_a_reconnect_not_ready_keeps_the_breaker_open_for_as_long_again() -> None:
     @dataclass(frozen=True)
     class Offline(Retry):
         online: list[bool] = field(default_factory=lambda: [False])
@@ -688,21 +751,21 @@ async def test_a_reconnect_not_ready_holds_the_probe_back_for_another_pause() ->
         async def ready(self) -> bool:
             return self.online[0]
 
-    reconnect = Offline(Fixed(10))
-    rig = Rig(silent(), reconnect=reconnect)
+    reconnect = Offline(Fixed(10), None)
+    rig = Rig(silent(), reconnect=CircuitBreaker(after=3, retry=reconnect))
     await unanswered(rig)
     rig.clock.advance(10)
     raw = await read0(rig)
-    assert "backing off" in raw.detail and len(rig.unit.requests) == 3
-    assert rig.device.diagnostics()["backing_off_for"] == 10
+    assert "the breaker is open" in raw.detail and len(rig.unit.requests) == 3
+    assert rig.device.diagnostics()["open_for"] == 10
     reconnect.online[0] = True
     rig.clock.advance(10)
     await read0(rig)
     assert len(rig.unit.requests) == 4
 
 
-async def test_every_pause_and_giving_up_is_logged_for_debugging(caplog: pytest.LogCaptureFixture) -> None:
-    rig = Rig(silent(), unit_id=7, reconnect=Retry(Fixed(5), Attempts(2)))
+async def test_every_opening_and_giving_up_is_logged_for_debugging(caplog: pytest.LogCaptureFixture) -> None:
+    rig = Rig(silent(), unit_id=7, reconnect=CircuitBreaker(after=3, retry=Retry(Fixed(5), Attempts(2))))
     with caplog.at_level(logging.DEBUG, logger="modbus_event_connect.modbus._device"):
         await unanswered(rig)
         rig.clock.advance(5)
@@ -718,7 +781,7 @@ async def test_a_reconnect_not_ready_is_logged(caplog: pytest.LogCaptureFixture)
         async def ready(self) -> bool:
             return False
 
-    rig = Rig(silent(), unit_id=7, reconnect=Offline(Fixed(10)))
+    rig = Rig(silent(), unit_id=7, reconnect=CircuitBreaker(after=3, retry=Offline(Fixed(10), None)))
     await unanswered(rig)
     rig.clock.advance(10)
     caplog.clear()
@@ -728,7 +791,7 @@ async def test_a_reconnect_not_ready_is_logged(caplog: pytest.LogCaptureFixture)
 
 
 async def test_a_cancelled_probe_lets_the_next_one_through() -> None:
-    rig = Rig(silent(), reconnect=Retry(Fixed(10)), delay=0.05)
+    rig = Rig(silent(), reconnect=CircuitBreaker(after=3, retry=Retry(Fixed(10), None)), delay=0.05)
     await unanswered(rig)
     rig.clock.advance(10)
     probe = asyncio.ensure_future(read0(rig))
@@ -739,30 +802,30 @@ async def test_a_cancelled_probe_lets_the_next_one_through() -> None:
     assert "not sent" not in (await read0(rig)).detail
 
 
-async def test_a_device_backing_off_answers_no_answer_without_touching_the_connection() -> None:
+async def test_a_device_whose_breaker_is_open_answers_no_answer_without_touching_the_connection() -> None:
     rig = Rig(silent())
     await unanswered(rig)
     rig.clock.advance(59)
     raw = await read0(rig)
     write = await rig.device.write(setting(HoldingRegister(0)), EncodedWrite((1,)))
-    assert raw.outcome is Outcome.NO_ANSWER and "backing off" in raw.detail
-    assert write.outcome is Outcome.NO_ANSWER and "backing off" in write.detail
+    assert raw.outcome is Outcome.NO_ANSWER and "the breaker is open" in raw.detail
+    assert write.outcome is Outcome.NO_ANSWER and "the breaker is open" in write.detail
     assert len(rig.gateway.requests) == 3
 
 
-async def test_a_probe_after_the_backoff_that_gets_no_answer_backs_off_again_at_once() -> None:
-    rig = Rig(silent(), reconnect=Retry(Fixed(60.0)))
+async def test_a_probe_that_gets_no_answer_opens_the_breaker_again_at_once() -> None:
+    rig = Rig(silent(), reconnect=CircuitBreaker(after=3, retry=Retry(Fixed(60.0), None)))
     await unanswered(rig)
     rig.clock.advance(60)
     assert (await read0(rig)).outcome is Outcome.NO_ANSWER      # the probe
     assert len(rig.unit.requests) == 4
     assert (await read0(rig)).outcome is Outcome.NO_ANSWER      # refused, not sent
     assert len(rig.unit.requests) == 4
-    assert rig.device.diagnostics()["backing_off_for"] == 60
+    assert rig.device.diagnostics()["open_for"] == 60
 
 
-async def test_an_answered_probe_ends_the_backoff() -> None:
-    rig = Rig(silent(), reconnect=Retry(Fixed(60.0)))
+async def test_an_answered_probe_closes_the_breaker() -> None:
+    rig = Rig(silent(), reconnect=CircuitBreaker(after=3, retry=Retry(Fixed(60.0), None)))
     await unanswered(rig)
     rig.unit.faults.clear()
     rig.clock.advance(60)
@@ -771,15 +834,15 @@ async def test_an_answered_probe_ends_the_backoff() -> None:
     rig.unit.faults[(FC.READ_HOLDING_REGISTERS, 0)] = NO_ANSWER
     await read0(rig)
     await read0(rig)
-    assert rig.device.diagnostics()["backing_off"] is False           # the count started again
+    assert rig.device.diagnostics()["open"] is False           # the count started again
 
 
 async def test_only_one_probe_goes_through_while_it_is_out() -> None:
-    rig = Rig(silent(), reconnect=Retry(Fixed(10)), delay=0.001)
+    rig = Rig(silent(), reconnect=CircuitBreaker(after=3, retry=Retry(Fixed(10), None)), delay=0.001)
     await unanswered(rig)
     rig.clock.advance(10)
     first, second = await asyncio.gather(read0(rig), read0(rig))
-    assert "backing off" not in first.detail and "backing off" in second.detail
+    assert "the breaker is open" not in first.detail and "the breaker is open" in second.detail
     assert len(rig.unit.requests) == 4
 
 
@@ -791,7 +854,7 @@ async def test_any_answer_resets_the_count_even_an_exception() -> None:
     assert rig.device.diagnostics()["consecutive_no_answers"] == 0
     await read0(rig)
     await read0(rig)
-    assert rig.device.diagnostics()["backing_off"] is False
+    assert rig.device.diagnostics()["open"] is False
 
 
 async def test_a_link_that_is_down_counts_as_no_answer() -> None:
@@ -800,7 +863,7 @@ async def test_a_link_that_is_down_counts_as_no_answer() -> None:
     assert (await read0(rig)).outcome is Outcome.NO_ANSWER
     await read0(rig)
     await read0(rig)
-    assert rig.device.diagnostics()["backing_off"] is True
+    assert rig.device.diagnostics()["open"] is True
 
 
 # ================================================================ several devices, one link
@@ -810,9 +873,9 @@ def two_devices(delay: float = 0.0) -> tuple[SimulatedModbusGateway, ModbusDevic
     one = SimulatedModbusDevice(holding_registers={0: 111, 1: 112})
     two = SimulatedModbusDevice(holding_registers={0: 221, 1: 222})
     gateway = SimulatedModbusGateway({1: one, 2: two}, delay=delay)
-    clock = FakeClock()
-    return (gateway, configured(modbus_device(gateway, 1, clock=clock, sleep=Sleeps())),
-            configured(modbus_device(gateway, 2, clock=clock, sleep=Sleeps())), one, two)
+    clock = FakeClock(autojump=True)
+    return (gateway, used(modbus_device(gateway, 1, clock=clock)),
+            used(modbus_device(gateway, 2, clock=clock)), one, two)
 
 
 async def test_each_device_reaches_its_own_unit() -> None:
@@ -826,21 +889,21 @@ async def test_each_device_reaches_its_own_unit() -> None:
 
 async def test_requests_from_several_devices_never_overlap() -> None:
     gateway, first, second, _, _ = two_devices(delay=0.001)
-    gap = [u16("a", HoldingRegister(0)), Point(Key("c", bool), read=HoldingRegister(1), data_type=DataType.bit(0))]
+    gap = [u16("a", HoldingRegister(0)), Point(Key("c", bool), read=HoldingRegister(1), data_type=DataType.bit(0), poll_rate=PollRate.MEDIUM)]
     results = await asyncio.gather(*(device.read(gap) for device in (first, second, first, second)))
     assert all(r["a"].outcome is Outcome.OK for r in results)
     assert gateway.max_in_flight == 1
     assert {unit for unit, _ in gateway.requests} == {1, 2}
 
 
-async def test_one_devices_fault_and_backoff_do_not_touch_the_other() -> None:
+async def test_one_devices_fault_and_breaker_do_not_touch_the_other() -> None:
     gateway, first, second, _, two = two_devices()
     two.faults[(FC.READ_HOLDING_REGISTERS, 0)] = NO_ANSWER
     for _ in range(3):
         await second.read([u16("a", HoldingRegister(0))])
-    assert second.diagnostics()["backing_off"] is True
+    assert second.diagnostics()["open"] is True
     assert await first.read([u16("a", HoldingRegister(0))]) == {"a": ok(111)}
-    assert first.diagnostics()["backing_off"] is False
+    assert first.diagnostics()["open"] is False
     assert first.diagnostics()["outcomes"] == {**{o.name: 0 for o in Outcome}, "OK": 1}
     assert gateway.connected
 
@@ -870,13 +933,21 @@ async def test_connect_reports_an_unreachable_link_as_none() -> None:
 
 def test_tcp_owns_a_pymodbus_connection_and_passes_it_the_link_settings() -> None:
     clock = FakeClock()
-    device = ModbusDevice.tcp(HOST, 1502, unit_id=4, timeout=1.5, frame_gap=0.02, clock=clock, busy_retries=1,
-                              reconnect=None)
+    device = ModbusDevice.tcp(HOST, port=1502, unit_id=4, reconnect=NEVER_AGAIN, models=[MODEL], timeout_margin=1.0,
+                              connect_timeout=1.5, frame_gap=0.02, clock=clock)
     connection = device._connection
     assert isinstance(connection, ModbusTcpConnection) and device._owns_connection
-    assert (connection._timeout, connection._frame_gap, connection._clock) == (1.5, 0.02, clock)
-    assert (device.unit_id, device.busy.stop, device._clock, device.reconnect) == (4, Attempts(2), clock, None)
-    assert connection.client is None                               # nothing opened yet
+    assert (connection._port, connection._connect_timeout, connection._frame_gap, connection._clock) == (
+        1502, 1.5, 0.02, clock)
+    assert (device.unit_id, device._clock, device.reconnect, device.models) == (4, clock, NEVER_AGAIN, (MODEL,))
+    assert device.timeout == MODEL.answers_within + 1.0
+    assert connection._client is None                              # nothing opened yet
+
+
+def test_tcp_talks_on_the_modbus_tcp_port_unless_told_otherwise() -> None:
+    device = ModbusDevice.tcp(HOST, unit_id=1, reconnect=NEVER_AGAIN, models=[MODEL], timeout_margin=TIMEOUT_MARGIN,
+                              connect_timeout=CONNECT_TIMEOUT, frame_gap=FRAME_GAP)
+    assert isinstance(device._connection, ModbusTcpConnection) and device._connection._port == PORT == 502
 
 
 # =========================================================================== diagnostics
@@ -898,23 +969,30 @@ class Timed:
     async def close(self) -> None:
         await self.inner.close()
 
-    async def request(self, request: Request) -> Response:
+    async def request(self, request: Request, *, timeout: float) -> Response:
         self.clock.advance(self.seconds)
-        return await self.inner.request(request)
+        return await self.inner.request(request, timeout=timeout)
 
 
 async def test_diagnostics_count_what_happened_and_hold_no_host() -> None:
-    clock = FakeClock()
+    clock = FakeClock(autojump=True)
     unit = SimulatedModbusDevice(holding_registers={0: 1}, busy_for=1)
-    device = configured(modbus_device(Timed(SimulatedModbusGateway({1: unit}), clock, 0.05), 1, clock=clock, sleep=Sleeps()))
+    device = used(modbus_device(Timed(SimulatedModbusGateway({1: unit}), clock, 0.05), 1, clock=clock))
     await device.read([u16("a", HoldingRegister(0))])                       # busy, then OK
     await device.read([u16("b", HoldingRegister(5))])                       # missing
     d = device.diagnostics()
     assert d["requests"] == 3 and d["busy_retries"] == 1
     assert d["outcomes"] == {**{o.name: 0 for o in Outcome}, "OK": 1, "MISSING": 1}
-    assert d["consecutive_no_answers"] == 0 and d["backing_off"] is False and d["backing_off_for"] == 0.0
+    assert d["consecutive_no_answers"] == 0 and d["open"] is False and d["open_for"] == 0.0
     latency = d["average_latency"]
     assert isinstance(latency, float) and abs(latency - 0.05) < 1e-9
+
+
+def making(client: object) -> Callable[..., object]:
+    """Stands in for pymodbus's client class: whatever it is asked to make, it gives `client`."""
+    def make(*args: Any, **kwargs: Any) -> object:
+        return client
+    return make
 
 
 class LeakyClient:
@@ -934,10 +1012,11 @@ class LeakyClient:
         raise TimeoutError(f"no reply from {HOST}:1502")
 
 
-async def test_nothing_a_device_reports_names_its_host() -> None:
-    device = configured(ModbusDevice.tcp(HOST, 1502, clock=FakeClock(), sleep=Sleeps(), reconnect=None))
-    assert isinstance(device._connection, ModbusTcpConnection)
-    device._connection._client = LeakyClient()                      # no network
+async def test_nothing_a_device_reports_names_its_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(pymodbus.client, "AsyncModbusTcpClient", making(LeakyClient()))
+    device = used(ModbusDevice.tcp(HOST, port=1502, unit_id=1, reconnect=NEVER_AGAIN, models=[MODEL],
+                                   timeout_margin=TIMEOUT_MARGIN, connect_timeout=CONNECT_TIMEOUT, frame_gap=FRAME_GAP,
+                                   clock=FakeClock(autojump=True)))
     raw = (await device.read([u16("a", HoldingRegister(0))]))["a"]
     write = await device.write(setting(HoldingRegister(0)), EncodedWrite((1,)))
     assert raw.outcome is Outcome.NO_ANSWER and write.outcome is Outcome.NO_ANSWER
@@ -964,12 +1043,14 @@ class SilentClient:
         raise ModbusIOException("No response received after 0 retries, continue with next request")
 
 
-async def test_a_silent_device_is_reconnected_to_only_until_the_backoff_and_once_per_probe() -> None:
-    clock = FakeClock()
-    device = configured(ModbusDevice.tcp(HOST, clock=clock, sleep=Sleeps(), reconnect=Retry(Fixed(60.0))))
-    assert isinstance(device._connection, ModbusTcpConnection)
+async def test_a_silent_device_is_reconnected_to_only_until_the_breaker_opens_and_once_per_probe(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = FakeClock(autojump=True)
     client = SilentClient()
-    device._connection._client = client                             # no network
+    monkeypatch.setattr(pymodbus.client, "AsyncModbusTcpClient", making(client))
+    device = used(ModbusDevice.tcp(HOST, unit_id=1, reconnect=CircuitBreaker(after=3, retry=Retry(Fixed(60.0), None)),
+                                   models=[MODEL], timeout_margin=TIMEOUT_MARGIN, connect_timeout=CONNECT_TIMEOUT,
+                                   frame_gap=FRAME_GAP, clock=clock))
     for _ in range(10):
         await device.read([u16("a", HoldingRegister(0))])
     assert client.connects == 3
@@ -997,6 +1078,6 @@ async def test_the_simulated_gateway_records_requests_in_order() -> None:
     gateway = SimulatedModbusGateway({1: SimulatedModbusDevice(holding_registers={0: 1}), 2: SimulatedModbusDevice(holding_registers={0: 2})})
     r1 = Request(2, FC.READ_HOLDING_REGISTERS, 0, count=1)
     r2 = Request(1, FC.READ_HOLDING_REGISTERS, 0, count=1)
-    assert (await gateway.request(r1)).registers == (2,)
-    assert (await gateway.request(r2)).registers == (1,)
-    assert gateway.requests == [(2, r1), (1, r2)]
+    assert (await gateway.request(r1, timeout=3.0)).registers == (2,)
+    assert (await gateway.request(r2, timeout=1.0)).registers == (1,)
+    assert gateway.requests == [(2, r1), (1, r2)] and gateway.timeouts == [3.0, 1.0]

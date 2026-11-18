@@ -7,39 +7,40 @@ from typing import Any, Callable
 import pytest
 
 from event_connect import _unit as unit_module
-from modbus_event_connect._clock import Clock, SystemClock
-from modbus_event_connect._data_type import DataType, DataTypeKind
-from modbus_event_connect._device import EncodedWrite, Outcome, ReadResult, WriteResult
-from modbus_event_connect._key import Key
-from modbus_event_connect._point import (
-    DEFAULT_INTERVALS,
-    Access,
+from event_connect import (
     Change,
+    Clock,
+    DataValue,
+    Key,
     Labels,
     Limits,
-    Point,
     PollRate,
     Pulse,
+    Quality,
     Refresh,
+    SystemClock,
     Transform,
     Transforms,
+    Unit,
     WriteKind,
+    WriteRange,
 )
-from modbus_event_connect._unit import Unit
-from modbus_event_connect._value import DataValue, Quality
+from modbus_event_connect._data_type import DataType, DataTypeKind
+from modbus_event_connect._device import EncodedWrite, Outcome, ReadResult, WriteResult
+from modbus_event_connect._point import Access, Point
 from modbus_event_connect.micro_nabto._access import DatapointRegister, SetpointRegister
 from modbus_event_connect.modbus._access import (
     Coil,
     DiscreteInput,
     HoldingRegister,
     InputRegister,
-    ModbusOptions,
     NumberRange,
     RegisterNumbering,
     modicon,
     plain,
 )
-from modbus_event_connect.testing._clock import FakeClock
+from event_connect.testing import FakeClock
+from models import modbus_model
 
 
 def _key(fields: dict[str, Any]) -> Key[Any]:
@@ -112,28 +113,28 @@ def test_a_data_type_classifies_itself(data_type: DataType, numeric: bool, integ
 # ============================================================================= valid points
 
 @pytest.mark.parametrize("fields", [
-    {"read": InputRegister(1)},
+    {"read": InputRegister(1), "poll_rate": PollRate.MEDIUM},
     {"write": HoldingRegister(1)},
-    {"read": HoldingRegister(1), "write": HoldingRegister(1)},
-    {"read": InputRegister(100), "write": HoldingRegister(200)},                    # status and command apart
-    {"read": Coil(1), "write": Coil(1), "data_type": DataType.BOOL},
-    {"read": DiscreteInput(1), "data_type": DataType.BOOL},
-    {"read": HoldingRegister(1), "data_type": DataType.bit(3)},
-    {"read": HoldingRegister(1), "write": HoldingRegister(1), "data_type": DataType.bit(15)},
-    {"read": InputRegister(1), "data_type": DataType.string(8)},
+    {"read": HoldingRegister(1), "write": HoldingRegister(1), "poll_rate": PollRate.MEDIUM},
+    {"read": InputRegister(100), "write": HoldingRegister(200), "poll_rate": PollRate.MEDIUM},                    # status and command apart
+    {"read": Coil(1), "write": Coil(1), "data_type": DataType.BOOL, "poll_rate": PollRate.MEDIUM},
+    {"read": DiscreteInput(1), "data_type": DataType.BOOL, "poll_rate": PollRate.MEDIUM},
+    {"read": HoldingRegister(1), "data_type": DataType.bit(3), "poll_rate": PollRate.MEDIUM},
+    {"read": HoldingRegister(1), "write": HoldingRegister(1), "data_type": DataType.bit(15), "poll_rate": PollRate.MEDIUM},
+    {"read": InputRegister(1), "data_type": DataType.string(8), "poll_rate": PollRate.MEDIUM},
     {"read": InputRegister(1), "data_type": DataType.INT16, "scale": 0.01, "valid_raw": range(-0x8000, 0x7FFF),
-     "deadband": 0.05},
-    {"read": InputRegister(1), "data_type": DataType.UINT16, "valid_raw": range(0, 1001)},
+     "deadband": 0.05, "poll_rate": PollRate.MEDIUM},
+    {"read": InputRegister(1), "data_type": DataType.UINT16, "valid_raw": range(0, 1001), "poll_rate": PollRate.MEDIUM},
     {"write": HoldingRegister(1), "data_type": DataType.UINT16, "valid_raw": range(1, 0xFFFF)},
-    {"read": Coil(1), "data_type": DataType.BOOL, "valid_raw": range(0, 2)},
+    {"read": Coil(1), "data_type": DataType.BOOL, "valid_raw": range(0, 2), "poll_rate": PollRate.MEDIUM},
     {"write": HoldingRegister(1), "write_kind": WriteKind.COMMAND, "pulse": Pulse(idle=0, after=1.0)},
     {"read": HoldingRegister(1), "write": HoldingRegister(1), "limits": Limits(5, 35, 0.5),
-     "on_write": Refresh(["a", "b"], after=2, until_stable=30)},
-    {"read": DiscreteInput(1), "data_type": DataType.BOOL, "on_change": Refresh(Labels(kind="alarm"))},
+     "on_write": Refresh(["a", "b"], after=2, until_stable=30), "poll_rate": PollRate.MEDIUM},
+    {"read": DiscreteInput(1), "data_type": DataType.BOOL, "on_change": Refresh(Labels(kind="alarm")), "poll_rate": PollRate.MEDIUM},
     {"read": InputRegister(1), "poll_always": True, "poll_rate": PollRate.STATIC, "unit": Unit.CELSIUS},
-    {"read": InputRegister(1), "transform": Transforms.SECONDS_AS_MINUTES},
-    {"read": DatapointRegister(27)},
-    {"read": SetpointRegister(5), "write": SetpointRegister(5)},
+    {"read": InputRegister(1), "transform": Transforms.SECONDS_AS_MINUTES, "poll_rate": PollRate.MEDIUM},
+    {"read": DatapointRegister(27), "poll_rate": PollRate.MEDIUM},
+    {"read": SetpointRegister(5), "write": SetpointRegister(5), "poll_rate": PollRate.MEDIUM},
 ], ids=lambda f: "-".join(sorted(f)))
 def test_a_valid_point_is_accepted(fields: dict[str, Any]) -> None:
     Point(_key(fields), **fields)
@@ -148,7 +149,7 @@ def test_a_point_needs_a_side() -> None:
 @pytest.mark.parametrize("key", ["", " padded ", "trailing "])
 def test_a_key_must_be_a_clean_non_empty_string(key: str) -> None:
     with pytest.raises(ValueError, match="non-empty string"):
-        Point(Key(key, int), read=InputRegister(1))
+        Point(Key(key, int), read=InputRegister(1), poll_rate=PollRate.MEDIUM)
 
 
 def test_a_key_is_its_text_wherever_it_goes() -> None:
@@ -187,11 +188,11 @@ class Other(IntEnum):
 ], ids=["bool-bit", "str-string", "int-whole-scale", "int-precision-0", "float-int16", "float-float32",
         "states-u16", "states-with-no-data", "states-coded", "dos-date", "dos-datetime"])
 def test_a_key_type_the_registers_can_hold_is_accepted(value_type: type[Any], fields: dict[str, Any]) -> None:
-    Point(Key("p", value_type), read=HoldingRegister(1), write=HoldingRegister(1), **fields)
+    Point(Key("p", value_type), read=HoldingRegister(1), write=HoldingRegister(1), poll_rate=PollRate.MEDIUM, **fields)
 
 
 def test_several_codes_may_name_one_state_on_a_point_that_is_only_read() -> None:
-    point = Point(Key("p", Mode), read=HoldingRegister(1), codes={3: Mode.OFF, 4: Mode.OFF})
+    point = Point(Key("p", Mode), read=HoldingRegister(1), codes={3: Mode.OFF, 4: Mode.OFF}, poll_rate=PollRate.MEDIUM)
     assert point.states == (Mode.OFF,)
 
 
@@ -260,7 +261,7 @@ def test_a_transform_is_refused_on_text() -> None:
 
 @pytest.mark.parametrize("data_type", [DataType.BOOL, DataType.bit(1)])
 def test_a_bool_or_a_bit_takes_a_transform_that_keeps_zero_and_one(data_type: DataType) -> None:
-    Point(Key("p", bool), read=HoldingRegister(1), data_type=data_type, transform=Transforms.INVERT_BOOL)  # must not raise
+    Point(Key("p", bool), read=HoldingRegister(1), data_type=data_type, transform=Transforms.INVERT_BOOL, poll_rate=PollRate.MEDIUM)  # must not raise
 
 
 @pytest.mark.parametrize("data_type", [DataType.BOOL, DataType.bit(1)])
@@ -327,11 +328,6 @@ def test_poll_always_needs_a_read_side() -> None:
     _refused("poll_always=True asks for reads", write=HoldingRegister(1), poll_always=True)
 
 
-def test_no_point_is_polled_at_the_scan_rate() -> None:
-    """PollRate.SCAN is how often a scan is checked again, which is no point's rate."""
-    _refused("PollRate.SCAN", read=InputRegister(1), poll_rate=PollRate.SCAN)
-
-
 def test_a_command_needs_a_write_side() -> None:
     _refused("COMMAND is written", read=InputRegister(1), write_kind=WriteKind.COMMAND)
 
@@ -354,7 +350,7 @@ def test_a_label_needs_a_name() -> None:
 
 def test_every_problem_is_named_in_one_error() -> None:
     with pytest.raises(ValueError) as caught:
-        Point(Key("p", int), read=InputRegister(1), scale=0, limits=Limits(0, 1), poll_always=True, write_kind=WriteKind.COMMAND)
+        Point(Key("p", int), read=InputRegister(1), scale=0, limits=Limits(0, 1), poll_always=True, write_kind=WriteKind.COMMAND, poll_rate=PollRate.MEDIUM)
     message = str(caught.value)
     for fragment in ("scale must be", "limits describe writes", "COMMAND is written"):
         assert fragment in message
@@ -365,7 +361,7 @@ def test_every_problem_is_named_in_one_error() -> None:
 def test_valid_raw_and_labels_are_frozen_copies() -> None:
     labels = {"room": 3}
     valid = [1, 2]
-    point = Point(Key("p", int), read=InputRegister(1), labels=labels, valid_raw=valid)
+    point = Point(Key("p", int), read=InputRegister(1), labels=labels, valid_raw=valid, poll_rate=PollRate.MEDIUM)
     labels["room"] = 4
     valid.append(3)
     assert point.labels == {"room": 3}
@@ -375,13 +371,13 @@ def test_valid_raw_and_labels_are_frozen_copies() -> None:
 
 
 def test_a_point_is_immutable() -> None:
-    point = Point(Key("p", int), read=InputRegister(1))
+    point = Point(Key("p", int), read=InputRegister(1), poll_rate=PollRate.MEDIUM)
     with pytest.raises(AttributeError):
         point.key = "q"  # type: ignore[misc]
 
 
 def test_readable_writable_and_registers() -> None:
-    point = Point(Key("p", float), read=InputRegister(1), data_type=DataType.FLOAT64)
+    point = Point(Key("p", float), read=InputRegister(1), data_type=DataType.FLOAT64, poll_rate=PollRate.MEDIUM)
     assert (point.readable, point.writable, point.registers) == (True, False, 4)
 
 
@@ -400,7 +396,7 @@ def test_readable_writable_and_registers() -> None:
 ], ids=["plain", "tenths", "hundredths", "halves", "tens", "tiny", "offset-wins", "explicit",
         "transform", "float", "float-explicit"])
 def test_the_rounding_follows_how_the_scale_was_written(fields: dict[str, Any], precision: int | None) -> None:
-    assert Point(_key(fields), read=InputRegister(1), **fields).effective_precision == precision
+    assert Point(_key(fields), read=InputRegister(1), poll_rate=PollRate.MEDIUM, **fields).effective_precision == precision
 
 
 # ================================================================== selectors and effects
@@ -445,19 +441,9 @@ def test_a_contradictory_effect_is_refused(build: Callable[[], object], error: t
 
 def test_a_write_refresh_waits_as_its_point_does_and_a_change_refresh_not_at_all() -> None:
     point = Point(Key("p", int), read=HoldingRegister(1), write=HoldingRegister(1),
-                  on_write=Refresh(["a"]), on_change=Refresh(["b"]))
+                  on_write=Refresh(["a"]), on_change=Refresh(["b"]), poll_rate=PollRate.MEDIUM)
     assert point.on_write is not None and point.on_write.after is None
     assert point.on_change is not None and point.on_change.after == 0.0
-
-
-def test_read_back_after_needs_a_write_side() -> None:
-    _refused("read_back_after describes writes", read=InputRegister(1), read_back_after=2.0)
-
-
-@pytest.mark.parametrize("seconds", [-1.0, float("inf"), float("nan")])
-def test_read_back_after_must_be_a_finite_number_of_seconds(seconds: float) -> None:
-    _refused("read_back_after must be", read=HoldingRegister(1), write=HoldingRegister(1),
-             read_back_after=seconds)
 
 
 def test_a_refresh_reacts_to_any_change_unless_told_otherwise() -> None:
@@ -554,7 +540,7 @@ SPLIT_TABLE = RegisterNumbering(input_registers=[NumberRange(10001, 19999, addre
 ])
 def test_register_numbers_become_addresses(numbering: RegisterNumbering, access: Access,
                                            address: int) -> None:
-    assert ModbusOptions(numbering=numbering).address(access) == address
+    assert modbus_model(numbering=numbering).address(access) == address
 
 
 @pytest.mark.parametrize("numbering,access", [
@@ -576,7 +562,7 @@ def test_register_numbers_become_addresses(numbering: RegisterNumbering, access:
 def test_a_number_the_numbering_has_no_address_for_is_refused(numbering: RegisterNumbering,
                                                               access: Access) -> None:
     with pytest.raises(ValueError):
-        ModbusOptions(numbering=numbering).address(access)
+        modbus_model(numbering=numbering).address(access)
 
 
 @pytest.mark.parametrize("make", [
@@ -604,25 +590,25 @@ def test_numberings_with_the_same_ranges_are_equal() -> None:
     assert modicon(digits=5, first_address=0) != modicon(digits=6, first_address=0)
 
 
-def test_options_name_every_problem_of_a_point() -> None:
-    options = ModbusOptions(numbering=modicon(digits=5, first_address=0), max_registers=32)
-    assert options.problems(Point(Key("ok", int), read=HoldingRegister(40001), write=HoldingRegister(40001))) == []
-    assert options.problems(Point(Key("wrong-table", int), read=HoldingRegister(30001)))
-    assert options.problems(Point(Key("too-wide", str), read=HoldingRegister(40001), data_type=DataType.string(40)))
-    assert options.problems(Point(Key("nabto", int), read=DatapointRegister(1)))
+def test_a_modbus_model_names_every_problem_of_a_point() -> None:
+    model = modbus_model(numbering=modicon(digits=5, first_address=0), max_registers=32)
+    assert model.problems(Point(Key("ok", int), read=HoldingRegister(40001), write=HoldingRegister(40001), poll_rate=PollRate.MEDIUM)) == []
+    assert model.problems(Point(Key("wrong-table", int), read=HoldingRegister(30001), poll_rate=PollRate.MEDIUM))
+    assert model.problems(Point(Key("too-wide", str), read=HoldingRegister(40001), data_type=DataType.string(40), poll_rate=PollRate.MEDIUM))
+    assert model.problems(Point(Key("nabto", int), read=DatapointRegister(1), poll_rate=PollRate.MEDIUM))
 
 
 def test_a_multi_register_point_cannot_run_off_the_end() -> None:
-    options = ModbusOptions(numbering=plain(first_address=1))
-    assert options.problems(Point(Key("edge", int), read=HoldingRegister(65534), data_type=DataType.UINT16)) == []
-    assert options.problems(Point(Key("over", int), read=HoldingRegister(65535), data_type=DataType.UINT32))
+    model = modbus_model()
+    assert model.problems(Point(Key("edge", int), read=HoldingRegister(65534), data_type=DataType.UINT16, poll_rate=PollRate.MEDIUM)) == []
+    assert model.problems(Point(Key("over", int), read=HoldingRegister(65535), data_type=DataType.UINT32, poll_rate=PollRate.MEDIUM))
 
 
 @pytest.mark.parametrize("build", [
-    lambda: ModbusOptions(numbering=plain(first_address=1), max_registers=0),
-    lambda: ModbusOptions(numbering=plain(first_address=1), max_registers=126),
-    lambda: ModbusOptions(numbering=plain(first_address=1), max_bits=0),
-    lambda: ModbusOptions(numbering=plain(first_address=1), max_bits=2001),
+    lambda: modbus_model(max_registers=0),
+    lambda: modbus_model(max_registers=126),
+    lambda: modbus_model(max_bits=0),
+    lambda: modbus_model(max_bits=2001),
 ])
 def test_device_limits_must_fit_the_protocol(build: Callable[[], object]) -> None:
     with pytest.raises(ValueError):
@@ -751,12 +737,47 @@ def test_a_month_is_not_written_as_the_symbol_for_a_metre() -> None:
     assert Unit.MONTHS != "m"
 
 
-# ============================================================================= poll rates
-
-def test_the_poll_rates_climb_from_seconds_to_a_quarter_of_an_hour() -> None:
-    assert dict(DEFAULT_INTERVALS) == {PollRate.FAST: 10.0, PollRate.MEDIUM: 30.0, PollRate.SLOW: 60.0,
-                                       PollRate.RARE: 900.0, PollRate.STATIC: None, PollRate.SCAN: 900.0}
+# ============================================================================ write range
 
 
-def test_a_point_is_polled_at_the_medium_rate_unless_it_says_otherwise() -> None:
-    assert Point(Key("p", int), read=InputRegister(1)).poll_rate is PollRate.MEDIUM
+def _setting(key: Key[Any], **kw: Any) -> Point[Any]:
+    return Point(key, read=HoldingRegister(1), write=HoldingRegister(1), poll_rate=PollRate.MEDIUM, **kw)
+
+
+@pytest.mark.parametrize("point,expected", [
+    (_setting(Key("t", float), data_type=DataType.INT16, scale=0.1, valid_raw=range(-0x8000, 0x7FFF)),
+     WriteRange(-3276.8, 3276.6, 0.1)),
+    (_setting(Key("n", int)), WriteRange(0, 65535, 1)),
+    (_setting(Key("n", int), limits=Limits(min=5)), WriteRange(5, 65535, 1)),
+    (_setting(Key("t", float), data_type=DataType.INT16, scale=0.5, limits=Limits(min=5, max=30, step=1.0)),
+     WriteRange(5, 30, 1.0)),
+    (_setting(Key("m", float), transform=Transforms.SECONDS_AS_MINUTES), WriteRange(0, 65535 / 60, 1 / 60)),
+    (_setting(Key("d", int), scale=-1), WriteRange(-65535, 0, 1)),
+    (_setting(Key("o", float), scale=0.5, offset=-20, valid_raw={0, 7, 100}), WriteRange(-20, 30, 0.5)),
+    (_setting(Key("f", float), data_type=DataType.FLOAT32, limits=Limits(min=0, max=10)), WriteRange(0, 10, None)),
+], ids=["scaled-valid-raw", "data-type", "half-limits", "limits", "transform", "negative-scale", "offset-set",
+        "float-limits"])
+def test_a_points_write_range_is_its_limits_and_else_what_its_registers_carry(
+        point: Point[Any], expected: WriteRange) -> None:
+    found = point.write_range()
+    assert found is not None
+    assert (found.min, found.max) == pytest.approx((expected.min, expected.max))
+    assert found.step == (pytest.approx(expected.step) if expected.step is not None else None)
+
+
+@pytest.mark.parametrize("scale", [0.01, 0.1, 0.5])
+def test_a_scaled_points_write_range_steps_by_its_scale_exactly(scale: float) -> None:
+    point = _setting(Key("t", float), data_type=DataType.INT16, scale=scale, valid_raw=range(-0x8000, 0x7FFF))
+    found = point.write_range()
+    assert found is not None and found.step == scale
+
+
+@pytest.mark.parametrize("point", [
+    Point(Key("r", int), read=InputRegister(1), poll_rate=PollRate.MEDIUM),
+    _setting(Key("s", Mode)),
+    _setting(Key("b", bool), data_type=DataType.BOOL),
+    _setting(Key("f", float), data_type=DataType.FLOAT32),
+    _setting(Key("text", str), data_type=DataType.string(2)),
+], ids=["read-only", "states", "bool", "float-without-limits", "text"])
+def test_a_point_without_a_range_of_numbers_to_write_has_none(point: Point[Any]) -> None:
+    assert point.write_range() is None

@@ -4,8 +4,9 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from .._device import Identity
-from .._model import Model, RepeatedSection, Section, problems, resolve
+from event_connect import Identity
+
+from .._model import Model, applies, problems, resolve, section_label
 from .._point import Point
 
 _ROUND_TRIP_SAMPLES = (-7.5, -1.0, 0.0, 0.5, 1.0, 7.0, 60.0, 100.0, 1000.0)
@@ -13,48 +14,47 @@ _ROUND_TRIP_SAMPLES = (-7.5, -1.0, 0.0, 0.5, 1.0, 7.0, 60.0, 100.0, 1000.0)
 unit conversions work with."""
 
 
-def assert_models_valid(*models: Model, identities: Sequence[Identity]) -> None:
+def assert_models_valid(models: Sequence[Model], *, identities: Sequence[Identity]) -> None:
     """Resolve every model against every identity, and check what resolving does not.
 
     Raises:
-        AssertionError: listing every problem found - a model that does not resolve, a transform
-            that does not round-trip, or a section no identity included, which is left untested.
+        AssertionError: listing every problem found - a model given twice, a model that does not
+            resolve, a transform that does not round-trip, or a section no identity included,
+            which is left untested.
         ValueError: `identities` is empty.
     """
     if not identities:
         raise ValueError("assert_models_valid needs at least one identity to check models against")
 
     findings: list[str] = []
-    for model in models:
-        included = [False] * len(model.sections)
-        for identity in identities:
-            prefix = f"{model.name} / {identity}"
-            found = problems(model, identity)
-            findings.extend(f"{prefix}: {problem}" for problem in found)
-            for index, section in enumerate(model.sections):
-                included[index] = included[index] or _includes(section, identity)
-            if not found:
-                points = resolve(model, identity).points.values()
-                findings.extend(f"{prefix}: {issue}" for issue in map(_transform_problem, points) if issue)
-        for index, section in enumerate(model.sections):
-            if section.when is not None and not included[index]:
-                findings.append(f"{model.name}: {_label(index, section)} never resolved - untested")
+    for index, model in enumerate(models):
+        if any(other is model for other in models[:index]):
+            findings.append(f"{model.name}: given twice")
+            continue
+        findings.extend(_model_findings(model, identities))
 
     if findings:
         raise AssertionError("\n".join(dict.fromkeys(findings)))
 
 
-def _includes(section: Section | RepeatedSection, identity: Identity) -> bool:
-    try:
-        return bool(section.when is None or section.when(identity))
-    except Exception:
-        return False            # reported by problems()
-
-
-def _label(index: int, section: Section | RepeatedSection) -> str:
-    if isinstance(section, RepeatedSection):
-        return f"sections[{index}] (RepeatedSection label={section.label!r})"
-    return f"sections[{index}] (Section)"
+def _model_findings(model: Model, identities: Sequence[Identity]) -> list[str]:
+    """Every problem `model` has, against every identity."""
+    findings: list[str] = []
+    included = [False] * len(model.sections)
+    for identity in identities:
+        prefix = f"{model.name} / {identity}"
+        found = problems(model, identity)
+        findings.extend(f"{prefix}: {problem}" for problem in found)
+        for index, section in enumerate(model.sections):
+            label = section_label(index, section)
+            included[index] = included[index] or applies(section, identity, label, [])
+        if not found:
+            points = resolve(model, identity).points.values()
+            findings.extend(f"{prefix}: {issue}" for issue in map(_transform_problem, points) if issue)
+    for index, section in enumerate(model.sections):
+        if section.when is not None and not included[index]:
+            findings.append(f"{model.name}: {section_label(index, section)} never resolved - untested")
+    return findings
 
 
 def _transform_problem(point: Point[Any]) -> str | None:

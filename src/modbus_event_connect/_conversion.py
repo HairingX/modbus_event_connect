@@ -7,12 +7,11 @@ from collections.abc import Sequence
 from datetime import date, datetime, time
 from typing import Any
 
+from event_connect import InvalidValueError, Quality, Value, is_state_type
+
 from ._data_type import ByteOrder, DataTypeKind, WordOrder, raw_bounds
 from ._device import EncodedWrite
-from ._errors import InvalidValueError
-from ._key import is_state_type
 from ._point import Point
-from ._value import Quality, Value
 
 _SIGNED_KINDS = frozenset({DataTypeKind.INT16, DataTypeKind.INT32, DataTypeKind.INT64})
 
@@ -155,11 +154,6 @@ def _unscale(x: float, scale: float, offset: float) -> float:
     y = x if offset == 0 else x - offset
     n = _inverse_int(scale)
     return y * n if n is not None else y / scale
-
-
-def _is_close_to_integer(x: float) -> bool:
-    nearest = round(x)
-    return abs(x - nearest) <= _RELATIVE_TOLERANCE * max(1.0, abs(x))
 
 
 def _round_half_away_from_zero(x: float) -> int:
@@ -309,18 +303,9 @@ def _as_bit_value(point: Point[Any], value: object) -> bool:
 
 
 def _check_limits(point: Point[Any], x: int | float) -> None:
-    limits = point.limits
-    if limits is None:
-        return
-    if limits.min is not None and x < limits.min:
-        raise InvalidValueError(f"point {point.key!r}: {x} is below the minimum {limits.min}")
-    if limits.max is not None and x > limits.max:
-        raise InvalidValueError(f"point {point.key!r}: {x} is above the maximum {limits.max}")
-    if limits.step is not None:
-        base = limits.min if limits.min is not None else 0
-        steps = (x - base) / limits.step
-        if not _is_close_to_integer(steps):
-            raise InvalidValueError(f"point {point.key!r}: {x} is not a multiple of step {limits.step} from {base}")
+    problem = point.limits.problem(x) if point.limits is not None else None
+    if problem is not None:
+        raise InvalidValueError(f"point {point.key!r}: {problem}")
 
 
 def _encode_numeric(point: Point[Any], value: Value) -> EncodedWrite:

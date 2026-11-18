@@ -4,12 +4,14 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from ._point import Access, Point
+from event_connect import Identity
 
-Identity = Mapping[str, int | float | str | bool | None]
-"""What a device says about itself: from a protocol handshake, or read from identity points."""
+from ._point import Point
+
+if TYPE_CHECKING:
+    from ._model import Model
 
 
 class Outcome(Enum):
@@ -86,24 +88,14 @@ class EncodedWrite:
             raise ValueError(f"registers must be 16-bit values, got {self.registers}")
 
 
-class ProtocolOptions:
-    """What a model states in its protocol's terms.
-
-    The base class states nothing; a protocol supplies its own subclass.
-    """
-
-    def problems(self, point: Point[Any]) -> list[str]:
-        """What is wrong with `point` under these options. Empty when nothing is."""
-        return []
-
-    def address(self, access: Access) -> int:
-        """The address sent for `access`. Raises ValueError if it has none."""
-        return access.address
-
-
 @runtime_checkable
 class Device(Protocol):
     """One device, reached through one protocol. The core talks to this and nothing below it."""
+
+    @property
+    def models(self) -> Sequence[Model]:
+        """Every model the device may be, of its protocol."""
+        ...
 
     async def connect(self) -> Identity | None:
         """Reach the device, opening the connection if this device owns it.
@@ -117,8 +109,14 @@ class Device(Protocol):
         """Let go of the device. Closes the connection only if this device opened it."""
         ...
 
-    def configure(self, options: ProtocolOptions) -> None:
-        """Apply the chosen model's options. Called once the model is known, before any read."""
+    def use(self, model: Model) -> None:
+        """Talk to the device as `model` says, from now on.
+
+        Called once the model is chosen, before any of its points is read.
+
+        Raises:
+            ModelError: `model` is not one of `models`.
+        """
         ...
 
     async def read(self, points: Sequence[Point[Any]]) -> Mapping[str, ReadResult]:

@@ -23,21 +23,19 @@ import pytest
 import pytest_asyncio
 
 from conftest import live_or_skip, live_setting
+from event_connect import Key, PollRate, Quality
 from modbus_event_connect._client import Client
 from modbus_event_connect._data_type import DataType
 from modbus_event_connect._device import Outcome
-from modbus_event_connect._key import Key
-from modbus_event_connect._model import Model, Section
+from modbus_event_connect._model import Section
 from modbus_event_connect._point import Point
-from modbus_event_connect._value import Quality
 from modbus_event_connect.modbus._access import (
     HoldingRegister,
     InputRegister,
-    ModbusOptions,
-    plain,
 )
 from modbus_event_connect.modbus._connection import ModbusTcpConnection, Request, Response
 from modbus_event_connect.modbus._device import ModbusDevice
+from models import CONNECT_TIMEOUT, FRAME_GAP, NEVER_AGAIN, OFFLINE_AFTER_INTERVALS, TIMEOUT_MARGIN, modbus_model
 
 HOST = live_setting("MODBUS_TCP_HOST")
 PORT = int(live_setting("MODBUS_TCP_PORT") or "502")
@@ -48,12 +46,12 @@ pytestmark = [
     *live_or_skip("Modbus TCP", MODBUS_TCP_HOST=HOST),
 ]
 
-LIVE_MODEL = Model(name="live", manufacturer="any", sections=[Section([
-    Point(Key("u16", int), read=InputRegister(1), data_type=DataType.UINT16),
-    Point(Key("s16_scaled", float), read=InputRegister(104), data_type=DataType.INT16, scale=0.01, valid_raw=range(-0x8000, 0x7FFF)),
-    Point(Key("text", str), read=HoldingRegister(10), data_type=DataType.string(16)),
-    Point(Key("u32", int), read=HoldingRegister(28), data_type=DataType.UINT32),
-])], options=ModbusOptions(numbering=plain(first_address=1)), read_back_after=1.0)
+LIVE_MODEL = modbus_model([Section([
+    Point(Key("u16", int), read=InputRegister(1), data_type=DataType.UINT16, poll_rate=PollRate.MEDIUM),
+    Point(Key("s16_scaled", float), read=InputRegister(104), data_type=DataType.INT16, scale=0.01, valid_raw=range(-0x8000, 0x7FFF), poll_rate=PollRate.MEDIUM),
+    Point(Key("text", str), read=HoldingRegister(10), data_type=DataType.string(16), poll_rate=PollRate.MEDIUM),
+    Point(Key("u32", int), read=HoldingRegister(28), data_type=DataType.UINT32, poll_rate=PollRate.MEDIUM),
+])], name="live", manufacturer="any")
 
 
 @dataclass
@@ -65,16 +63,17 @@ class Live:
 @pytest_asyncio.fixture(scope="module", loop_scope="module")  # pyright: ignore[reportUntypedFunctionDecorator, reportUnknownMemberType]
 async def live() -> AsyncGenerator[Live, None]:
     assert HOST is not None   # guarded by the skip above
-    connection = ModbusTcpConnection(HOST, PORT)
+    connection = ModbusTcpConnection(HOST, PORT, connect_timeout=CONNECT_TIMEOUT, frame_gap=FRAME_GAP)
     read = connection.request
 
-    async def only_reads(request: Request) -> Response:
+    async def only_reads(request: Request, *, timeout: float) -> Response:
         if not request.function.is_read:
             raise AssertionError("a write was attempted; these tests are read-only")
-        return await read(request)
+        return await read(request, timeout=timeout)
     setattr(connection, "request", only_reads)
-    device = ModbusDevice(connection, UNIT_ID, owns_connection=True, reconnect=None)
-    client = Client(device, LIVE_MODEL, read_only=True)
+    device = ModbusDevice(connection, UNIT_ID, owns_connection=True, reconnect=NEVER_AGAIN, models=[LIVE_MODEL],
+                          timeout_margin=TIMEOUT_MARGIN)
+    client = Client(device, LIVE_MODEL, offline_after_intervals=OFFLINE_AFTER_INTERVALS, read_only=True)
     try:
         await client.connect()
     except Exception as err:
@@ -114,9 +113,9 @@ async def test_two_registers_read_as_one_32_bit_number(live: Live) -> None:
 
 
 async def test_an_address_the_device_lacks_is_missing_and_the_rest_are_still_read(live: Live) -> None:
-    answers = await live.device.read([Point(Key("a", int), read=InputRegister(1), data_type=DataType.UINT16),
-                                      Point(Key("absent", int), read=InputRegister(9999), data_type=DataType.UINT16),
-                                      Point(Key("b", int), read=InputRegister(2), data_type=DataType.UINT16)])
+    answers = await live.device.read([Point(Key("a", int), read=InputRegister(1), data_type=DataType.UINT16, poll_rate=PollRate.MEDIUM),
+                                      Point(Key("absent", int), read=InputRegister(9999), data_type=DataType.UINT16, poll_rate=PollRate.MEDIUM),
+                                      Point(Key("b", int), read=InputRegister(2), data_type=DataType.UINT16, poll_rate=PollRate.MEDIUM)])
     print(f"\n  {({k: a.outcome.name for k, a in answers.items()})}")
     assert (answers["a"].outcome, answers["b"].outcome) == (Outcome.OK, Outcome.OK)
     assert answers["absent"].outcome is Outcome.MISSING

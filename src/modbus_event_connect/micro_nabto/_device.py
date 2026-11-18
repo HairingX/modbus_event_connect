@@ -4,39 +4,25 @@ from __future__ import annotations
 import logging
 from collections import Counter, deque
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from importlib import metadata
 from typing import Any
+
+from event_connect import CircuitBreaker, Clock, Identity, Wait
 
 from . import _wire as wire
 from ._access import DatapointRegister, SetpointRegister
 from ._connection import MicroNabtoConnection, describe
-from .._data_type import DataTypeKind
-from .._device import EncodedWrite, Identity, Outcome, ProtocolOptions, ReadResult, WriteResult
+from ._model import MicroNabtoModel, RereadZeros
+from .._device import EncodedWrite, Outcome, ReadResult, WriteResult
+from .._model import Model, checked_models, model_among
 from .._point import Access, Point
-from .._resilience import Fixed, Retry, Steps, Wait
 
 _LOGGER = logging.getLogger(__name__)
-
-MAX_REGISTERS_PER_READ = 64
-"""Registers per read request; a CTS 402 answered 108, so this leaves room."""
-
-REREAD_ZEROS_FOR = 7.5
-"""Seconds after an answer of only zeros, where values were, until the zeros are taken: short of
-the 10 s between two fast polls, as a Nilan gateway was seen answering a new session's first
-reads with zeros, and values 10 s later."""
 
 _HISTORY = 5
 """Requests a warning about zeros names from before them."""
 _ENDINGS = ("values_at_once", "values_after_waiting", "values_in_halves", "zeros_taken")
-
-_MAX_OBJECT = 0xFF
-_MAX_ADDRESS: Mapping[tuple[str, type[Access]], int] = {
-    ("read", DatapointRegister): 0xFFFF_FFFF,
-    ("read", SetpointRegister): 0xFFFF,
-    ("write", SetpointRegister): 0xFFFF_FFFF,
-}
-"""SetpointRegister reads carry a two-byte address; datapoint reads and setpoint writes four."""
 
 _Parse = Callable[[bytes], list[int] | None]
 _Register = tuple[type[Access], int, int]
@@ -45,79 +31,6 @@ _READS: Mapping[type[Access], tuple[Callable[[Sequence[tuple[int, int]]], bytes]
     DatapointRegister: (wire.datapoint_read, wire.datapoint_values),
     SetpointRegister: (wire.setpoint_read, wire.setpoint_values),
 }
-
-
-@dataclass(frozen=True)
-class RereadZeros:
-    """How registers answered with only zeros, where they held values, are read again before the
-    zeros are taken; until then their last values are kept."""
-    within: float = REREAD_ZEROS_FOR
-    """Seconds after the zeros until they are taken."""
-    wait: Wait = Steps(0.5, then=Fixed(1.0))
-    """When to read them again: the first time this long after the zeros, each next time this long
-    after the time before."""
-    at_once: bool = True
-    """Whether they are read again at once, before anything else."""
-    halves: bool = True
-    """Whether, at `within`, they are read in two halves, whose values are taken if they bring
-    any: a device may answer only zeros when asked for too many registers at once."""
-
-    def __post_init__(self) -> None:
-        if not self.within >= 0:
-            raise ValueError(f"within cannot be negative, got {self.within}")
-
-
-TAKE_ZEROS = RereadZeros(within=0.0, at_once=False, halves=False)
-"""Zeros are taken as they come: for a device known to answer zeros only where they are."""
-
-
-@dataclass(frozen=True)
-class MicroNabtoOptions(ProtocolOptions):
-    """What a model states about its device in micro_nabto terms."""
-    max_registers: int = MAX_REGISTERS_PER_READ
-    """Most registers the device is asked for in one read."""
-    later_answer_wait: float | None = None
-    """Seconds a read sent again and answered with only zeros, where values were, is kept open
-    for a later answer; None leaves the connection's. One given to the connection overrides it."""
-    answer_wait: float | None = None
-    """Seconds an answer is waited for once the device has said it has the request; None leaves
-    the connection's. One given to the connection overrides it."""
-    reread_zeros_for: float | None = None
-    """Seconds after an answer of only zeros, where values were, until the zeros are taken; None
-    leaves `zeros`'. One given to the device overrides it."""
-    zeros: RereadZeros | None = None
-    """How an answer of only zeros, where values were, is read again; None leaves `RereadZeros()`.
-    One given to the device overrides it."""
-
-    def __post_init__(self) -> None:
-        if self.max_registers < 1:
-            raise ValueError(f"max_registers must be at least 1, got {self.max_registers}")
-        if self.later_answer_wait is not None and self.later_answer_wait < 0:
-            raise ValueError(f"later_answer_wait cannot be negative, got {self.later_answer_wait}")
-        if self.answer_wait is not None and not self.answer_wait > 0:
-            raise ValueError(f"answer_wait must be positive, got {self.answer_wait}")
-        if self.reread_zeros_for is not None and self.reread_zeros_for < 0:
-            raise ValueError(f"reread_zeros_for cannot be negative, got {self.reread_zeros_for}")
-
-    def problems(self, point: Point[Any]) -> list[str]:
-        found: list[str] = []
-        for side, access in (("read", point.read), ("write", point.write)):
-            if access is None:
-                continue
-            if not isinstance(access, DatapointRegister | SetpointRegister):
-                found.append(f"the {side} side is {type(access).__name__}, not a micro_nabto space")
-                continue
-            limit = _MAX_ADDRESS.get((side, type(access)))
-            if limit is not None and access.address + point.registers - 1 > limit:
-                found.append(f"the {side} side ends past address {limit}")
-            if access.obj > _MAX_OBJECT:
-                found.append(f"the {side} side's object {access.obj} is more than {_MAX_OBJECT}")
-            if side == "read" and point.registers > self.max_registers:
-                found.append(f"the read side spans {point.registers}, more than the {self.max_registers} "
-                             f"the device is asked for in one request")
-        if point.write is not None and point.data_type.kind is DataTypeKind.BIT:
-            found.append("a single bit cannot be written over micro_nabto")
-        return found
 
 
 @dataclass
@@ -146,23 +59,19 @@ class _Batch:
 class MicroNabtoDevice:
     """A micro_nabto device; datapoints and setpoints are read in batches, setpoints written."""
 
-    def __init__(self, connection: MicroNabtoConnection, *, owns_connection: bool = False,
-                 reread_zeros_for: float | None = None, zeros: RereadZeros | None = None) -> None:
+    def __init__(self, connection: MicroNabtoConnection, *, models: Sequence[MicroNabtoModel],
+                 owns_connection: bool = False) -> None:
         """Args:
+            models: every model the device may be; `use()` chooses one.
             owns_connection: whether `disconnect()` also closes the connection.
-            reread_zeros_for: seconds after an answer of only zeros, where values were, until the
-                zeros are taken; None leaves it to `zeros`.
-            zeros: how an answer of only zeros, where values were, is read again; None leaves it
-                to the model, and to `RereadZeros()`.
 
         Raises:
-            ValueError: `reread_zeros_for` is negative.
+            ModelError: no model, or one given twice.
         """
-        if reread_zeros_for is not None and reread_zeros_for < 0:
-            raise ValueError(f"reread_zeros_for cannot be negative, got {reread_zeros_for}")
         self._connection = connection
         self._owns_connection = owns_connection
-        self._own_zeros = _zeros(zeros, reread_zeros_for)
+        self._models = checked_models(models)
+        self._model: MicroNabtoModel | None = None
         self._episodes: dict[_Register, _Episode] = {}
         self._endings: Counter[str] = Counter()
         self._zero_rereads = 0
@@ -171,7 +80,6 @@ class MicroNabtoDevice:
         self._smallest_of_zeros: int | None = None
         self._recent: deque[tuple[float, str]] = deque(maxlen=_HISTORY + 1)
         self._this_read: list[int] = []
-        self._options: MicroNabtoOptions | None = None
         self._outcomes: Counter[Outcome] = Counter()
         self._isolated = 0
         self._only_zeros = 0
@@ -179,34 +87,60 @@ class MicroNabtoDevice:
         self._zeroed_at: dict[_Register, float] = {}
 
     @classmethod
-    def udp(cls, email: str, *, host: str | None = None, device_id: str | None = None,
-            reconnect: Retry | None, reread_zeros_for: float | None = None, zeros: RereadZeros | None = None,
-            **kwargs: Any) -> MicroNabtoDevice:
-        """A device on a connection of its own; `reconnect` and `kwargs` go to `MicroNabtoConnection`."""
-        return cls(MicroNabtoConnection(email, host=host, device_id=device_id, reconnect=reconnect, **kwargs),
-                   owns_connection=True, reread_zeros_for=reread_zeros_for, zeros=zeros)
+    def udp(cls, email: str, *, host: str | None = None, device_id: str | None = None, port: int = wire.PORT,
+            reconnect: CircuitBreaker, models: Sequence[MicroNabtoModel], timeout: float, retries: int,
+            session_idle: float, rediscovery_timeout: float, rediscovery_resend: float, answer_wait: float,
+            discovery_target: tuple[str, int] = wire.BROADCAST, clock: Clock | None = None) -> MicroNabtoDevice:
+        """A device on a session of its own, which `disconnect()` closes; everything but `models`
+        is the session's, as `MicroNabtoConnection` takes it."""
+        connection = MicroNabtoConnection(email, host=host, device_id=device_id, port=port, timeout=timeout,
+                                          retries=retries, session_idle=session_idle,
+                                          rediscovery_timeout=rediscovery_timeout,
+                                          rediscovery_resend=rediscovery_resend, answer_wait=answer_wait,
+                                          reconnect=reconnect, discovery_target=discovery_target, clock=clock)
+        return cls(connection, models=models, owns_connection=True)
 
     @property
-    def options(self) -> MicroNabtoOptions | None:
-        """The model's options; None until `configure()`."""
-        return self._options
+    def models(self) -> tuple[MicroNabtoModel, ...]:
+        """Every model the device may be."""
+        return self._models
+
+    @property
+    def model(self) -> MicroNabtoModel | None:
+        """The model `use()` chose; None before it chose one."""
+        return self._model
+
+    @property
+    def max_registers(self) -> int:
+        """Most registers asked for in one read: the chosen model's, and before one is chosen,
+        the fewest any model takes."""
+        if self._model is not None:
+            return self._model.max_registers
+        return min(model.max_registers for model in self._models)
+
+    @property
+    def later_answer_wait(self) -> float:
+        """Seconds a read sent again, answered with only zeros, is kept open for a later answer: the
+        chosen model's, and before one is chosen, the longest of any model."""
+        if self._model is not None:
+            return self._model.later_answer_wait
+        return max(model.later_answer_wait for model in self._models)
+
+    @property
+    def answer_wait(self) -> float:
+        """Seconds an answer is waited for once the device has said it has the request: the chosen
+        model's, and before one is chosen, the longest of any model."""
+        if self._model is not None:
+            return self._model.answer_wait
+        return max(model.answer_wait for model in self._models)
 
     @property
     def zeros(self) -> RereadZeros:
-        """How an answer of only zeros, where values were, is read again: the device's when given,
-        else the model's, else `RereadZeros()`."""
-        if self._own_zeros is not None:
-            return self._own_zeros
-        if self._options is not None:
-            of_model = _zeros(self._options.zeros, self._options.reread_zeros_for)
-            if of_model is not None:
-                return of_model
-        return RereadZeros()
-
-    @property
-    def reread_zeros_for(self) -> float:
-        """Seconds after an answer of only zeros until the zeros are taken."""
-        return self.zeros.within
+        """How an answer of only zeros, where values were, is read again: the chosen model's, and
+        before one is chosen, that of the model that takes the zeros latest."""
+        if self._model is not None:
+            return self._model.zeros
+        return max((model.zeros for model in self._models), key=lambda zeros: zeros.within)
 
     async def connect(self) -> Identity | None:
         """Establish the session. The identity is what the device says in the handshake."""
@@ -216,30 +150,21 @@ class MicroNabtoDevice:
         if self._owns_connection:
             await self._connection.close()
 
-    def configure(self, options: ProtocolOptions | None) -> None:
-        if options is None:
-            self._options: MicroNabtoOptions | None = None
-            self._connection.use_model_later_answer_wait(None)
-            self._connection.use_model_answer_wait(None)
-        elif isinstance(options, MicroNabtoOptions):
-            self._options = options
-            self._connection.use_model_later_answer_wait(options.later_answer_wait)
-            self._connection.use_model_answer_wait(options.answer_wait)
-        else:
-            raise TypeError(f"a micro_nabto device needs MicroNabtoOptions, not {type(options).__name__}")
+    def use(self, model: Model) -> None:
+        """Talk to the device as `model` says.
 
-    def _configured(self) -> MicroNabtoOptions:
-        if self._options is None:
-            raise RuntimeError("configure() the device with its model's options before using it")
-        return self._options
+        Raises:
+            ModelError: `model` is not one of `models`.
+        """
+        self._model = model_among(self._models, model)
 
     async def read(self, points: Sequence[Point[Any]]) -> Mapping[str, ReadResult]:
         spaces: dict[tuple[type[Access], int], list[Point[Any]]] = {}
         for point in points:
             access = _read_side(point)
-            if point.registers > self._configured().max_registers:
+            if point.registers > self.max_registers:
                 raise ValueError(f"point {point.key!r} spans more registers than max_registers")
-            spaces.setdefault((type(access), _obj(access)), []).append(point)
+            spaces.setdefault((type(access), access.obj), []).append(point)
 
         batches = [batch for (space, obj), members in spaces.items() for batch in self._batches(space, obj, members)]
         self._this_read = [len(batch.items) for batch in batches]
@@ -258,7 +183,7 @@ class MicroNabtoDevice:
         if value.bit_index is not None:
             raise ValueError(f"point {point.key!r}: a single bit cannot be written over micro_nabto")
         items = [(access.obj, access.address + i, register) for i, register in enumerate(value.registers)]
-        answer = await self._connection.request(wire.setpoint_write(items))
+        answer = await self._connection.request(wire.setpoint_write(items), answer_wait=self.answer_wait)
         status = wire.write_status(answer) if answer is not None else None
         self._recent.append((self._connection.clock.monotonic(), f"SetpointRegister write of {len(items)}: " + (
             "no answer" if answer is None else "no status" if status is None else f"status 0x{status:02x}")))
@@ -281,7 +206,9 @@ class MicroNabtoDevice:
             "outcomes": {outcome.name: self._outcomes[outcome] for outcome in Outcome},
             "isolated_reads": self._isolated,
             "answers_of_only_zeros": self._only_zeros,
-            "reread_zeros_for": self.reread_zeros_for,
+            "answer_wait": self.answer_wait,
+            "later_answer_wait": self.later_answer_wait,
+            "zeros_taken_after": self.zeros.within,
             "zero_rereads": self._zero_rereads,
             "zeros_ended": {ending: self._endings[ending] for ending in _ENDINGS},
             "zeros_open": len({id(episode) for episode in self._episodes.values()}),
@@ -298,7 +225,7 @@ class MicroNabtoDevice:
         current: list[Point[Any]] = []
         registers = 0
         for point in points:
-            if registers + point.registers > self._configured().max_registers:
+            if registers + point.registers > self.max_registers:
                 batches.append(_Batch(space, obj, tuple(current)))
                 current, registers = [], 0
             current.append(point)
@@ -321,7 +248,8 @@ class MicroNabtoDevice:
         for a later warning."""
         build, parse = _READS[space]
         asked = list(dict.fromkeys(items))
-        answer = await self._connection.request(build(asked), accept=accept)
+        answer = await self._connection.request(build(asked), accept=accept, answer_wait=self.answer_wait,
+                                                later_answer_wait=self.later_answer_wait)
         found = parse(answer) if answer is not None else None
         values = found
         if found is not None and len(found) == len(asked) and len(asked) != len(items):
@@ -529,13 +457,6 @@ class MicroNabtoDevice:
             result[point.key] = raw
 
 
-def _zeros(zeros: RereadZeros | None, within: float | None) -> RereadZeros | None:
-    """`zeros`, or `RereadZeros()` where only `within` is given, taking `within` when given."""
-    if within is None:
-        return zeros
-    return replace(zeros or RereadZeros(), within=within)
-
-
 def _next_retry(wait: Wait, elapsed: float, until: float) -> float:
     """Seconds from `elapsed` after the zeros until the next reading again: the times `wait` gives,
     counted from the zeros, and last at `until`."""
@@ -559,20 +480,14 @@ def _requests(sizes: Sequence[int]) -> str:
 
 
 def _library() -> str:
-    try:
-        return f"modbus_event_connect {metadata.version('modbus_event_connect')}"
-    except metadata.PackageNotFoundError:
-        return "modbus_event_connect, version unknown"
+    return f"modbus_event_connect {metadata.version('modbus_event_connect')}"
 
 
-def _read_side(point: Point[Any]) -> Access:
+def _read_side(point: Point[Any]) -> DatapointRegister | SetpointRegister:
     access = point.read
     if access is None:
         raise TypeError(f"point {point.key!r} has no read side")
-    if type(access) not in _READS:
+    if not isinstance(access, DatapointRegister | SetpointRegister):
         raise TypeError(f"point {point.key!r}: the read side is {type(access).__name__}, not a micro_nabto space")
     return access
 
-
-def _obj(access: Access) -> int:
-    return access.obj if isinstance(access, DatapointRegister | SetpointRegister) else 0
