@@ -87,8 +87,8 @@ the device talks to the unit as that model says. Before that, it is as cautious 
 models needs: the fewest registers and bits in one read, the longest time to answer, the longest
 wait for an acknowledged answer and for a later one, and zeros taken as late as any model takes
 them. A model the device was not given is a `ModelError` at `use`, and a model given twice is
-one when the device is made. A write needs a chosen model, so it is always sent again as that
-model's `write_retry` says.
+one when the device is made. A write needs a chosen model, so it is always judged taken by that
+model's `write_taken` and sent again as its `write_retry` says.
 
 ### Principles
 
@@ -371,6 +371,7 @@ NILAN = MicroNabtoModel(
     answer_wait=2.0,                      # guess: a chosen ceiling
     later_answer_wait=5.0,                # guess
     zeros=RereadZeros(within=7.5, wait=Steps(0.5, then=Fixed(1.0)), at_once=True, halves=True),   # guess
+    write_taken=frozenset({0}),           # guess
 )
 ```
 
@@ -814,10 +815,13 @@ CTS 402 — which other devices may not share.
   A refused read is halved until the refusal is pinned down, as Modbus 0x02 is; any count
   that does not match is treated the same way, so a device that answers differently is not
   misread.
-- **A setpoint write waits for its answer**, which starts with a status: 0 when the device took
-  the write. A CTS 402 answered 0x63 and 0x85 to writes it did not take - they are not uNabto's
-  codes, which it sends as exceptions - and took the same write on a later try; so a write
-  answered otherwise is `BUSY`, naming the status, and the client may send it again.
+- **A setpoint write waits for its answer**, which starts with a status. Which statuses mean
+  the device took the write is its model's `write_taken`, with no default, as devices differ:
+  a CTS 402 answered 0 to writes it took, and a Genvex Optima 270 answered 0x01 to every write,
+  each of which it took. A CTS 402 answered 0x63 and 0x85 to writes it did not take - they are
+  not uNabto's codes, which it sends as exceptions - and took the same write on a later try; so
+  a write answered with a status its model does not name is `BUSY`, naming the status, and the
+  client may send it again.
 - **The handshake has a breaker too:** the connection's `reconnect` opens once `after`
   handshakes in a row failed, and requests fail at once until its `retry` lets a handshake
   through.
