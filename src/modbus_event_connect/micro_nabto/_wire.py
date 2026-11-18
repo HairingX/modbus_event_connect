@@ -4,10 +4,12 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
-from .._device import Identity
+from event_connect import Identity
 
-DEVICE_PORT = 5570
-BROADCAST = ("255.255.255.255", DEVICE_PORT)
+PORT = 5570
+"""The UDP port a micro_nabto device answers on, discovery included."""
+BROADCAST = ("255.255.255.255", PORT)
+"""Where a discovery is sent to reach every device on the local network."""
 
 HEADER_LENGTH = 16
 DISCOVERY_REQUEST = b"\x00\x00\x00\x01"

@@ -46,7 +46,7 @@ class ReadBackMeasurement:
 
 
 async def measure_read_back[T](client: Client, key: Key[T], values: tuple[T, T], *,
-                            delays: Sequence[float] = (1, 2, 3, 4, 5), repeats: int = 3,
+                            delays: Sequence[float], repeats: int,
                             sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> ReadBackMeasurement:
     """Write to `key` and count, for each delay, how often a read that long after shows the value.
 

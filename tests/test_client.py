@@ -2,6 +2,7 @@
 fake device, so these tests are never about Modbus itself."""
 import asyncio
 import gc
+from dataclasses import replace
 import logging
 from collections.abc import Awaitable, Mapping, Sequence
 from typing import Any, TypeVar
@@ -27,7 +28,6 @@ from event_connect import (
     ReadOnlyError,
     Refresh,
     Retry,
-    Timing,
     UnsupportedDeviceError,
     Within,
     WriteKind,
@@ -38,12 +38,11 @@ from modbus_event_connect._client import Client
 from modbus_event_connect._data_type import DataType
 from modbus_event_connect._device import (
     EncodedWrite,
-    Identity,
     Outcome,
     ReadResult,
     WriteResult,
 )
-from modbus_event_connect._model import Model, Profile, RepeatedSection, Scan, Section
+from modbus_event_connect._model import Model, RepeatedSection, Scan, Section
 from modbus_event_connect._point import Point
 from modbus_event_connect import Write
 from modbus_event_connect.modbus._access import (
@@ -51,7 +50,9 @@ from modbus_event_connect.modbus._access import (
     HoldingRegister,
     InputRegister,
 )
+from event_connect import Identity
 from event_connect.testing import FakeClock
+from models import OFFLINE_AFTER_INTERVALS, modbus_model
 
 T = TypeVar("T")
 
@@ -61,8 +62,9 @@ T = TypeVar("T")
 class FakeDevice:
     """Answers per key. A key with no answer reads MISSING, as an absent register does."""
 
-    def __init__(self, registers: Mapping[str, tuple[int, ...]], *,
+    def __init__(self, registers: Mapping[str, tuple[int, ...]], *, models: Sequence[Model] = (),
                  identity: Identity | None = None, reachable: bool = True) -> None:
+        self.models: tuple[Model, ...] = tuple(models) or (MODEL,)
         self.answers: dict[str, ReadResult] = {k: ReadResult(Outcome.OK, v) for k, v in registers.items()}
         self.identity: Identity | None = ({} if identity is None else identity) if reachable else None
         self.reads: list[tuple[str, ...]] = []
@@ -84,9 +86,8 @@ class FakeDevice:
     async def disconnect(self) -> None:
         self.connected = False
 
-    def use(self, model: Model) -> Profile:
+    def use(self, model: Model) -> None:
         self.used.append(model)
-        return Profile(model=model)
 
     async def read(self, points: Sequence[Point[Any]]) -> Mapping[str, ReadResult]:
         if self.delay:
@@ -123,7 +124,7 @@ class FakeDevice:
 
 
 def _room(n: int) -> list[Point[Any]]:
-    return [Point(Key(f"room_{n}_temp", float), read=InputRegister(100 + n), data_type=DataType.INT16, scale=0.1)]
+    return [Point(Key(f"room_{n}_temp", float), read=InputRegister(100 + n), data_type=DataType.INT16, scale=0.1, poll_rate=PollRate.MEDIUM)]
 
 
 TEMP = Key("temp", float)
@@ -144,23 +145,23 @@ HARDWARE = Key("hardware", int)
 
 
 BASE = [
-    Point(TEMP, read=InputRegister(1), data_type=DataType.INT16, scale=0.1, valid_raw=range(-0x8000, 0x7FFF), deadband=0.5),
+    Point(TEMP, read=InputRegister(1), data_type=DataType.INT16, scale=0.1, valid_raw=range(-0x8000, 0x7FFF), deadband=0.5, poll_rate=PollRate.MEDIUM),
     Point(MODE, read=HoldingRegister(2), write=HoldingRegister(2), limits=Limits(0, 4, step=1),
-          on_write=Refresh(["fan_in", "fan_out"], after=2.0, until_stable=10.0)),
-    Point(FAN_IN, read=InputRegister(3)),
-    Point(FAN_OUT, read=InputRegister(4)),
+          on_write=Refresh(["fan_in", "fan_out"], after=2.0, until_stable=10.0), poll_rate=PollRate.MEDIUM),
+    Point(FAN_IN, read=InputRegister(3), poll_rate=PollRate.MEDIUM),
+    Point(FAN_OUT, read=InputRegister(4), poll_rate=PollRate.MEDIUM),
     Point(SERIAL, read=InputRegister(10), data_type=DataType.UINT32, poll_rate=PollRate.STATIC),
     Point(ALARM_SUMMARY, read=InputRegister(20), data_type=DataType.BOOL, poll_rate=PollRate.FAST,
           on_change=Refresh(Labels(kind="alarm"))),
     Point(ALARM_1, read=InputRegister(21), data_type=DataType.BOOL, poll_rate=PollRate.STATIC, labels={"kind": "alarm"}),
     Point(ALARM_2, read=InputRegister(22), data_type=DataType.BOOL, poll_rate=PollRate.STATIC, labels={"kind": "alarm"}),
-    Point(COUNTER, read=InputRegister(23), on_change=Refresh(["fan_in"], when=Change.RISING)),
+    Point(COUNTER, read=InputRegister(23), on_change=Refresh(["fan_in"], when=Change.RISING), poll_rate=PollRate.MEDIUM),
     Point(STEP_UP, write=HoldingRegister(30), write_kind=WriteKind.COMMAND),
-    Point(RELAY, read=Coil(5), write=Coil(5), data_type=DataType.BOOL),
+    Point(RELAY, read=Coil(5), write=Coil(5), data_type=DataType.BOOL, poll_rate=PollRate.MEDIUM),
     Point(BELL, write=Coil(6), data_type=DataType.BOOL, write_kind=WriteKind.COMMAND, pulse=Pulse(idle=False, after=0.01)),
-    Point(NAME, read=HoldingRegister(40), write=HoldingRegister(40), data_type=DataType.string(2)),
+    Point(NAME, read=HoldingRegister(40), write=HoldingRegister(40), data_type=DataType.string(2), poll_rate=PollRate.MEDIUM),
 ]
-COOLING = [Point(COOLING_TEMP, read=InputRegister(50), data_type=DataType.INT16, scale=0.1)]
+COOLING = [Point(COOLING_TEMP, read=InputRegister(50), data_type=DataType.INT16, scale=0.1, poll_rate=PollRate.MEDIUM)]
 IDENTITY = [Point(HARDWARE, read=InputRegister(0), poll_rate=PollRate.STATIC)]
 
 REGISTERS: dict[str, tuple[int, ...]] = {
@@ -184,25 +185,21 @@ def _has_cooling(identity: Identity) -> bool:
     return isinstance(hardware, int) and hardware >= 2
 
 
-MODEL = Model(
-    name="TEST", manufacturer="TEST",
-    identity_points=IDENTITY,
-    sections=[Section(BASE), Section(COOLING, when=_has_cooling),
-            RepeatedSection(_room, range(1, 4), label="room")],
-    scan_steps=[_no_rooms_missing],
-    timing=Timing(read_back_after=1.0)
-)
+MODEL = modbus_model([Section(BASE), Section(COOLING, when=_has_cooling),
+            RepeatedSection(_room, range(1, 4), label="room")], name="TEST", manufacturer="TEST", identity_points=IDENTITY, scan_steps=[_no_rooms_missing], scan_check=PollRate.RARE)
 
 
 def _client(registers: Mapping[str, tuple[int, ...]] | None = None, *, read_only: bool = False,
             write_retry: Retry = NO_RETRY) -> tuple[Client, FakeDevice, FakeClock]:
+    model = MODEL if write_retry is NO_RETRY else replace(MODEL, write_retry=write_retry)
     device = FakeDevice(REGISTERS if registers is None else registers)
     clock = FakeClock()
 
     async def sleep(seconds: float) -> None:
         clock.advance(seconds)
         await asyncio.sleep(0)
-    return (Client(device, MODEL, clock=clock, read_only=read_only, sleep=sleep, write_retry=write_retry),
+    return (Client(device, model, offline_after_intervals=OFFLINE_AFTER_INTERVALS, clock=clock, read_only=read_only,
+                   sleep=sleep),
             device, clock)
 
 
@@ -241,7 +238,7 @@ class Recorder:
 # =================================================================================== scan
 
 def test_an_unreachable_device_raises_cannot_connect() -> None:
-    client = Client(FakeDevice(REGISTERS, reachable=False), MODEL, clock=FakeClock(), write_retry=NO_RETRY)
+    client = Client(FakeDevice(REGISTERS, reachable=False), MODEL, clock=FakeClock(), offline_after_intervals=OFFLINE_AFTER_INTERVALS)
     with pytest.raises(CannotConnectError):
         asyncio.run(client.connect())
     assert client.status(Status.CONNECTED).value is False
@@ -249,7 +246,7 @@ def test_an_unreachable_device_raises_cannot_connect() -> None:
 
 def test_a_device_no_model_matches_raises_unsupported_with_what_it_reported() -> None:
     client = Client(FakeDevice(REGISTERS, identity={"device_model": 9999}), lambda identity: None,
-                    clock=FakeClock(), write_retry=NO_RETRY)
+                    clock=FakeClock(), offline_after_intervals=OFFLINE_AFTER_INTERVALS)
     with pytest.raises(UnsupportedDeviceError) as raised:
         asyncio.run(client.connect())
     assert raised.value.identity == {"device_model": 9999}
@@ -262,13 +259,13 @@ def test_the_selector_sees_the_handshake() -> None:
         seen.append(identity)
         return MODEL
     device = FakeDevice(REGISTERS, identity={"device_model": 1140})
-    asyncio.run(Client(device, select, clock=FakeClock(), write_retry=NO_RETRY).connect())
+    asyncio.run(Client(device, select, clock=FakeClock(), offline_after_intervals=OFFLINE_AFTER_INTERVALS).connect())
     assert seen and seen[0]["device_model"] == 1140
 
 
 def test_the_identity_is_the_handshake_with_what_the_identity_points_read() -> None:
     device = FakeDevice({**REGISTERS, "hardware": (2,)}, identity={"device_model": 1140})
-    client = Client(device, MODEL, clock=FakeClock(), write_retry=NO_RETRY)
+    client = Client(device, MODEL, clock=FakeClock(), offline_after_intervals=OFFLINE_AFTER_INTERVALS)
     asyncio.run(client.connect())
     assert client.identity["device_model"] == 1140
     assert client.identity["hardware"] == 2
@@ -280,14 +277,14 @@ def test_the_device_is_told_the_model_chosen() -> None:
     assert device.used == [MODEL]
 
 
-def test_a_model_the_device_has_no_profile_of_fails_the_connect_and_lets_the_device_go() -> None:
-    class Unprofiled(FakeDevice):
-        def use(self, model: Model) -> Profile:
-            raise ModelError(f"no profile of the model {model.name!r}")
+def test_a_model_the_device_was_not_given_fails_the_connect_and_lets_the_device_go() -> None:
+    class Refusing(FakeDevice):
+        def use(self, model: Model) -> None:
+            raise ModelError(f"the model {model.name!r} is not one the device was given")
 
-    device = Unprofiled(REGISTERS)
-    client = Client(device, MODEL, clock=FakeClock(), write_retry=NO_RETRY)
-    with pytest.raises(ModelError, match="no profile"):
+    device = Refusing(REGISTERS)
+    client = Client(device, MODEL, clock=FakeClock(), offline_after_intervals=OFFLINE_AFTER_INTERVALS)
+    with pytest.raises(ModelError, match="not one the device was given"):
         asyncio.run(client.connect())
     assert device.reads == [] and not device.connected
 
@@ -336,9 +333,9 @@ def test_a_scan_read_neither_stores_nor_notifies() -> None:
 
     async def peek(context: Scan) -> None:
         seen.append(await context.read(("temp",)))
-    model = Model(name="T", manufacturer="T", sections=[Section(BASE)], scan_steps=[peek], timing=Timing(read_back_after=1.0))
+    model = modbus_model([Section(BASE)], name="T", manufacturer="T", scan_steps=[peek], scan_check=PollRate.RARE)
     device = FakeDevice(REGISTERS)
-    client = Client(device, model, clock=FakeClock(), write_retry=NO_RETRY)
+    client = Client(device, model, clock=FakeClock(), offline_after_intervals=OFFLINE_AFTER_INTERVALS)
     recorder = Recorder()
     client.subscribe(TEMP, recorder)                       # allowed before connect
     asyncio.run(client.connect())
@@ -572,10 +569,8 @@ def test_a_status_is_subscribed_to_on_its_own() -> None:
 
 def test_a_point_named_like_a_status_is_an_ordinary_point() -> None:
     """A model's keys are its own: none is reserved for the client's status."""
-    model = Model(name="TEST", manufacturer="TEST",
-                  sections=[Section([Point(Key("status:connected", int), read=InputRegister(1))])],
-                  timing=Timing(read_back_after=1.0))
-    client = Client(FakeDevice({"status:connected": (7,)}), model, clock=FakeClock(), write_retry=NO_RETRY)
+    model = modbus_model([Section([Point(Key("status:connected", int), read=InputRegister(1), poll_rate=PollRate.MEDIUM)])], name="TEST", manufacturer="TEST")
+    client = Client(FakeDevice({"status:connected": (7,)}), model, clock=FakeClock(), offline_after_intervals=OFFLINE_AFTER_INTERVALS)
     asyncio.run(client.connect())
     current = client.value(Key("status:connected", int))
     assert current is not None and current.value == 7
@@ -678,20 +673,11 @@ def test_the_next_poll_is_counted_in_seconds_from_now() -> None:
 
 
 def test_with_nothing_to_poll_there_is_no_next_poll() -> None:
-    model = Model(name="TEST", manufacturer="TEST", sections=[
-        Section([Point(SERIAL, read=InputRegister(10), data_type=DataType.UINT32, poll_rate=PollRate.STATIC)])], timing=Timing(read_back_after=1.0))
-    client = Client(FakeDevice({"serial": (0, 1)}), model, clock=FakeClock(), write_retry=NO_RETRY)
+    model = modbus_model([
+        Section([Point(SERIAL, read=InputRegister(10), data_type=DataType.UINT32, poll_rate=PollRate.STATIC)])], name="TEST", manufacturer="TEST")
+    client = Client(FakeDevice({"serial": (0, 1)}), model, clock=FakeClock(), offline_after_intervals=OFFLINE_AFTER_INTERVALS)
     asyncio.run(client.connect())
     assert client.seconds_until_next_poll() is None
-
-
-def test_an_interval_override_is_used_and_kept() -> None:
-    client, device, clock = _connected()
-    client.subscribe(FAN_IN, Recorder())
-    client.set_poll_interval("fan_in", 5)
-    clock.advance(5)
-    asyncio.run(client.poll())
-    assert "fan_in" in device.read_keys()
 
 
 @pytest.mark.parametrize("targets,expected", [
@@ -857,8 +843,8 @@ def test_without_scheduled_polling_the_unit_is_checked_only_when_asked() -> None
     clock.advance(3600)
     asyncio.run(client.poll())
     assert device.reads == []
-    asyncio.run(client.refresh(PollRate.SCAN))
-    assert device.reads != []
+    asyncio.run(client.refresh(PollRate.RARE))                      # the model's scan_check
+    assert device.read_keys() == {"room_1_temp", "room_2_temp", "room_3_temp"}
 
 
 def test_scheduled_polling_switched_on_again_reads_what_is_overdue() -> None:
@@ -891,11 +877,10 @@ def test_what_the_scan_read_is_not_read_again() -> None:
     async def second(scan: Scan) -> None:
         found = await scan.read(["a", "b"])
         assert found["a"].value == 1, "a later step gets what an earlier one read"
-    points = [Point(Key(key, int), read=InputRegister(n)) for n, key in enumerate(("a", "b", "c", "gone"), 1)]
-    model = Model(name="S", manufacturer="S", sections=[Section(points)], scan_steps=[first, second],
-                  timing=Timing(read_back_after=1.0))
+    points = [Point(Key(key, int), read=InputRegister(n), poll_rate=PollRate.MEDIUM) for n, key in enumerate(("a", "b", "c", "gone"), 1)]
+    model = modbus_model([Section(points)], name="S", manufacturer="S", scan_steps=[first, second], scan_check=PollRate.RARE)
     device = FakeDevice({"a": (1,), "b": (2,), "c": (3,)})
-    client = Client(device, model, clock=FakeClock(), write_retry=NO_RETRY)
+    client = Client(device, model, clock=FakeClock(), offline_after_intervals=OFFLINE_AFTER_INTERVALS)
     asyncio.run(client.connect())
     assert sorted(key for batch in device.reads for key in batch) == ["a", "b", "c", "gone"]
     assert {key: value.value for key, value in client.values.items()} == {"a": 1, "b": 2, "c": 3}
@@ -913,12 +898,11 @@ def test_values_holds_only_keys_the_unit_has() -> None:
 
 def test_a_written_point_is_read_back_at_the_devices_delay_and_what_it_disturbs_at_its_refreshs() -> None:
     fan = Point(Key("fan", int), read=HoldingRegister(60), write=HoldingRegister(60),
-                on_write=Refresh(["speed"], after=3.0))
-    speed = Point(Key("speed", int), read=InputRegister(61))
-    model = Model(name="S", manufacturer="S", sections=[Section([fan, speed])],
-                  timing=Timing(read_back_after=1.0))
+                on_write=Refresh(["speed"], after=3.0), poll_rate=PollRate.MEDIUM)
+    speed = Point(Key("speed", int), read=InputRegister(61), poll_rate=PollRate.MEDIUM)
+    model = modbus_model([Section([fan, speed])], name="S", manufacturer="S")
     device, clock = FakeDevice({"fan": (0,), "speed": (0,)}), FakeClock()
-    client = Client(device, model, clock=clock, write_retry=NO_RETRY)
+    client = Client(device, model, clock=clock, offline_after_intervals=OFFLINE_AFTER_INTERVALS)
     asyncio.run(client.connect())
     client.subscribe(Key("fan", int), Recorder())
     client.subscribe(Key("speed", int), Recorder())
@@ -1356,3 +1340,45 @@ def test_a_failed_connect_on_a_silent_device_reports_it_unreachable() -> None:
     assert client.status(Status.CONNECTED).value is False
 
 
+
+
+# ======================================================================== what a client is told
+
+
+def test_a_key_the_unit_has_no_value_for_has_none() -> None:
+    client, _, _ = _connected()
+    assert client.value(COOLING_TEMP) is None and client.value(STEP_UP) is None
+
+
+@pytest.mark.parametrize("intervals, silent_for, reachable", [(1, 9.0, True), (1, 10.0, False),
+                                                              (3, 29.0, True), (3, 30.0, False)])
+def test_the_device_is_offline_once_it_missed_as_many_reads_of_its_fastest_rate_as_the_client_says(
+        intervals: int, silent_for: float, reachable: bool) -> None:
+    device = FakeDevice(REGISTERS)
+    clock = FakeClock()
+    client = Client(device, MODEL, offline_after_intervals=intervals, clock=clock)    # FAST: 10 s
+    asyncio.run(client.connect())
+    _silence(device)
+    asyncio.run(client.refresh(["temp"]))
+    clock.advance(silent_for)
+    asyncio.run(client.refresh(["temp"]))
+    assert client.status(Status.CONNECTED).value is reachable
+
+
+def test_a_device_is_given_at_least_one_missed_read() -> None:
+    with pytest.raises(ValueError, match="offline_after_intervals"):
+        Client(FakeDevice(REGISTERS), MODEL, offline_after_intervals=0, clock=FakeClock())
+
+
+def test_a_busy_write_is_sent_again_as_the_chosen_model_says() -> None:
+    patient = replace(MODEL, write_retry=Retry(Fixed(1.0), Attempts(3)))
+    device = FakeDevice(REGISTERS, models=[patient])
+    clock = FakeClock()
+
+    async def sleep(seconds: float) -> None:
+        clock.advance(seconds)
+    client = Client(device, patient, offline_after_intervals=OFFLINE_AFTER_INTERVALS, clock=clock, sleep=sleep)
+    asyncio.run(client.connect())
+    device.busy_writes["mode"] = 5
+    assert asyncio.run(client.write(MODE, 2)) is False
+    assert [key for key, _ in device.writes] == ["mode"] * 3

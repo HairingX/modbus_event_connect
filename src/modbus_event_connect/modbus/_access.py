@@ -1,15 +1,12 @@
-"""Modbus address spaces, and how a model is talked to over Modbus: its profile."""
+"""Modbus address spaces, how a manual numbers their registers, and how a register or a bit is written."""
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Any, ClassVar, Literal
+from typing import ClassVar, Literal
 
-from event_connect import Retry
-
-from .._model import Profile
-from .._point import Access, Point
+from .._point import Access
 
 MAX_ADDRESS = 0xFFFF
 
@@ -45,7 +42,7 @@ class Coil(Access):
     bits: ClassVar[bool] = True
 
 
-_TABLES: tuple[type[Access], ...] = (Coil, DiscreteInput, InputRegister, HoldingRegister)
+TABLES: tuple[type[Access], ...] = (Coil, DiscreteInput, InputRegister, HoldingRegister)
 
 
 @dataclass(frozen=True)
@@ -166,61 +163,3 @@ class BitWrite(Enum):
     """Mask Write Register (0x16): atomic on the device, neighbouring bits untouched."""
     READ_MODIFY_WRITE = auto()
     """Read, change the bit, write back - for devices without 0x16; not atomic against concurrent changes."""
-
-
-@dataclass(frozen=True, kw_only=True)
-class ModbusProfile(Profile):
-    """How a model is talked to over Modbus."""
-    numbering: RegisterNumbering
-    """How the model's manual numbers registers."""
-    max_registers: int
-    """Most registers the device accepts in one read: 1 to the 125 Modbus allows."""
-    max_bits: int
-    """Most coils or discrete inputs the device accepts in one read: 1 to the 2000 Modbus allows."""
-    single_write: SingleWrite
-    """How one holding register is written."""
-    bit_write: BitWrite
-    """How one bit inside a holding register is written."""
-    busy: Retry
-    """How a read answered "busy" (0x06) is tried again; a write so answered is not."""
-
-    def __post_init__(self) -> None:
-        if not 1 <= self.max_registers <= MAX_REGISTERS_PER_READ:
-            raise ValueError(f"max_registers must be 1-{MAX_REGISTERS_PER_READ}, got {self.max_registers}")
-        if not 1 <= self.max_bits <= MAX_BITS_PER_READ:
-            raise ValueError(f"max_bits must be 1-{MAX_BITS_PER_READ}, got {self.max_bits}")
-
-    def address(self, access: Access) -> int:
-        """The address sent for `access`, as `numbering` gives it.
-
-        Raises:
-            ValueError: it has none.
-        """
-        return self.numbering.address(access)
-
-    def problems(self, point: Point[Any]) -> list[str]:
-        """What is wrong with `point` over Modbus: a side outside the four tables or the address
-        space, or larger than one request of this device may be."""
-        found: list[str] = []
-        for side, access in (("read", point.read), ("write", point.write)):
-            if access is None:
-                continue
-            if type(access) not in _TABLES:
-                found.append(f"the {side} side is {type(access).__name__}, which is not a Modbus table")
-                continue
-            try:
-                start = self.address(access)
-            except ValueError as err:
-                found.append(f"the {side} side: {err}")
-                continue
-            span = 1 if access.bits else point.registers
-            if start + span - 1 > MAX_ADDRESS:
-                found.append(f"the {side} side runs past the end of the address space")
-            limit = self.max_bits if access.bits else self.max_registers
-            if span > limit:
-                found.append(f"the {side} side spans {span}, more than the {limit} the device "
-                             f"accepts in one request")
-        if point.write is not None and not point.write.bits and point.registers > MAX_REGISTERS_PER_WRITE:
-            found.append(f"a write of {point.registers} registers exceeds the Modbus limit of "
-                         f"{MAX_REGISTERS_PER_WRITE}")
-        return found

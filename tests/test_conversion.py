@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from event_connect import InvalidValueError, Key, Limits, Quality, Transforms, Value
+from event_connect import InvalidValueError, Key, Limits, PollRate, Quality, Transforms, Value
 from modbus_event_connect._conversion import decode, encode
 from modbus_event_connect._data_type import ByteOrder, DataType, DataTypeKind, WordOrder
 from modbus_event_connect._device import EncodedWrite
@@ -36,15 +36,15 @@ def _key(data_type: DataType, value_type: type[Any] | None) -> Key[Any]:
 def _rw_point(data_type: DataType, value_type: type[Any] | None = None, **kwargs: Any) -> Point[Any]:
     """A point with both a read and a write side, on ordinary (non-bit) Modbus tables."""
     return Point(_key(data_type, value_type), read=InputRegister(0), write=HoldingRegister(0), data_type=data_type,
-                 **kwargs)
+                 poll_rate=PollRate.MEDIUM, **kwargs)
 
 
 def _ro_point(data_type: DataType, value_type: type[Any] | None = None, **kwargs: Any) -> Point[Any]:
-    return Point(_key(data_type, value_type), read=InputRegister(0), data_type=data_type, **kwargs)
+    return Point(_key(data_type, value_type), read=InputRegister(0), data_type=data_type, poll_rate=PollRate.MEDIUM, **kwargs)
 
 
 def _string_point(length: int, *, byte_order: ByteOrder = ByteOrder.BIG, encoding: str = "utf-8") -> Point[Any]:
-    return Point(Key("p", str), read=InputRegister(0), write=HoldingRegister(0), data_type=DataType.string(length, encoding), byte_order=byte_order)
+    return Point(Key("p", str), read=InputRegister(0), write=HoldingRegister(0), data_type=DataType.string(length, encoding), byte_order=byte_order, poll_rate=PollRate.MEDIUM)
 
 
 class Mode(IntEnum):
@@ -59,7 +59,7 @@ class Signed(IntEnum):
 
 
 def _state_point[T: IntEnum](states: type[T], data_type: DataType = DataType.UINT16) -> Point[T]:
-    return Point(Key("p", states), read=InputRegister(0), write=HoldingRegister(0), data_type=data_type)
+    return Point(Key("p", states), read=InputRegister(0), write=HoldingRegister(0), data_type=data_type, poll_rate=PollRate.MEDIUM)
 
 
 def _regs_from_bytes(data: bytes, byte_order: ByteOrder) -> tuple[int, ...]:
@@ -342,8 +342,8 @@ def test_bool_any_nonzero_register_is_true() -> None:
 
 
 def test_bool_reads_the_single_bit_of_a_coil_or_discrete_input() -> None:
-    coil = Point(Key("p", bool), read=Coil(0), write=Coil(0), data_type=DataType.BOOL)
-    discrete = Point(Key("p", bool), read=DiscreteInput(0), data_type=DataType.BOOL)
+    coil = Point(Key("p", bool), read=Coil(0), write=Coil(0), data_type=DataType.BOOL, poll_rate=PollRate.MEDIUM)
+    discrete = Point(Key("p", bool), read=DiscreteInput(0), data_type=DataType.BOOL, poll_rate=PollRate.MEDIUM)
     assert decode(coil, [1]) == (True, Quality.GOOD)
     assert decode(coil, [0]) == (False, Quality.GOOD)
     assert decode(discrete, [1]) == (True, Quality.GOOD)
@@ -351,7 +351,7 @@ def test_bool_reads_the_single_bit_of_a_coil_or_discrete_input() -> None:
 
 
 def test_bool_encodes_to_a_single_register() -> None:
-    point = Point(Key("p", bool), read=Coil(0), write=Coil(0), data_type=DataType.BOOL)
+    point = Point(Key("p", bool), read=Coil(0), write=Coil(0), data_type=DataType.BOOL, poll_rate=PollRate.MEDIUM)
     assert encode(point, True).registers == (1,)
     assert encode(point, False).registers == (0,)
 
@@ -372,12 +372,12 @@ def test_bit_encodes_the_given_bit(bit: int) -> None:
 
 @pytest.mark.parametrize("value", [True, 1], ids=["True", "1"])
 def test_bool_write_accepts_true_and_one(value: Value) -> None:
-    encode(Point(Key("p", bool), read=Coil(0), write=Coil(0), data_type=DataType.BOOL), value)  # must not raise
+    encode(Point(Key("p", bool), read=Coil(0), write=Coil(0), data_type=DataType.BOOL, poll_rate=PollRate.MEDIUM), value)  # must not raise
 
 
 @pytest.mark.parametrize("value", [2, 1.0, "1"], ids=["2", "1.0", "str-1"])
 def test_bool_write_refuses_anything_but_bool_or_zero_or_one(value: Value) -> None:
-    point = Point(Key("p", bool), read=Coil(0), write=Coil(0), data_type=DataType.BOOL)
+    point = Point(Key("p", bool), read=Coil(0), write=Coil(0), data_type=DataType.BOOL, poll_rate=PollRate.MEDIUM)
     with pytest.raises(InvalidValueError):
         encode(point, value)
 
@@ -390,13 +390,13 @@ def test_an_inverted_bool_reads_zero_as_true(register: int, value: bool) -> None
 
 def test_an_inverted_bool_writes_true_as_zero() -> None:
     point = Point(Key("p", bool), read=HoldingRegister(0), write=HoldingRegister(0), data_type=DataType.BOOL,
-                  transform=Transforms.INVERT_BOOL)
+                  transform=Transforms.INVERT_BOOL, poll_rate=PollRate.MEDIUM)
     assert encode(point, True).registers == (0,)
     assert encode(point, False).registers == (1,)
 
 
 def test_an_inverted_coil_reads_and_writes_the_other_way_round() -> None:
-    coil = Point(Key("p", bool), read=Coil(0), write=Coil(0), data_type=DataType.BOOL, transform=Transforms.INVERT_BOOL)
+    coil = Point(Key("p", bool), read=Coil(0), write=Coil(0), data_type=DataType.BOOL, transform=Transforms.INVERT_BOOL, poll_rate=PollRate.MEDIUM)
     assert decode(coil, [0]) == (True, Quality.GOOD)
     assert encode(coil, True).registers == (0,)
 
@@ -491,7 +491,7 @@ class Shared(IntEnum):
 
 
 def _coded_point(codes: dict[int, Shared]) -> Point[Shared]:
-    return Point(Key("p", Shared), read=InputRegister(0), write=HoldingRegister(0), codes=codes)
+    return Point(Key("p", Shared), read=InputRegister(0), write=HoldingRegister(0), codes=codes, poll_rate=PollRate.MEDIUM)
 
 
 DEVICE_A = {0: Shared.OFF, 7: Shared.HEATING, 8: Shared.COOLING}
@@ -533,7 +533,7 @@ def test_a_points_states_are_those_its_codes_name_in_the_enums_order() -> None:
 
 def _dos_point(data_type: DataType, value_type: type[Any], **kwargs: Any) -> Point[Any]:
     return Point(Key("p", value_type), read=InputRegister(0), write=HoldingRegister(0), data_type=data_type,
-                 **kwargs)
+                 poll_rate=PollRate.MEDIUM, **kwargs)
 
 
 # 2026-09-29: year 46 since 1980, month 9, day 29 -> 0b0101110_1001_11101; 13:37:42 -> 0b01101_100101_10101
@@ -588,7 +588,7 @@ def test_what_a_dos_word_cannot_hold_is_refused(data_type: DataType, value: obje
 def _switch() -> Point[bool]:
     """A 0/1 switch in a whole register, answering 255 when it has no value."""
     return Point(Key("switch", bool), read=HoldingRegister(0), write=HoldingRegister(0), data_type=DataType.BOOL,
-                 valid_raw=range(0, 2))
+                 valid_raw=range(0, 2), poll_rate=PollRate.MEDIUM)
 
 
 @pytest.mark.parametrize("raw,value", [(0, False), (1, True)])
@@ -607,14 +607,14 @@ def test_a_bool_register_writes_zero_or_one() -> None:
 
 def test_a_bool_whose_value_is_not_valid_raw_is_refused() -> None:
     point = Point(Key("p", bool), read=HoldingRegister(0), write=HoldingRegister(0), data_type=DataType.BOOL,
-                  valid_raw={1})
+                  valid_raw={1}, poll_rate=PollRate.MEDIUM)
     with pytest.raises(InvalidValueError, match="valid_raw"):
         encode(point, False)
 
 
 def _int16(valid_raw: Any) -> Point[int]:
     return Point(Key("p", int), read=InputRegister(0), write=HoldingRegister(0), data_type=DataType.INT16,
-                 valid_raw=valid_raw)
+                 valid_raw=valid_raw, poll_rate=PollRate.MEDIUM)
 
 
 def test_a_sentinel_left_out_of_valid_raw_reads_as_no_data() -> None:
@@ -637,7 +637,7 @@ def test_valid_raw_can_leave_out_a_band_and_keep_what_is_above_it() -> None:
 
 
 def test_valid_raw_as_wide_as_a_uint32_costs_nothing() -> None:
-    point = Point(Key("p", int), read=InputRegister(0), data_type=DataType.UINT32, valid_raw=range(0, 0xFFFFFFFF))
+    point = Point(Key("p", int), read=InputRegister(0), data_type=DataType.UINT32, valid_raw=range(0, 0xFFFFFFFF), poll_rate=PollRate.MEDIUM)
     assert decode(point, [0xFFFF, 0xFFFF]) == (None, Quality.NO_DATA)
     assert decode(point, [0xFFFF, 0xFFFE]) == (0xFFFFFFFE, Quality.GOOD)
 

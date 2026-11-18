@@ -29,17 +29,17 @@ import pytest
 import pytest_asyncio
 
 from conftest import live_or_skip, live_setting
-from event_connect import NO_RETRY, DataValue, Key, Quality, Timing
+from event_connect import DataValue, Key, PollRate, Quality
 from modbus_event_connect._client import Client
 from modbus_event_connect._data_type import DataType
 from modbus_event_connect._device import Outcome
-from modbus_event_connect._model import Model, Section
+from modbus_event_connect._model import Section
 from modbus_event_connect._point import Point
 from modbus_event_connect.micro_nabto import _wire as wire
 from modbus_event_connect.micro_nabto._access import DatapointRegister, SetpointRegister
 from modbus_event_connect.micro_nabto._connection import MicroNabtoConnection, discover
 from modbus_event_connect.micro_nabto._device import MicroNabtoDevice
-from profiles import HANDSHAKE_NEVER_AGAIN, bare_model, micro_nabto
+from models import HANDSHAKE_NEVER_AGAIN, OFFLINE_AFTER_INTERVALS, micro_nabto_model
 
 HOST = live_setting("MICRO_NABTO_HOST")
 EMAIL = live_setting("MICRO_NABTO_EMAIL")
@@ -57,13 +57,10 @@ SETPOINTS = (30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 43, 45, 50, 51, 57,
              65, 66, 69, 70, 80)
 TEMPERATURES = (27, 28, 29, 30)
 
-LIVE_MODEL = Model(
-    name="live", manufacturer="any",
-    sections=[Section([*(Point(Key(f"dp_{a}", float if a in TEMPERATURES else int), read=DatapointRegister(a), data_type=DataType.INT16 if a in TEMPERATURES else DataType.UINT16,
-                           scale=0.1 if a in TEMPERATURES else 1.0) for a in DATAPOINTS),
-                   *(Point(Key(f"sp_{a}", int), read=SetpointRegister(a), data_type=DataType.UINT16) for a in SETPOINTS)])],
-    timing=Timing(read_back_after=1.0))
-WIDE = bare_model("Wide")
+LIVE_MODEL = micro_nabto_model([Section([*(Point(Key(f"dp_{a}", float if a in TEMPERATURES else int), read=DatapointRegister(a), data_type=DataType.INT16 if a in TEMPERATURES else DataType.UINT16,
+                           scale=0.1 if a in TEMPERATURES else 1.0, poll_rate=PollRate.MEDIUM) for a in DATAPOINTS),
+                   *(Point(Key(f"sp_{a}", int), read=SetpointRegister(a), data_type=DataType.UINT16, poll_rate=PollRate.MEDIUM) for a in SETPOINTS)])], name="live", manufacturer="any")
+WIDE = micro_nabto_model(name="Wide", max_registers=108)
 """A model read 108 registers at a time."""
 
 
@@ -78,7 +75,7 @@ class Live:
 
 
 def _single(address: int, key: str = "a") -> Point[Any]:
-    return Point(Key(key, int), read=DatapointRegister(address), data_type=DataType.UINT16)
+    return Point(Key(key, int), read=DatapointRegister(address), data_type=DataType.UINT16, poll_rate=PollRate.MEDIUM)
 
 
 def _count(live: Live, name: str) -> int:
@@ -90,18 +87,17 @@ def _count(live: Live, name: str) -> int:
 @pytest_asyncio.fixture(scope="module", loop_scope="module")  # pyright: ignore[reportUntypedFunctionDecorator, reportUnknownMemberType]
 async def live() -> AsyncGenerator[Live, None]:
     assert HOST is not None and EMAIL is not None   # guarded by the skip above
-    connection = MicroNabtoConnection(EMAIL, host=HOST, port=PORT, device_id=DEVICE_ID, reconnect=HANDSHAKE_NEVER_AGAIN)
+    connection = MicroNabtoConnection(EMAIL, host=HOST, port=PORT, device_id=DEVICE_ID, reconnect=HANDSHAKE_NEVER_AGAIN, timeout=1.0, retries=2, answer_wait=5.0, session_idle=12.0, rediscovery_timeout=3.0, rediscovery_resend=0.5)
 
     read = connection.request
 
-    async def refuse_writes(command: bytes) -> bytes | None:
+    async def refuse_writes(command: bytes, **options: Any) -> bytes | None:
         if command[3] == SETPOINT_WRITE:
             raise AssertionError("a write was attempted; these tests are read-only")
-        return await read(command)
+        return await read(command, **options)
     setattr(connection, "request", refuse_writes)
-    device = MicroNabtoDevice(connection, profiles=[micro_nabto(LIVE_MODEL), micro_nabto(WIDE, max_registers=108)],
-                              owns_connection=True)
-    client = Client(device, LIVE_MODEL, read_only=True, write_retry=NO_RETRY)
+    device = MicroNabtoDevice(connection, models=[LIVE_MODEL, WIDE], owns_connection=True)
+    client = Client(device, LIVE_MODEL, offline_after_intervals=OFFLINE_AFTER_INTERVALS, read_only=True)
     try:
         await client.connect()
     except Exception as err:
@@ -184,5 +180,5 @@ async def test_a_session_left_unused_is_renewed_before_the_device_ends_it(live: 
 async def test_discovery_asked_directly_is_answered_from_the_device_address() -> None:
     """Asked directly, so a firewall that drops answers to a broadcast cannot fail it."""
     assert HOST is not None
-    found = await discover(DEVICE_ID, timeout=2.0, target=(HOST, PORT))
+    found = await discover(device_id=DEVICE_ID, timeout=2.0, target=(HOST, PORT), resend=0.5)
     assert [f.host for f in found] == [HOST]

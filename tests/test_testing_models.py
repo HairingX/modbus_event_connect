@@ -1,90 +1,72 @@
 """`assert_models_valid`: the check a device repository runs over its models in its tests."""
 import pytest
 
-from event_connect import Key, Timing, Transform, Transforms
+from event_connect import Identity, Key, PollRate, Transform, Transforms
 from modbus_event_connect._data_type import DataType
-from modbus_event_connect._device import Identity
 from modbus_event_connect._model import Model, Section, problems, resolve
 from modbus_event_connect._point import Point
 from modbus_event_connect.modbus._access import HoldingRegister
 from modbus_event_connect.testing._models import assert_models_valid
-from profiles import modbus
+from models import modbus_model
 
 
 def _with_transform(transform: Transform) -> Model:
     point = Point(Key("value", float), read=HoldingRegister(1), write=HoldingRegister(1), data_type=DataType.INT16,
-                  transform=transform)
-    return Model(name="X", manufacturer="Y", sections=[Section([point])], timing=Timing(read_back_after=1.0))
+                  transform=transform, poll_rate=PollRate.MEDIUM)
+    return modbus_model([Section([point])], name="X", manufacturer="Y")
 
 
 def _valid(model: Model, *, identities: list[Identity]) -> None:
-    assert_models_valid([model], [modbus(model)], identities=identities)
+    assert_models_valid([model], identities=identities)
 
 
 # ============================================================================ variants
 
 def test_at_least_one_identity_is_needed() -> None:
     with pytest.raises(ValueError, match="at least one identity"):
-        _valid(Model(name="X", manufacturer="Y", sections=[], timing=Timing(read_back_after=1.0)), identities=[])
+        _valid(modbus_model([], name="X", manufacturer="Y"), identities=[])
 
 
 def test_a_model_that_resolves_passes_silently() -> None:
-    good = Point(Key("good", int), read=HoldingRegister(1), data_type=DataType.UINT16)
-    _valid(Model(name="X", manufacturer="Y", sections=[Section([good])], timing=Timing(read_back_after=1.0)), identities=[{}])
+    good = Point(Key("good", int), read=HoldingRegister(1), data_type=DataType.UINT16, poll_rate=PollRate.MEDIUM)
+    _valid(modbus_model([Section([good])], name="X", manufacturer="Y"), identities=[{}])
 
 
 def test_a_section_broken_only_under_one_identity_is_caught() -> None:
-    wide = Point(Key("wide", int), read=HoldingRegister(100), data_type=DataType.INT32)
-    narrow = Point(Key("narrow", int), read=HoldingRegister(101), data_type=DataType.UINT16)
+    wide = Point(Key("wide", int), read=HoldingRegister(100), data_type=DataType.INT32, poll_rate=PollRate.MEDIUM)
+    narrow = Point(Key("narrow", int), read=HoldingRegister(101), data_type=DataType.UINT16, poll_rate=PollRate.MEDIUM)
     broken = Section([wide, narrow], when=lambda identity: identity.get("variant") == "broken")
     identities: list[Identity] = [{"variant": "ok"}, {"variant": "broken"}]
     with pytest.raises(AssertionError, match="overlap"):
-        _valid(Model(name="X", manufacturer="Y", sections=[broken], timing=Timing(read_back_after=1.0)), identities=identities)
+        _valid(modbus_model([broken], name="X", manufacturer="Y"), identities=identities)
 
 
 def test_a_section_no_identity_includes_is_reported_as_untested() -> None:
-    p = Point(Key("feature", int), read=HoldingRegister(1), data_type=DataType.UINT16)
+    p = Point(Key("feature", int), read=HoldingRegister(1), data_type=DataType.UINT16, poll_rate=PollRate.MEDIUM)
     unreachable = Section([p], when=lambda identity: identity.get("variant") == "never-happens")
     identities: list[Identity] = [{"variant": "a"}, {"variant": "b"}]
     with pytest.raises(AssertionError, match="never resolved"):
-        _valid(Model(name="X", manufacturer="Y", sections=[unreachable], timing=Timing(read_back_after=1.0)), identities=identities)
+        _valid(modbus_model([unreachable], name="X", manufacturer="Y"), identities=identities)
 
 
 def test_a_section_without_a_condition_is_never_reported_as_untested() -> None:
-    p = Point(Key("always", int), read=HoldingRegister(1), data_type=DataType.UINT16)
-    _valid(Model(name="X", manufacturer="Y", sections=[Section([p])], timing=Timing(read_back_after=1.0)), identities=[{}])
+    p = Point(Key("always", int), read=HoldingRegister(1), data_type=DataType.UINT16, poll_rate=PollRate.MEDIUM)
+    _valid(modbus_model([Section([p])], name="X", manufacturer="Y"), identities=[{}])
 
 
-# ============================================================================ profiles
+# ============================================================================ models
 
 
-def _model(name: str) -> Model:
-    return Model(name=name, manufacturer="Y", sections=[Section([])], timing=Timing())
+def test_a_model_given_twice_is_caught() -> None:
+    a = modbus_model(name="A")
+    with pytest.raises(AssertionError, match="A: given twice"):
+        assert_models_valid([a, a], identities=[{}])
 
 
-def test_a_model_without_a_profile_is_caught() -> None:
-    a, b = _model("A"), _model("B")
-    with pytest.raises(AssertionError, match="B: no profile"):
-        assert_models_valid([a, b], [modbus(a)], identities=[{}])
-
-
-def test_a_profile_of_a_model_not_checked_is_caught() -> None:
-    a, stray = _model("A"), _model("Stray")
-    with pytest.raises(AssertionError, match="a profile of Stray, which is not among the models"):
-        assert_models_valid([a], [modbus(a), modbus(stray)], identities=[{}])
-
-
-def test_two_profiles_of_one_model_are_caught() -> None:
-    a = _model("A")
-    with pytest.raises(AssertionError, match="A: 2 profiles"):
-        assert_models_valid([a], [modbus(a), modbus(a, max_registers=8)], identities=[{}])
-
-
-def test_a_problem_only_the_profile_sees_is_caught() -> None:
-    wide = Point(Key("wide", int), read=HoldingRegister(1), data_type=DataType.UINT64)
-    model = Model(name="X", manufacturer="Y", sections=[Section([wide])], timing=Timing())
+def test_a_problem_only_the_protocol_sees_is_caught() -> None:
+    wide = Point(Key("wide", int), read=HoldingRegister(1), data_type=DataType.UINT64, poll_rate=PollRate.MEDIUM)
     with pytest.raises(AssertionError, match="spans 4, more than the 2"):
-        assert_models_valid([model], [modbus(model, max_registers=2)], identities=[{}])
+        assert_models_valid([modbus_model([Section([wide])], max_registers=2)], identities=[{}])
 
 
 # ========================================================================== transforms
@@ -121,5 +103,5 @@ def test_a_transform_that_raises_is_caught() -> None:
 
 def test_resolving_a_model_leaves_sampling_its_transforms_to_the_tests() -> None:
     lossy = _with_transform(Transform(read=lambda s: round(s / 60), write=lambda m: m * 60))
-    assert problems(modbus(lossy), {}) == []
-    assert "value" in resolve(modbus(lossy), {}).points
+    assert problems(lossy, {}) == []
+    assert "value" in resolve(lossy, {}).points

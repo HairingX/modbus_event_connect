@@ -3,16 +3,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import secrets
 from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from event_connect import AuthenticationError, Breaker, CircuitBreaker, Clock, SystemClock
+from event_connect import AuthenticationError, Breaker, CircuitBreaker, Clock, Identity, SystemClock
 
 from . import _wire as wire
-from .._device import Identity
+from ._wire import BROADCAST, PORT
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -22,6 +23,7 @@ _Receive = Callable[[bytes, tuple[str, int]], None]
 
 @dataclass(frozen=True)
 class DiscoveredDevice:
+    """A device that answered a discovery, and where it answered from."""
     device_id: str
     host: str
     port: int
@@ -42,13 +44,19 @@ async def _open_endpoint(receive: _Receive) -> asyncio.DatagramTransport:
     return transport
 
 
-async def discover(device_id: str | None = None, *, timeout: float = 2.0, resend: float = 0.5,
-                   target: tuple[str, int] = wire.BROADCAST) -> list[DiscoveredDevice]:
-    """The devices that answer a discovery broadcast within `timeout`.
+async def discover(*, device_id: str | None = None, timeout: float, resend: float,
+                   target: tuple[str, int]) -> list[DiscoveredDevice]:
+    """The devices that answer a discovery sent to `target` within `timeout` seconds.
 
     With `device_id`, only that device is asked for, and the search ends when it answers.
-    The broadcast is repeated every `resend` seconds, since a datagram can be lost.
+    The discovery is sent again every `resend` seconds, since a datagram can be lost; `BROADCAST`
+    reaches every device on the local network.
+
+    Raises:
+        ValueError: `timeout` or `resend` is not a finite number above 0.
     """
+    if not (math.isfinite(timeout) and timeout > 0 and math.isfinite(resend) and resend > 0):
+        raise ValueError(f"timeout and resend must be finite numbers above 0, got {timeout} and {resend}")
     found: dict[str, DiscoveredDevice] = {}
     answered = asyncio.Event()
 
@@ -109,37 +117,57 @@ class MicroNabtoConnection:
     """A session with one device; requests are sent one at a time.
 
     uNabto's reference implementation ends a session left unused for 7/2 times the keep-alive
-    interval the client states, 17.5 s when it states none, as this client does; a Nilan
-    CTS 402 was measured ending one between 15 and 20 s. A session unused for `session_idle`
-    is therefore established anew before the next request. An unanswered request is sent again
-    `retries` times; if the device stays silent, the session is established anew, at an
-    address found by `device_id` if it has changed, and the request tried once more. Once
-    handshakes in a row have failed, requests fail at once until `reconnect` says to try one again.
+    interval the client states, 17.5 s when it states none, as this client does. A session unused
+    for `session_idle` is therefore established anew before the next request. An unanswered
+    request is sent again `retries` times; if the device stays silent, the session is established
+    anew, at an address found by `device_id` if it has changed, and the request tried once more.
+    Once handshakes in a row have failed, requests fail at once until `reconnect` says to try one
+    again.
     """
 
     def __init__(self, email: str, *, host: str | None = None, device_id: str | None = None,
-                 reconnect: CircuitBreaker, port: int = wire.DEVICE_PORT, timeout: float = 1.0,
-                 retries: int = 2, answer_wait: float = 5.0, session_idle: float = 12.0,
-                 discovery_target: tuple[str, int] = wire.BROADCAST, clock: Clock | None = None) -> None:
+                 port: int = PORT, timeout: float, retries: int, session_idle: float,
+                 rediscovery_timeout: float, rediscovery_resend: float, answer_wait: float,
+                 reconnect: CircuitBreaker, discovery_target: tuple[str, int] = BROADCAST,
+                 clock: Clock | None = None) -> None:
         """Args:
             email: the account paired with the device; it is never logged.
             host, device_id: where to reach the device; with only `device_id`, it is discovered.
+            timeout: seconds to wait for each answer before the request is sent again.
+            retries: how many times an unanswered request is sent again.
+            session_idle: seconds a session may stay unused before it is established anew.
+            rediscovery_timeout: seconds the device is searched for by `device_id`, at
+                `discovery_target`, when it does not answer the handshake.
+            rediscovery_resend: seconds between sendings of that search.
+            answer_wait: seconds to wait for an answer once the device has said it has the
+                request, for a request that states no wait of its own; it is not sent again
+                meanwhile.
             reconnect: after how many failed handshakes in a row no request is sent, and when a
                 handshake is tried again; its retry's `ready()` is asked before each try.
-            timeout: seconds to wait for each answer.
-            answer_wait: seconds to wait for an answer once the device has said it has the
-                request; it is not sent again meanwhile.
+
+        Raises:
+            ValueError: neither `host` nor `device_id`; a time that is not a finite number above
+                0, `retries` below 0, or `answer_wait` shorter than `timeout`.
         """
         if host is None and device_id is None:
             raise ValueError("a connection needs a host, a device_id, or both")
-        if timeout <= 0 or session_idle <= 0 or retries < 0 or answer_wait < timeout:
-            raise ValueError("timeout and session_idle must be positive; retries cannot be "
-                             "negative; answer_wait cannot be shorter than timeout")
+        times = {"timeout": timeout, "session_idle": session_idle, "rediscovery_timeout": rediscovery_timeout,
+                 "rediscovery_resend": rediscovery_resend, "answer_wait": answer_wait}
+        wrong = [f"{name} must be a finite number above 0, got {value}" for name, value in times.items()
+                 if not (math.isfinite(value) and value > 0)]
+        if retries < 0:
+            wrong.append(f"retries cannot be negative, got {retries}")
+        if answer_wait < timeout:
+            wrong.append(f"answer_wait cannot be shorter than timeout, got {answer_wait} and {timeout}")
+        if wrong:
+            raise ValueError("; ".join(wrong))
         self._email = email
         self._device_id = device_id
         self._address: tuple[str, int] | None = (host, port) if host is not None else None
         self._timeout = timeout
         self._retries = retries
+        self._rediscovery_timeout = rediscovery_timeout
+        self._rediscovery_resend = rediscovery_resend
         self._answer_wait = answer_wait
         self._wait_once_held = answer_wait
         """How long an acknowledged request is waited for: what the latest request asked for, so
@@ -375,8 +403,8 @@ class MicroNabtoConnection:
             self._transport = await _open_endpoint(self._receive)
         identity = await self._handshake() if self._address is not None else None
         if identity is None and self._device_id is not None:
-            found = await discover(self._device_id, timeout=self._timeout * (self._retries + 1),
-                                   target=self._discovery_target)
+            found = await discover(device_id=self._device_id, timeout=self._rediscovery_timeout,
+                                   resend=self._rediscovery_resend, target=self._discovery_target)
             if found and (found[0].host, found[0].port) != self._address:
                 self._rediscoveries += 1
                 self._address = (found[0].host, found[0].port)

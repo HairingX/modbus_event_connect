@@ -1,5 +1,5 @@
-"""Finding out, while polling, that the unit has changed: what each scan read is read again at
-`PollRate.SCAN`, a scan runs again only where that changed, and consumers are told."""
+"""Finding out, while polling, that the unit has changed: what each scan read is read again at the
+model's `scan_check` rate, a scan runs again only where that changed, and consumers are told."""
 import asyncio
 import logging
 from collections.abc import Mapping, Sequence
@@ -7,7 +7,6 @@ from typing import Any
 
 import pytest
 
-from event_connect import NO_RETRY
 from modbus_event_connect import (
     Client,
     InstanceScanStep,
@@ -17,21 +16,24 @@ from modbus_event_connect import (
     ModelError,
     Point,
     PollRate,
-    Profile,
     Quality,
     RepeatedSection,
     Scan,
     Section,
-    Timing,
 )
-from modbus_event_connect._device import Identity, Outcome, ReadResult, WriteResult
+from event_connect import Identity
+from modbus_event_connect._device import Outcome, ReadResult, WriteResult
 from modbus_event_connect._data_type import DataType
 from modbus_event_connect.modbus._access import HoldingRegister, InputRegister
 from modbus_event_connect.testing import FakeClock
+from modbus_event_connect.modbus import ModbusModel
+from models import OFFLINE_AFTER_INTERVALS, modbus_model
 
 VERSION = Key("version", int)
 EXTRA = Key("extra", int)
+SCAN_CHECK = PollRate.RARE
 SCAN_INTERVAL = 900.0
+"""Seconds between the checks of what a scan read: `SCAN_CHECK`'s interval."""
 DUMMY = 1
 
 
@@ -51,8 +53,12 @@ class FakeDevice:
     async def disconnect(self) -> None:
         self.connected = False
 
-    def use(self, model: Model) -> Profile:
-        return Profile(model=model)
+    @property
+    def models(self) -> tuple[Model, ...]:
+        return (_model(),)
+
+    def use(self, model: Model) -> None:
+        return None
 
     async def read(self, points: Sequence[Point[Any]]) -> Mapping[str, ReadResult]:
         self.reads.append(tuple(p.key for p in points))
@@ -99,8 +105,8 @@ def _zone(n: int) -> list[Point[Any]]:
     return [
         Point(zone_type(n), read=InputRegister(base), poll_rate=PollRate.STATIC),
         Point(zone_temp(n), read=InputRegister(base + 1), data_type=DataType.INT16, scale=0.1,
-              labels={"kind": "sensor"}),
-        Point(zone_setting(n), read=HoldingRegister(base + 2), write=HoldingRegister(base + 2)),
+              labels={"kind": "sensor"}, poll_rate=PollRate.MEDIUM),
+        Point(zone_setting(n), read=HoldingRegister(base + 2), write=HoldingRegister(base + 2), poll_rate=PollRate.MEDIUM),
     ]
 
 
@@ -123,15 +129,13 @@ def _has_extra(identity: Identity) -> bool:
     return isinstance(version, int) and version >= 2
 
 
-def _model(scan: InstanceScanStep = scan_zone) -> Model:
-    return Model(
+def _model(scan: InstanceScanStep = scan_zone, scan_check: PollRate = SCAN_CHECK) -> ModbusModel:
+    return modbus_model(
+        [Section([Point(EXTRA, read=InputRegister(2), poll_rate=PollRate.MEDIUM)], when=_has_extra),
+         RepeatedSection(_zone, range(1, 4), label="zone", scan=scan)],
         name="ZONES", manufacturer="TEST",
         identity_points=[Point(VERSION, read=InputRegister(1), poll_rate=PollRate.STATIC)],
-        sections=[Section([Point(EXTRA, read=InputRegister(2))], when=_has_extra),
-                  RepeatedSection(_zone, range(1, 4), label="zone", scan=scan)],
-        scan_steps=[read_version],
-        timing=Timing(read_back_after=1.0, poll_intervals={PollRate.SCAN: SCAN_INTERVAL}),
-    )
+        scan_steps=[read_version], scan_check=scan_check)
 
 
 REGISTERS: dict[str, int] = {
@@ -151,10 +155,10 @@ class PointsSeen:
 
 
 def _connected(registers: Mapping[str, int] = REGISTERS,
-               model: Model | None = None) -> tuple[Client, FakeDevice, FakeClock, PointsSeen]:
+               model: ModbusModel | None = None) -> tuple[Client, FakeDevice, FakeClock, PointsSeen]:
     device = FakeDevice(registers)
     clock = FakeClock()
-    client = Client(device, model or _model(), clock=clock, write_retry=NO_RETRY)
+    client = Client(device, model or _model(), clock=clock, offline_after_intervals=OFFLINE_AFTER_INTERVALS)
     asyncio.run(client.connect())
     seen = PointsSeen()
     client.subscribe_points(seen)
@@ -185,7 +189,7 @@ def test_an_instance_scan_may_not_mark_another_instances_points() -> None:
         scan.set_available(Labels(zone=n % 3 + 1), False, reason="not mine")
 
     device = FakeDevice(REGISTERS)
-    client = Client(device, _model(overreaching), clock=FakeClock(), write_retry=NO_RETRY)
+    client = Client(device, _model(overreaching), clock=FakeClock(), offline_after_intervals=OFFLINE_AFTER_INTERVALS)
     with pytest.raises(ModelError, match="not its own"):
         asyncio.run(client.connect())
 
@@ -197,7 +201,7 @@ def test_a_unit_that_does_not_change_is_only_read_where_its_scans_read() -> None
     device.reads.clear()
     for _ in range(4):
         clock.advance(SCAN_INTERVAL)
-        asyncio.run(client.refresh(PollRate.SCAN))
+        asyncio.run(client.refresh(SCAN_CHECK))
     checked = {key for batch in device.reads for key in batch}
     assert checked == {"version", "zone_1_type", "zone_2_type", "zone_3_type"}
     assert seen.calls == []
@@ -225,26 +229,29 @@ def test_the_checks_are_spread_evenly_over_the_scan_interval() -> None:
 def test_seconds_until_next_poll_counts_the_checks() -> None:
     device = FakeDevice({"version": 1, "zone_1_type": 0})
     clock = FakeClock()
-    client = Client(device, _model(), clock=clock, write_retry=NO_RETRY)
+    client = Client(device, _model(), clock=clock, offline_after_intervals=OFFLINE_AFTER_INTERVALS)
     asyncio.run(client.connect())
     wait = client.seconds_until_next_poll()
     assert wait is not None and 0 < wait <= SCAN_INTERVAL, "nothing is subscribed, only checks are due"
 
 
-def test_checks_follow_the_scan_interval_set_for_them() -> None:
-    client, device, clock, _ = _connected()
-    client.set_poll_interval(PollRate.SCAN, 60)
-    asyncio.run(client.refresh(PollRate.SCAN))                 # the next check follows the override
-    device.reads.clear()
-    clock.advance(60)
-    asyncio.run(client.poll())
-    assert "zone_1_type" in device.read_keys()
+def test_checks_follow_the_interval_of_the_models_scan_check_rate() -> None:
+    client, device, clock, _ = _connected(model=_model(scan_check=PollRate.SLOW))      # SLOW: 60 s
+    checked_at: list[float] = []
+    for _ in range(8):
+        wait = client.seconds_until_next_poll()
+        assert wait is not None
+        clock.advance(wait)
+        device.reads.clear()
+        asyncio.run(client.poll())
+        checked_at += [clock.monotonic()] * len(device.reads)
+    start = checked_at[0] - 15.0
+    assert [at - start for at in checked_at] == [15.0, 30.0, 45.0, 60.0, 75.0, 90.0, 105.0, 120.0]
 
 
-def test_a_model_without_a_scan_interval_is_never_checked() -> None:
-    model = Model(name="ZONES", manufacturer="TEST",
-                  sections=[RepeatedSection(_zone, range(1, 4), label="zone", scan=scan_zone)],
-                  timing=Timing(read_back_after=1.0, poll_intervals={PollRate.SCAN: None}))
+def test_a_model_whose_scans_are_checked_at_the_static_rate_is_never_checked() -> None:
+    model = modbus_model([RepeatedSection(_zone, range(1, 4), label="zone", scan=scan_zone)], name="ZONES",
+                         scan_check=PollRate.STATIC)
     client, device, clock, _ = _connected(model=model)
     assert client.seconds_until_next_poll() is None, "nothing is subscribed, and nothing is checked"
     device.reads.clear()
@@ -260,7 +267,7 @@ def test_an_instance_set_up_later_is_found_and_told() -> None:
     device.answer("zone_3_type", 0)
     device.answer("zone_3_temp", 190)
     device.answer("zone_3_setting", 2)
-    asyncio.run(client.refresh(PollRate.SCAN))
+    asyncio.run(client.refresh(SCAN_CHECK))
     assert seen.calls == [({"zone_3_type", "zone_3_temp", "zone_3_setting"}, set())]
     temp = client.value(zone_temp(3))
     assert temp is not None and temp.value == 19.0
@@ -271,7 +278,7 @@ def test_an_instance_that_stops_being_a_dummy_gains_its_sensor() -> None:
     client, device, _, seen = _connected()
     device.answer("zone_2_type", 0)
     device.answer("zone_2_temp", 205)
-    asyncio.run(client.refresh(PollRate.SCAN))
+    asyncio.run(client.refresh(SCAN_CHECK))
     assert seen.calls == [({"zone_2_temp"}, set())]
 
 
@@ -309,7 +316,7 @@ def test_an_unanswered_check_changes_nothing() -> None:
     client, device, _, seen = _connected()
     keys = set(client.points)
     device.silence()
-    asyncio.run(client.refresh(PollRate.SCAN))
+    asyncio.run(client.refresh(SCAN_CHECK))
     assert set(client.points) == keys
     assert seen.calls == []
     assert client.silent
@@ -320,23 +327,22 @@ def test_a_change_to_what_the_whole_unit_scan_read_scans_everything_again() -> N
     assert "extra" not in client.points
     device.answer("version", 2)
     with LogRecords() as records:
-        asyncio.run(client.refresh(PollRate.SCAN))
+        asyncio.run(client.refresh(SCAN_CHECK))
     assert seen.calls == [({"extra"}, set())]
     assert any("scanning all of it again" in r.getMessage() for r in records)
 
 
-def test_a_rescan_keeps_interest_and_interval_overrides() -> None:
+def test_a_rescan_keeps_interest() -> None:
     client, device, clock, _ = _connected()
     told: list[object] = []
     client.subscribe(zone_temp(1), lambda key, old, new: told.append(new.value))
-    client.set_poll_interval(PollRate.MEDIUM, 20)
     device.answer("version", 2)
-    asyncio.run(client.refresh(PollRate.SCAN))
+    asyncio.run(client.refresh(SCAN_CHECK))
     device.answer("zone_1_temp", 230)
     device.reads.clear()
-    clock.advance(20)
+    clock.advance(30)
     asyncio.run(client.poll())
-    assert "zone_1_temp" in device.read_keys(), "the subscription and its interval survived"
+    assert "zone_1_temp" in device.read_keys(), "the subscription survived"
     assert told[-1] == 23.0
 
 
@@ -351,21 +357,21 @@ def test_a_points_callback_that_fails_is_logged_and_the_others_are_told() -> Non
     client.subscribe_points(later)
     device.answer("zone_2_type", 0)
     with LogRecords() as records:
-        asyncio.run(client.refresh(PollRate.SCAN))
+        asyncio.run(client.refresh(SCAN_CHECK))
     assert later.calls and seen.calls
     assert any("points callback failed" in r.getMessage() for r in records)
 
 
 def test_an_unsubscribed_points_callback_is_not_told() -> None:
     device = FakeDevice(REGISTERS)
-    client = Client(device, _model(), clock=FakeClock(), write_retry=NO_RETRY)
+    client = Client(device, _model(), clock=FakeClock(), offline_after_intervals=OFFLINE_AFTER_INTERVALS)
     asyncio.run(client.connect())
     seen = PointsSeen()
     unsubscribe = client.subscribe_points(seen)
     unsubscribe()
     unsubscribe()                                               # twice is harmless
     device.answer("zone_2_type", 0)
-    asyncio.run(client.refresh(PollRate.SCAN))
+    asyncio.run(client.refresh(SCAN_CHECK))
     assert seen.calls == []
 
 

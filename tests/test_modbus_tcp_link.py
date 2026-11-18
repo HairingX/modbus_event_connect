@@ -2,6 +2,7 @@
 localhost port."""
 import asyncio
 import struct
+import time
 from collections.abc import AsyncIterator
 
 import pytest
@@ -9,6 +10,8 @@ import pytest
 from modbus_event_connect.modbus import FunctionCode, ModbusTcpConnection, Request
 
 READ = Request(1, FunctionCode.READ_HOLDING_REGISTERS, 0, count=2)
+TIMEOUT = 1.0
+"""Seconds each request here waits for its answer."""
 
 
 class Server:
@@ -17,6 +20,8 @@ class Server:
     def __init__(self) -> None:
         self.links: set[asyncio.StreamWriter] = set()
         self.port = 0
+        self.silent = False
+        """Read requests and answer none, as a unit that is busy elsewhere does."""
         self._server: asyncio.Server | None = None
 
     async def start(self) -> None:
@@ -44,6 +49,8 @@ class Server:
             while True:
                 transaction, _, length, unit = struct.unpack(">HHHB", await reader.readexactly(7))
                 pdu = await reader.readexactly(length - 1)
+                if self.silent:
+                    continue
                 count = struct.unpack(">H", pdu[3:5])[0]
                 body = bytes([FunctionCode.READ_HOLDING_REGISTERS, count * 2]) + bytes(count * 2)
                 writer.write(struct.pack(">HHHB", transaction, 0, len(body) + 1, unit) + body)
@@ -64,13 +71,24 @@ async def server() -> AsyncIterator[Server]:
 
 
 async def test_a_link_the_device_dropped_is_reopened_once_and_closed_with_the_connection(server: Server) -> None:
-    conn = ModbusTcpConnection("127.0.0.1", server.port, timeout=1.0)
-    assert (await conn.request(READ)).ok
+    conn = ModbusTcpConnection("127.0.0.1", server.port, connect_timeout=1.0, frame_gap=0.0)
+    assert (await conn.request(READ, timeout=TIMEOUT)).ok
     server.drop()
     await asyncio.sleep(0.02)
-    assert (await conn.request(READ)).ok
+    assert (await conn.request(READ, timeout=TIMEOUT)).ok
     await server.settle()
     assert len(server.links) == 1
     await conn.close()
     await server.settle()
     assert server.links == set()
+
+
+async def test_a_request_waits_for_its_answer_as_long_as_it_says_not_as_long_as_opening_may_take(
+        server: Server) -> None:
+    conn = ModbusTcpConnection("127.0.0.1", server.port, connect_timeout=5.0, frame_gap=0.0)
+    assert (await conn.request(READ, timeout=TIMEOUT)).ok
+    server.silent = True
+    started = time.monotonic()
+    assert (await conn.request(READ, timeout=0.3)).no_answer
+    assert time.monotonic() - started < 0.5          # the guard against a hung client gives up at twice it
+    await conn.close()

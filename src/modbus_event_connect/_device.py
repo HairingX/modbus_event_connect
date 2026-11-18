@@ -6,13 +6,12 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+from event_connect import Identity
+
 from ._point import Point
 
 if TYPE_CHECKING:
-    from ._model import Model, Profile
-
-Identity = Mapping[str, int | float | str | bool | None]
-"""What a device says about itself: from a protocol handshake, or read from identity points."""
+    from ._model import Model
 
 
 class Outcome(Enum):
@@ -93,6 +92,11 @@ class EncodedWrite:
 class Device(Protocol):
     """One device, reached through one protocol. The core talks to this and nothing below it."""
 
+    @property
+    def models(self) -> Sequence[Model]:
+        """Every model the device may be, of its protocol."""
+        ...
+
     async def connect(self) -> Identity | None:
         """Reach the device, opening the connection if this device owns it.
 
@@ -105,13 +109,13 @@ class Device(Protocol):
         """Let go of the device. Closes the connection only if this device opened it."""
         ...
 
-    def use(self, model: Model) -> Profile:
-        """Talk to the device as the profile of `model` says, from now on, and return that profile.
+    def use(self, model: Model) -> None:
+        """Talk to the device as `model` says, from now on.
 
         Called once the model is chosen, before any of its points is read.
 
         Raises:
-            ModelError: the device was given no profile of `model`.
+            ModelError: `model` is not one of `models`.
         """
         ...
 

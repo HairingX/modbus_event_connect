@@ -1,18 +1,18 @@
-"""What a device is, and how it is talked to: a model - an identity, sections of points, the
-scan steps and its timing - and its profile for one protocol. Resolving a model's profile against
+"""What a device is, and how it is talked to: a model - its identity points, sections of points,
+the scan steps, its timing and what its protocol needs to know of it. Resolving a model against
 one device's identity produces the points that device actually has."""
 from __future__ import annotations
 
 import dataclasses
+from abc import ABC, abstractmethod
 from collections import Counter
 from collections.abc import Awaitable, Callable, Hashable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import KW_ONLY, dataclass, field
 from types import MappingProxyType
 from typing import Any, Protocol
 
-from event_connect import DataValue, ModelError, Selector, SystemClock, Timing, select
+from event_connect import DataValue, Identity, ModelError, PollRate, Retry, Selector, Timing, select
 
-from ._device import Identity
 from ._point import Access, Point
 
 # ============================================================================= sections
@@ -57,8 +57,8 @@ class RepeatedSection:
 class Scan(Protocol):
     """What a scan step may do: read to find out what is there, and mark parts unavailable.
 
-    What a scan reads is read again at `PollRate.SCAN` to find out whether the unit has changed,
-    so a scan reads only what decides what the unit has.
+    What a scan reads is read again at the model's `scan_check` rate to find out whether the unit
+    has changed, so a scan reads only what decides what the unit has.
     """
 
     @property
@@ -82,87 +82,172 @@ InstanceScanStep = Callable[[Scan, int], Awaitable[None]]
 
 # =============================================================================== model
 
+_KEYS_SHOWN = 3
+"""Keys a problem names before it counts the rest."""
 
-@dataclass(frozen=True)
-class Model:
-    """What a device is, as data: sections of points, identity points, scan steps and timing.
 
-    It says nothing of a protocol: its profile does.
+@dataclass(frozen=True, eq=False)
+class Model(ABC):
+    """What a device is, and everything about how its unit behaves over one protocol: sections of
+    points, identity points, scan steps and timing; a protocol subclasses it with the rest.
+
+    A model is one object: two are never the same model, however alike.
+
+    Raises:
+        ModelError: at construction, listing every problem: an empty name or manufacturer, timing
+            that is not valid, `poll_intervals` that miss a rate the readable points or the scan
+            check use or hold one nothing uses, a `scan_check` missing where the model scans or
+            given where it does not, and whatever its protocol finds.
     """
     name: str
     manufacturer: str
-    sections: tuple[Section | RepeatedSection, ...]
-    timing: Timing
-    """When its points are read, how long a write takes to show, and how long it may stay silent."""
-    identity_points: tuple[Point[Any], ...] = ()
+    sections: Sequence[Section | RepeatedSection]
+    _: KW_ONLY
+    poll_intervals: Mapping[PollRate, float]
+    """Seconds between reads of each poll rate its readable points and its scan check use, and of
+    no other; `PollRate.STATIC` has none."""
+    read_back_after: float
+    """Seconds from a write until a read shows it."""
+    write_retry: Retry
+    """When a write the unit answered busy is sent again, counting its sendings and the time since
+    the first; `NO_RETRY` sends every write once."""
+    scan_check: PollRate | None
+    """The poll rate at which what its scans read is read again, to find out whether the unit has
+    changed; None for a model that does not scan."""
+    identity_points: Sequence[Point[Any]]
     """Read before the model resolves, to add to what the handshake says about the device."""
-    scan_steps: tuple[ScanStep, ...] = ()
+    scan_steps: Sequence[ScanStep]
+    timing: Timing = field(init=False, repr=False)
+    """Its `poll_intervals` and `read_back_after`, as a scheduler plans by them."""
+    keys: frozenset[str] = field(init=False, repr=False)
+    """Every key a unit of this model may have: of its identity points, and of every section and
+    every instance, whatever the identity."""
 
-    def __init__(self, name: str, manufacturer: str, sections: Sequence[Section | RepeatedSection], *,
-                 timing: Timing,
-                 identity_points: Sequence[Point[Any]] = (), scan_steps: Sequence[ScanStep] = ()) -> None:
-        object.__setattr__(self, "name", name)
-        object.__setattr__(self, "manufacturer", manufacturer)
-        object.__setattr__(self, "sections", tuple(sections))
-        object.__setattr__(self, "identity_points", tuple(identity_points))
-        object.__setattr__(self, "scan_steps", tuple(scan_steps))
-        object.__setattr__(self, "timing", timing)
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "sections", tuple(self.sections))
+        object.__setattr__(self, "identity_points", tuple(self.identity_points))
+        object.__setattr__(self, "scan_steps", tuple(self.scan_steps))
+        object.__setattr__(self, "poll_intervals", MappingProxyType(dict(self.poll_intervals)))
+        declared = _declared_points(self)
+        object.__setattr__(self, "keys", frozenset(point.key for point in declared))
+        found: list[str] = []
+        if not self.name:
+            found.append("the model name must not be empty")
+        if not self.manufacturer:
+            found.append("the model manufacturer must not be empty")
+        try:
+            object.__setattr__(self, "timing", Timing(poll_intervals=self.poll_intervals,
+                                                      read_back_after=self.read_back_after))
+        except ValueError as err:
+            found.append(f"timing: {err}")
+        found += _scan_check_problems(self) + _interval_problems(self, declared)
+        found += self.declaration_problems(declared)
+        if found:
+            listed = "\n".join(f"  - {problem}" for problem in found)
+            raise ModelError(f"model {self.name!r} is not valid:\n{listed}")
 
-
-ModelSelector = Callable[[Identity], "Model | None"]
-"""Picks a model from an identity - e.g. a decision table over handshake values."""
-
-
-# ============================================================================== profile
-
-
-@dataclass(frozen=True, kw_only=True)
-class Profile:
-    """How `model` is talked to over one protocol.
-
-    A protocol subclasses it with what it needs to know of the model's device; this base knows
-    nothing of a protocol, and takes every address as it is.
-    """
-    model: Model
-
+    @abstractmethod
     def problems(self, point: Point[Any]) -> list[str]:
-        """What is wrong with `point` over this protocol. Empty when nothing is."""
-        return []
+        """What is wrong with `point` over this model's protocol. Empty when nothing is."""
 
+    @abstractmethod
     def address(self, access: Access) -> int:
         """The address sent for `access`.
 
         Raises:
             ValueError: it has none.
         """
-        return access.address
+
+    @abstractmethod
+    def declaration_problems(self, points: Sequence[Point[Any]]) -> list[str]:
+        """What is wrong with the model over its protocol, given every point it declares. Empty when
+        nothing is."""
 
 
-def checked_profiles[P: Profile](profiles: Sequence[P]) -> tuple[P, ...]:
-    """`profiles`, as a tuple, once it is known that there is one and that no two are of one model.
+def _scans(model: Model) -> bool:
+    """Whether `model` scans: it has scan steps, or a repeated section with a scan."""
+    return bool(model.scan_steps) or any(isinstance(section, RepeatedSection) and section.scan is not None
+                                         for section in model.sections)
+
+
+def _declared_points(model: Model) -> list[Point[Any]]:
+    """Every point `model` declares, whatever the identity; an instance whose factory raises is left
+    out, as resolving reports it."""
+    points = list(model.identity_points)
+    for section in model.sections:
+        if isinstance(section, RepeatedSection):
+            for number in section.numbers:
+                try:
+                    points.extend(section.factory(number))
+                except Exception:
+                    continue
+        else:
+            points.extend(section.points)
+    return points
+
+
+def _scan_check_problems(model: Model) -> list[str]:
+    scans = _scans(model)
+    if scans and model.scan_check is None:
+        return ["it scans, so it needs a scan_check: the poll rate what its scans read is read again at"]
+    if not scans and model.scan_check is not None:
+        return [f"scan_check is {model.scan_check.name}, but the model has no scan to check"]
+    return []
+
+
+def _interval_problems(model: Model, declared: Sequence[Point[Any]]) -> list[str]:
+    """The rates the readable points or the scan check use that have no interval, and the intervals
+    of rates nothing uses."""
+    users: dict[PollRate, list[str]] = {}
+    for point in declared:
+        if point.readable and point.poll_rate is not None and point.poll_rate is not PollRate.STATIC:
+            users.setdefault(point.poll_rate, []).append(repr(str(point.key)))
+    if model.scan_check is not None and model.scan_check is not PollRate.STATIC:
+        users.setdefault(model.scan_check, []).append("the scan check")
+    problems = [f"poll_intervals has no interval for {rate.name}, at which {_named(who)} "
+                f"{'is' if len(set(who)) == 1 else 'are'} read"
+                for rate, who in users.items() if rate not in model.poll_intervals]
+    problems += [f"poll_intervals gives {rate.name} an interval, but nothing is read at it"
+                 for rate in model.poll_intervals if rate not in users and rate is not PollRate.STATIC]
+    return problems
+
+
+def _named(who: Sequence[str]) -> str:
+    """`who`, the first few by name and the rest counted."""
+    shown = list(dict.fromkeys(who))
+    if len(shown) <= _KEYS_SHOWN:
+        return ", ".join(shown)
+    return f"{', '.join(shown[:_KEYS_SHOWN])} and {len(shown) - _KEYS_SHOWN} more"
+
+
+ModelSelector = Callable[[Identity], "Model | None"]
+"""Picks a model from an identity - e.g. a decision table over handshake values."""
+
+
+def checked_models[M: Model](models: Sequence[M]) -> tuple[M, ...]:
+    """`models`, as a tuple, once it is known that there is one and that none is given twice.
 
     Raises:
-        ModelError: there is none, or two are of one model.
+        ModelError: there is none, or one is given twice.
     """
-    if not profiles:
-        raise ModelError("a device needs the profile of every model it may meet, and was given none")
-    for index, profile in enumerate(profiles):
-        if any(other.model is profile.model for other in profiles[:index]):
-            raise ModelError(f"two profiles of the model {profile.model.name!r}: a device talks to a "
-                             f"model one way")
-    return tuple(profiles)
+    if not models:
+        raise ModelError("a device needs every model it may meet, and was given none")
+    for index, model in enumerate(models):
+        if any(other is model for other in models[:index]):
+            raise ModelError(f"the model {model.name!r} is given twice")
+    return tuple(models)
 
 
-def profile_of[P: Profile](profiles: Sequence[P], model: Model) -> P:
-    """The profile of `model` among `profiles`.
+def model_among[M: Model](models: Sequence[M], model: Model) -> M:
+    """`model`, as one of `models`.
 
     Raises:
-        ModelError: none is of `model`.
+        ModelError: it is not one of them.
     """
-    for profile in profiles:
-        if profile.model is model:
-            return profile
-    raise ModelError(f"no profile of the model {model.name!r}: give the device the profile of every "
+    for candidate in models:
+        if candidate is model:
+            return candidate
+    raise ModelError(f"the model {model.name!r} is not one the device was given: give the device every "
                      f"model it may meet")
 
 
@@ -171,19 +256,13 @@ def profile_of[P: Profile](profiles: Sequence[P], model: Model) -> P:
 
 @dataclass(frozen=True)
 class ResolvedModel:
-    """A model's profile resolved against one identity: matched sections, expanded, checked,
-    ready to use."""
-    profile: Profile
+    """A model resolved against one identity: matched sections, expanded, checked, ready to use."""
+    model: Model
     identity: Identity
     points: Mapping[str, Point[Any]]
     """Every resolved point, keyed by `key`, in declaration order."""
     instances: Mapping[str, tuple[int, ...]]
     """label -> the instance numbers resolved for it (failed factories excluded)."""
-
-    @property
-    def model(self) -> Model:
-        """The model resolved."""
-        return self.profile.model
 
     def select(self, targets: Selector) -> tuple[Point[Any], ...]:
         """The points `targets` selects: for keys, in the order given; for labels, every point
@@ -236,7 +315,7 @@ def _selection_problem(points: Mapping[str, Point[Any]], targets: Selector) -> s
     return None if selected else f"{targets!r} selects no point"
 
 
-def _overlap_problems(all_points: Sequence[Point[Any]], profile: Profile) -> list[str]:
+def _overlap_problems(all_points: Sequence[Point[Any]], model: Model) -> list[str]:
     """Partial overlaps of addresses within one access space, read and write sides separately."""
     found: list[str] = []
     for side in ("read", "write"):
@@ -246,9 +325,9 @@ def _overlap_problems(all_points: Sequence[Point[Any]], profile: Profile) -> lis
             if access is None or access.bits:
                 continue                                    # bit spaces: same address is fine
             try:
-                start = profile.address(access)
+                start = model.address(access)
             except ValueError:
-                continue                                    # the profile reports it
+                continue                                    # the model's problems report it
             end = start + point.registers
             by_space.setdefault(access.space, []).append((point.key, start, end))
         for space, items in by_space.items():
@@ -265,11 +344,10 @@ def _overlap_problems(all_points: Sequence[Point[Any]], profile: Profile) -> lis
     return found
 
 
-def _resolve(profile: Profile, identity: Identity) -> _Resolution:
-    """Everything `resolve()` and `problems()` share: expand the profile's model against
-    `identity` and check every validation rule, without raising."""
-    model = profile.model
-    problems = _model_problems(model)
+def _resolve(model: Model, identity: Identity) -> _Resolution:
+    """Everything `resolve()` and `problems()` share: expand `model` against `identity` and check
+    every validation rule, without raising."""
+    problems: list[str] = []
     all_points: list[Point[Any]] = []
     instances: dict[str, tuple[int, ...]] = {}
 
@@ -293,21 +371,8 @@ def _resolve(profile: Profile, identity: Identity) -> _Resolution:
             all_points.extend(section.points)
 
     points: dict[str, Point[Any]] = {point.key: point for point in all_points}
-    problems.extend(_cross_problems(profile, all_points, points))
+    problems.extend(_cross_problems(model, all_points, points))
     return _Resolution(points=points, instances=instances, problems=problems)
-
-
-def _model_problems(model: Model) -> list[str]:
-    problems: list[str] = []
-    if not model.name:
-        problems.append("the model name must not be empty")
-    if not model.manufacturer:
-        problems.append("the model manufacturer must not be empty")
-    try:
-        model.timing.scheduler(SystemClock())
-    except ValueError as err:
-        problems.append(f"timing: {err}")
-    return problems
 
 
 def applies(section: Section | RepeatedSection, identity: Identity, label: str, problems: list[str]) -> bool:
@@ -347,13 +412,13 @@ def _expand_repeated(section: RepeatedSection, label: str, problems: list[str]) 
     return produced_points, tuple(numbers)
 
 
-def _cross_problems(profile: Profile, all_points: Sequence[Point[Any]],
+def _cross_problems(model: Model, all_points: Sequence[Point[Any]],
                     points: Mapping[str, Point[Any]]) -> list[str]:
     """What is wrong between points: duplicates, overlaps, targets, protocol limits."""
-    timing = profile.model.timing
+    timing = model.timing
     problems = [f"duplicate key {key!r} ({count} times)"
                 for key, count in Counter(point.key for point in all_points).items() if count > 1]
-    problems.extend(_overlap_problems(all_points, profile))
+    problems.extend(_overlap_problems(all_points, model))
     for point in all_points:
         for name, refresh in (("on_write", point.on_write), ("on_change", point.on_change)):
             issue = _selection_problem(points, refresh.targets) if refresh is not None else None
@@ -363,29 +428,28 @@ def _cross_problems(profile: Profile, all_points: Sequence[Point[Any]],
                 and not timing.on_write_delay(point) > 0:
             problems.append(f"{point.key!r}: on_write re-reads until stable, which needs a positive "
                             f"read-back delay to re-read at")
-    problems.extend(f"{point.key!r}: {issue}" for point in all_points for issue in profile.problems(point))
+    problems.extend(f"{point.key!r}: {issue}" for point in all_points for issue in model.problems(point))
     return problems
 
 
 # ==================================================================================== api
 
 
-def resolve(profile: Profile, identity: Identity) -> ResolvedModel:
-    """Resolve the model of `profile` against `identity`, raising `ModelError` listing every
-    problem found."""
-    result = _resolve(profile, identity)
+def resolve(model: Model, identity: Identity) -> ResolvedModel:
+    """Resolve `model` against `identity`, raising `ModelError` listing every problem found."""
+    result = _resolve(model, identity)
     if result.problems:
         listed = "\n".join(f"  - {problem}" for problem in result.problems)
-        raise ModelError(f"model {profile.model.name!r} does not resolve against this identity:\n{listed}")
+        raise ModelError(f"model {model.name!r} does not resolve against this identity:\n{listed}")
     return ResolvedModel(
-        profile=profile,
+        model=model,
         identity=identity,
         points=MappingProxyType(result.points),
         instances=MappingProxyType(result.instances),
     )
 
 
-def problems(profile: Profile, identity: Identity) -> list[str]:
-    """The same checks as `resolve()`, without raising - every problem the model of `profile` has
-    against `identity`, or an empty list when it has none."""
-    return _resolve(profile, identity).problems
+def problems(model: Model, identity: Identity) -> list[str]:
+    """The same checks as `resolve()`, without raising - every problem `model` has against
+    `identity`, or an empty list when it has none."""
+    return _resolve(model, identity).problems

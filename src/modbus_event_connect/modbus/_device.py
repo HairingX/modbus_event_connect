@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from event_connect import NO_RETRY, Breaker, CircuitBreaker, Clock, SystemClock
+from event_connect import NO_RETRY, Breaker, CircuitBreaker, Clock, Identity, SystemClock
 
 from ._access import (
     MAX_REGISTERS_PER_WRITE,
@@ -18,10 +19,10 @@ from ._access import (
     DiscreteInput,
     HoldingRegister,
     InputRegister,
-    ModbusProfile,
     SingleWrite,
 )
 from ._connection import (
+    PORT,
     ExceptionCode,
     FunctionCode,
     ModbusConnection,
@@ -29,8 +30,9 @@ from ._connection import (
     Request,
     Response,
 )
-from .._device import EncodedWrite, Identity, Outcome, ReadResult, WriteResult
-from .._model import Model, checked_profiles, profile_of
+from ._model import ModbusModel
+from .._device import EncodedWrite, Outcome, ReadResult, WriteResult
+from .._model import Model, checked_models, model_among
 from .._point import Access, Point
 
 _READ_FUNCTION: Mapping[type[Access], FunctionCode] = {
@@ -93,29 +95,34 @@ class ModbusDevice:
     its own breaker."""
 
     def __init__(self, connection: ModbusConnection, unit_id: int, *, reconnect: CircuitBreaker,
-                 profiles: Sequence[ModbusProfile], owns_connection: bool = False,
+                 models: Sequence[ModbusModel], timeout_margin: float, owns_connection: bool = False,
                  clock: Clock | None = None, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
         """Args:
             reconnect: when the device is no longer asked, after requests in a row went
                 unanswered, and when it is asked again, which also reopens a closed connection;
                 its retry's `ready()` is asked before each try.
-            profiles: the profile of every model the device may be; `use()` chooses one.
+            models: every model the device may be; `use()` chooses one.
+            timeout_margin: seconds a request waits beyond the time the model's unit answers
+                within, for the network and whatever relays the request.
             owns_connection: whether `disconnect()` also closes the shared connection.
 
         Raises:
-            ValueError: `unit_id` is not 0-255.
-            ModelError: no profile, or two of one model.
+            ValueError: `unit_id` is not 0-255, or `timeout_margin` is not a finite number >= 0.
+            ModelError: no model, or one given twice.
         """
         if not 0 <= unit_id <= 255:
             raise ValueError(f"a unit id is 0-255, got {unit_id}")
+        if not (math.isfinite(timeout_margin) and timeout_margin >= 0):
+            raise ValueError(f"timeout_margin must be a finite number >= 0, got {timeout_margin}")
         self._connection = connection
         self._unit = unit_id
         self._owns_connection = owns_connection
         self._clock: Clock = clock if clock is not None else SystemClock()
         self._sleep = sleep
         self._reconnect = reconnect
-        self._profiles = checked_profiles(profiles)
-        self._profile: ModbusProfile | None = None
+        self._timeout_margin = timeout_margin
+        self._models = checked_models(models)
+        self._model: ModbusModel | None = None
         self._bit_locks: dict[int, asyncio.Lock] = {}
         self._breaker: Breaker = reconnect.breaker()
 
@@ -126,14 +133,15 @@ class ModbusDevice:
         self._latency_total = 0.0
 
     @classmethod
-    def tcp(cls, host: str, port: int, unit_id: int, *, reconnect: CircuitBreaker,
-            profiles: Sequence[ModbusProfile], timeout: float = 3.0, frame_gap: float = 0.0,
+    def tcp(cls, host: str, *, port: int = PORT, unit_id: int, reconnect: CircuitBreaker,
+            models: Sequence[ModbusModel], timeout_margin: float, connect_timeout: float, frame_gap: float,
             clock: Clock | None = None, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> ModbusDevice:
-        """A device on a Modbus TCP connection of its own, which `disconnect()` closes; `timeout`
-        and `frame_gap` are the connection's, `clock` and `sleep` both's."""
-        connection = ModbusTcpConnection(host, port, timeout=timeout, frame_gap=frame_gap, clock=clock, sleep=sleep)
-        return cls(connection, unit_id, reconnect=reconnect, profiles=profiles, owns_connection=True,
-                   clock=clock, sleep=sleep)
+        """A device on a Modbus TCP connection of its own, which `disconnect()` closes;
+        `connect_timeout` and `frame_gap` are the connection's, `clock` and `sleep` both's."""
+        connection = ModbusTcpConnection(host, port, connect_timeout=connect_timeout, frame_gap=frame_gap,
+                                         clock=clock, sleep=sleep)
+        return cls(connection, unit_id, reconnect=reconnect, models=models, timeout_margin=timeout_margin,
+                   owns_connection=True, clock=clock, sleep=sleep)
 
     # ---------------------------------------------------------------- Device
 
@@ -143,25 +151,38 @@ class ModbusDevice:
         return self._unit
 
     @property
-    def profile(self) -> ModbusProfile | None:
-        """The profile `use()` chose; None before it chose one."""
-        return self._profile
+    def models(self) -> tuple[ModbusModel, ...]:
+        """Every model the device may be."""
+        return self._models
+
+    @property
+    def model(self) -> ModbusModel | None:
+        """The model `use()` chose; None before it chose one."""
+        return self._model
 
     @property
     def max_registers(self) -> int:
-        """Most registers asked for in one read: the chosen profile's, and before one is chosen,
-        the fewest any profile takes."""
-        if self._profile is not None:
-            return self._profile.max_registers
-        return min(profile.max_registers for profile in self._profiles)
+        """Most registers asked for in one read: the chosen model's, and before one is chosen,
+        the fewest any model takes."""
+        if self._model is not None:
+            return self._model.max_registers
+        return min(model.max_registers for model in self._models)
 
     @property
     def max_bits(self) -> int:
-        """Most coils or discrete inputs asked for in one read: the chosen profile's, and before one
-        is chosen, the fewest any profile takes."""
-        if self._profile is not None:
-            return self._profile.max_bits
-        return min(profile.max_bits for profile in self._profiles)
+        """Most coils or discrete inputs asked for in one read: the chosen model's, and before one
+        is chosen, the fewest any model takes."""
+        if self._model is not None:
+            return self._model.max_bits
+        return min(model.max_bits for model in self._models)
+
+    @property
+    def timeout(self) -> float:
+        """Seconds a request waits for its answer: the time the unit answers within, the chosen
+        model's, and before one is chosen, the longest any model takes, plus `timeout_margin`."""
+        answers_within = (self._model.answers_within if self._model is not None
+                          else max(model.answers_within for model in self._models))
+        return answers_within + self._timeout_margin
 
     @property
     def reconnect(self) -> CircuitBreaker:
@@ -180,25 +201,24 @@ class ModbusDevice:
         if self._owns_connection:
             await self._connection.close()
 
-    def use(self, model: Model) -> ModbusProfile:
-        """Talk to the device as the profile of `model` says, and return that profile.
+    def use(self, model: Model) -> None:
+        """Talk to the device as `model` says.
 
         Raises:
-            ModelError: the device was given no profile of `model`.
+            ModelError: `model` is not one of `models`.
         """
-        self._profile = profile_of(self._profiles, model)
-        return self._profile
+        self._model = model_among(self._models, model)
 
-    def _chosen(self) -> ModbusProfile:
-        """The chosen profile: without it, no register has an address.
+    def _chosen(self) -> ModbusModel:
+        """The chosen model: without it, no register has an address.
 
         Raises:
             RuntimeError: `use()` has not chosen one.
         """
-        if self._profile is None:
+        if self._model is None:
             raise RuntimeError("use() the device with its model first: how its registers are numbered "
-                               "is the model's profile's")
-        return self._profile
+                               "is the model's")
+        return self._model
 
     async def read(self, points: Sequence[Point[Any]]) -> Mapping[str, ReadResult]:
         tables: dict[type[Access], dict[_Span, list[Point[Any]]]] = {}
@@ -291,7 +311,10 @@ class ModbusDevice:
 
     async def _write_bit(self, address: int, bit: int, on: bool) -> _Answer:
         mask = 1 << bit
-        if self._chosen().bit_write is BitWrite.MASK:
+        bit_write = self._chosen().bit_write
+        if bit_write is None:
+            raise ValueError("the model writes no single bit of a holding register: it has no bit_write")
+        if bit_write is BitWrite.MASK:
             return await self._exchange(Request(self._unit, FunctionCode.MASK_WRITE_REGISTER, address,
                                                 and_mask=~mask & 0xFFFF, or_mask=mask if on else 0),
                                         retry=False)
@@ -310,7 +333,7 @@ class ModbusDevice:
     # ------------------------------------------------------------ one exchange, the breaker
 
     async def _exchange(self, request: Request, *, retry: bool = True) -> _Answer:
-        """Send `request`, trying "busy" again as the profile's `busy` says unless `retry` is False.
+        """Send `request`, trying "busy" again as the model's `busy` says unless `retry` is False.
         Never raises for the device's doing."""
         rule = self._chosen().busy if retry else NO_RETRY
         started = self._clock.monotonic()
@@ -345,7 +368,7 @@ class ModbusDevice:
             return None
         with attempt:
             started = self._clock.monotonic()
-            response = await self._connection.request(request)
+            response = await self._connection.request(request, timeout=self.timeout)
             self._requests += 1
             self._latency_total += self._clock.monotonic() - started
             # A gateway only answers 0x0B after waiting out its own timeout on the bus, so a device

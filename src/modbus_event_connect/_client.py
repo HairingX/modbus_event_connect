@@ -12,17 +12,18 @@ from event_connect import (
     CannotConnectError,
     Clock,
     DataValue,
+    Identity,
     InvalidValueError,
     Key,
     Labels,
     ModelError,
     NotConnectedError,
     Passes,
+    PointsCallback,
     PollRate,
     Quality,
     Reachability,
     ReadOnlyError,
-    Retry,
     Scheduler,
     Selector,
     Status,
@@ -44,15 +45,12 @@ from event_connect import (
 )
 
 from ._conversion import decode, encode
-from ._device import Device, Identity, Outcome, ReadResult
+from ._device import Device, Outcome, ReadResult
 from ._model import InstanceScanStep, Model, ModelSelector, RepeatedSection, ResolvedModel, resolve
 from ._point import Point
 from ._writes import WriteQueue
 
 _LOGGER = logging.getLogger(__name__)
-
-PointsCallback = Callable[[frozenset[Key[Any]], frozenset[Key[Any]]], None]
-"""Called with the keys the unit has gained and the keys it has lost, once its points changed."""
 
 _UNANSWERED = frozenset({Outcome.NO_ANSWER, Outcome.BUSY})
 
@@ -99,20 +97,24 @@ class _ScanAnswers:
 class Client:
     """
     One device, scanned by `connect()` and read by `poll()` on the host's schedule.
-    `model` is a model, or a selector choosing one from the device's identity.
+    `model` is a model, or a selector choosing one of the device's models from its identity.
     """
 
-    def __init__(self, device: Device, model: Model | ModelSelector, *, write_retry: Retry,
-                 clock: Clock | None = None, read_only: bool = False,
+    def __init__(self, device: Device, model: Model | ModelSelector, *, offline_after_intervals: int,
+                 read_only: bool = False, clock: Clock | None = None,
                  sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
         """Args:
-            write_retry: when a write the device answered `BUSY` is sent again, counting its
-                sendings and the time since the first; `NO_RETRY` sends every write once.
+            offline_after_intervals: how many reads of the chosen model's fastest poll rate the
+                device may leave unanswered before `Status.CONNECTED` turns False.
+
+        Raises:
+            ValueError: `offline_after_intervals` is below 1.
         """
         self._device = device
         self._select_model: ModelSelector = (lambda _identity: model) if isinstance(model, Model) else model
         self._clock: Clock = clock or SystemClock()
         self._read_only = read_only
+        self._offline_after_intervals = offline_after_intervals
 
         self._resolved: ResolvedModel | None = None
         self._scheduler: Scheduler | None = None
@@ -127,17 +129,18 @@ class Client:
         self._checks: dict[_Scope, _Check] = {}
         self._scanned_labels: frozenset[str] = frozenset()
         self._points_callbacks: list[PointsCallback] = []
-        self._interval_overrides: dict[PollRate | str, float | None] = {}
         self._scheduled_polling = True
         self._checks_requested: float | None = None
-        """When `refresh(PollRate.SCAN)` asked for the checks, which runs them without the schedule."""
+        """When a refresh or a missing register asked for the checks, which runs them without the
+        schedule."""
         self._model: Model | None = None
         """The model chosen last; None before the first scan chooses one."""
         self._reachability = self._fresh_reachability()
         self._statuses = StatusBoard(self._clock)
 
         self._passes = Passes()
-        self._writes = WriteQueue(device, clock=self._clock, sleep=sleep, retry=write_retry,
+        self._writes = WriteQueue(device, clock=self._clock, sleep=sleep,
+                                  retry=lambda: self._require_model().model.write_retry,
                                   statuses=self._statuses, answered=self._update_reachability,
                                   written=self._taken)
 
@@ -178,14 +181,14 @@ class Client:
         model = self._select_model(handshake)
         if model is None:
             raise UnsupportedDeviceError(f"no model for a device that reports {dict(handshake)!r}", handshake)
-        profile = self._device.use(model)
+        self._device.use(model)
         if model is not self._model:
             self._model = model
             self._reachability = self._fresh_reachability()
         marks = self._writes.marks()
         answers = _ScanAnswers()
         try:
-            resolved = resolve(profile, await self._identify(model, handshake, answers))
+            resolved = resolve(model, await self._identify(model, handshake, answers))
             _LOGGER.debug("%s chosen for a device that reports %r", model.name, dict(resolved.identity))
             scanned: dict[str, ReadResult] = {}
             found: dict[_Scope, dict[str, str]] = {}
@@ -305,9 +308,6 @@ class Client:
                 reads: dict[_Scope, dict[str, tuple[Quality, Value]]]) -> None:
         scheduler = model.timing.scheduler(self._clock)
         scheduler.set_points(resolved.points.values())
-        for target, seconds in self._interval_overrides.items():
-            if isinstance(target, PollRate) or target in resolved.points:
-                scheduler.set_poll_interval(target, seconds)
         scheduler.set_scheduled(self._scheduled_polling)
 
         self._resolved, self._scheduler = resolved, scheduler
@@ -316,7 +316,7 @@ class Client:
         self._scanned_labels = frozenset(scope[0] for scope in marks if scope is not None)
         # Spread evenly over the interval, so that each poll checks a little rather than all at once.
         checked = [scope for scope in marks if reads[scope]]
-        interval = scheduler.rate_interval(PollRate.SCAN)
+        interval = _check_interval(model, scheduler)
         now = self._clock.monotonic()
         self._checks = {scope: _Check(reads[scope],
                                       now + interval * (index + 1) / len(checked) if interval else math.inf)
@@ -463,7 +463,8 @@ class Client:
     def subscribe_points(self, callback: PointsCallback) -> Callable[[], None]:
         """Call `callback` whenever the points this unit has change, with the keys gained and lost.
 
-        A scan checked at `PollRate.SCAN`, or a register a read finds missing, can change them;
+        A scan checked again at the model's `scan_check` rate, or a register a read finds missing,
+        can change them;
         a key lost is also told to its subscribers as `MISSING`. Returns the unsubscriber.
         """
         self._points_callbacks.append(callback)
@@ -487,19 +488,6 @@ class Client:
         self._scheduled_polling = enabled
         if self._scheduler is not None:
             self._scheduler.set_scheduled(enabled)
-
-    def set_poll_interval(self, target: PollRate | str, seconds: float | None) -> float | None:
-        """
-        Override how often a poll rate or a key is read; None restores the model's interval.
-        Returns the interval in effect, which is never below the model's floor.
-
-        `PollRate.SCAN` sets how often what each scan read is read again; it applies from each
-        scan's next check.
-        """
-        self._interval_overrides[target] = seconds
-        if self._scheduler is None:
-            return seconds
-        return self._scheduler.set_poll_interval(target, seconds)
 
     # ======================================================================== availability
 
@@ -580,7 +568,7 @@ class Client:
     async def _run_checks(self) -> None:
         """Read again what each due scan read, and scan again where that has changed."""
         now = self._clock.monotonic()
-        interval = self._require_scheduler().rate_interval(PollRate.SCAN)
+        interval = _check_interval(self._require_model().model, self._require_scheduler())
         for scope in [scope for scope, check in self._checks.items() if check.due <= now]:
             check = self._checks[scope]
             check.due = now + interval if interval is not None else math.inf
@@ -617,19 +605,16 @@ class Client:
                       after: float = 0.0) -> None:
         """
         Read a poll rate's points, a selection, or everything - now, or `after` seconds from now.
-        `PollRate.SCAN` checks again whether the unit has changed.
+        The model's `scan_check` rate also checks again whether the unit has changed.
         """
         scheduler = self._require_scheduler()
         resolved = self._require_model()
-        if targets is PollRate.SCAN:
-            due = self._clock.monotonic() + after
-            for check in self._checks.values():
-                check.due = min(check.due, due)
-            self._checks_requested = due if self._checks_requested is None else min(self._checks_requested, due)
-            if after == 0:
-                await self.poll()
-            return
         if isinstance(targets, PollRate):
+            if targets is resolved.model.scan_check:
+                due = self._clock.monotonic() + after
+                for check in self._checks.values():
+                    check.due = min(check.due, due)
+                self._checks_requested = due if self._checks_requested is None else min(self._checks_requested, due)
             points = [p for p in resolved.points.values() if p.poll_rate is targets]
         elif targets is None:
             points = list(resolved.points.values())
@@ -705,8 +690,9 @@ class Client:
     def _update_reachability(self, answered: bool) -> None:
         """Update reachability from whether the device answered.
 
-        The device counts as not answering only once it has been silent for the model's
-        `offline_after`, so one lost answer does not make it unavailable.
+        The device counts as not answering only once it has been silent for
+        `offline_after_intervals` of the model's fastest interval, so one lost answer does not make
+        it unavailable.
         """
         if answered:
             self._reachability.answered(self._scheduler)
@@ -721,8 +707,10 @@ class Client:
         answering whatever silence its model allows.
         """
         if self._model is None:
-            return Reachability(self._clock, 0.0)
-        return Reachability(self._clock, self._model.timing.offline_after, name=self._model.name)
+            return Reachability(self._clock, offline_after_intervals=self._offline_after_intervals,
+                                fastest_interval=None)
+        return Reachability(self._clock, offline_after_intervals=self._offline_after_intervals,
+                            fastest_interval=self._model.timing.fastest_interval, name=self._model.name)
 
     # ============================================================================= writing
 
@@ -736,9 +724,9 @@ class Client:
     async def write[T](self, key: Key[T], value: T) -> bool:
         """
         Write `value` to `key` and return whether the device accepted it. Writes go out in
-        order. A write the device answers `BUSY` is sent again for up to `write_retry_for`
-        seconds; a setting overtaken by a newer one before the device took it is not sent again,
-        and returns the newer one's outcome.
+        order. A write the device answers `BUSY` is sent again as the model's `write_retry` says;
+        a setting overtaken by a newer one before the device took it is not sent again, and
+        returns the newer one's outcome.
 
         `key` is not read while it is being written. Once the device takes a setting, `key` holds
         the value written until it is read back.
@@ -888,6 +876,12 @@ def _instance_scan(model: Model, label: str) -> InstanceScanStep:
     """The scan of the repeated section labelled `label`, which must have one."""
     return next(section.scan for section in model.sections
                 if isinstance(section, RepeatedSection) and section.label == label and section.scan is not None)
+
+
+def _check_interval(model: Model, scheduler: Scheduler) -> float | None:
+    """Seconds between the checks of what each scan read: those of the model's `scan_check` rate;
+    None when they are never checked on a timer."""
+    return scheduler.rate_interval(model.scan_check) if model.scan_check is not None else None
 
 
 def _union(marks: Iterable[Mapping[str, str]]) -> dict[str, str]:

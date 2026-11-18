@@ -32,17 +32,17 @@ class _Write:
 class WriteQueue:
     """The writes to one device, sent one at a time and in order.
 
-    A write the device answers `BUSY` is sent again as `retry` says, until it is taken. A setting overtaken by a newer one before the device took it is not sent again, and
-    returns the newer one's outcome; a command is always sent. A pulse writes its idle value back
-    after its time.
+    A write the device answers `BUSY` is sent again as `retry` says, until it is taken. A setting
+    overtaken by a newer one before the device took it is not sent again, and returns the newer
+    one's outcome; a command is always sent. A pulse writes its idle value back after its time.
     """
 
     def __init__(self, device: Device, *, clock: Clock, sleep: Callable[[float], Awaitable[None]],
-                 retry: Retry, statuses: StatusBoard, answered: Callable[[bool], None],
+                 retry: Callable[[], Retry], statuses: StatusBoard, answered: Callable[[bool], None],
                  written: Callable[[Point[Any], object], None]) -> None:
         """Args:
             retry: when a write the device answered `BUSY` is sent again, counting its sendings
-                and the time since the first.
+                and the time since the first; asked for each write as it is sent.
             statuses: holds `Status.WRITE_PENDING` from the first queued write until the last one
                 has finished.
             answered: told after every sending whether the device answered it.
@@ -154,6 +154,7 @@ class WriteQueue:
                            overtaken: Callable[[], bool]) -> WriteResult | None:
         """Write, and send again as `retry` says while the device answers `BUSY`; None once
         `overtaken()`."""
+        retry = self._retry()
         started = self._clock.monotonic()
         sendings = 0
         while True:
@@ -163,7 +164,7 @@ class WriteQueue:
             if result.outcome is not Outcome.BUSY:
                 return result
             waited = self._clock.monotonic() - started
-            delay = self._retry.next_delay(sendings, waited)
+            delay = retry.next_delay(sendings, waited)
             if delay is None:
                 return result
             _LOGGER.debug("'%s' was not taken %.1f s after it was first sent: %s", point.key, waited, result.detail)

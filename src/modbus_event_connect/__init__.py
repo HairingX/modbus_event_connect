@@ -7,20 +7,25 @@ from event_connect import (
     Attempts,
     AuthenticationError,
     CannotConnectError,
+    Certainty,
     Change,
     CircuitBreaker,
     ClientError,
     Clock,
     DataValue,
+    DeviceClient,
     Exponential,
     Fixed,
+    Identity,
     InvalidValueError,
     Jitter,
     Key,
     Labels,
     Limits,
     ModelError,
+    ModelInfo,
     NotConnectedError,
+    PointsCallback,
     PollRate,
     Pulse,
     Quality,
@@ -32,7 +37,6 @@ from event_connect import (
     StatusCallback,
     Steps,
     Stop,
-    Timing,
     Transform,
     Transforms,
     Unit,
@@ -45,10 +49,9 @@ from event_connect import (
     WriteKind,
 )
 
-from ._client import Client, PointsCallback
+from ._client import Client
 from ._data_type import ByteOrder, DataType, DataTypeKind, WordOrder
-from ._device import Identity
-from ._model import InstanceScanStep, Model, ModelSelector, Profile, RepeatedSection, Scan, ScanStep, Section
+from ._model import InstanceScanStep, Model, ModelSelector, RepeatedSection, Scan, ScanStep, Section
 from ._point import Point
 
 __version__ = _installed_version("modbus_event_connect")
@@ -58,6 +61,7 @@ __all__ = [
     "AuthenticationError",
     "ByteOrder",
     "CannotConnectError",
+    "Certainty",
     "Change",
     "CircuitBreaker",
     "Client",
@@ -66,6 +70,7 @@ __all__ = [
     "DataType",
     "DataTypeKind",
     "DataValue",
+    "DeviceClient",
     "Exponential",
     "Fixed",
     "Identity",
@@ -77,13 +82,13 @@ __all__ = [
     "Limits",
     "Model",
     "ModelError",
+    "ModelInfo",
     "ModelSelector",
     "NO_RETRY",
     "NotConnectedError",
     "Point",
     "PointsCallback",
     "PollRate",
-    "Profile",
     "Pulse",
     "Quality",
     "ReadOnlyError",
@@ -98,7 +103,6 @@ __all__ = [
     "StatusCallback",
     "Steps",
     "Stop",
-    "Timing",
     "Transform",
     "Transforms",
     "Unit",

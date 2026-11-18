@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import math
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import IntEnum
@@ -10,6 +11,8 @@ from typing import Any, Protocol, runtime_checkable
 
 from event_connect import Clock, SystemClock
 
+PORT = 502
+"""The TCP port Modbus TCP is served on."""
 
 
 class FunctionCode(IntEnum):
@@ -107,7 +110,9 @@ class ModbusConnection(Protocol):
 
     async def close(self) -> None: ...
 
-    async def request(self, request: Request) -> Response: ...
+    async def request(self, request: Request, *, timeout: float) -> Response:
+        """Send `request` and return its answer, waiting `timeout` seconds for it."""
+        ...
 
 
 class ModbusTcpConnection:
@@ -118,18 +123,19 @@ class ModbusTcpConnection:
     background: there is one link at a time, and a closed one stays closed until it is wanted.
     """
 
-    def __init__(self, host: str, port: int = 502, *, timeout: float = 3.0, frame_gap: float = 0.0,
+    def __init__(self, host: str, port: int = PORT, *, connect_timeout: float, frame_gap: float,
                  clock: Clock | None = None, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
         """Args:
-            timeout: seconds to wait for an answer; a lost answer is reported, not retried.
+            connect_timeout: seconds to wait for the link to open. How long an answer is waited
+                for is each request's; a lost answer is reported, not retried.
             frame_gap: seconds kept between the end of one answer and the next request."""
-        if timeout <= 0:
-            raise ValueError(f"timeout must be positive, got {timeout}")
-        if frame_gap < 0:
-            raise ValueError(f"frame_gap cannot be negative, got {frame_gap}")
+        if not (math.isfinite(connect_timeout) and connect_timeout > 0):
+            raise ValueError(f"connect_timeout must be a finite number above 0, got {connect_timeout}")
+        if not (math.isfinite(frame_gap) and frame_gap >= 0):
+            raise ValueError(f"frame_gap must be a finite number >= 0, got {frame_gap}")
         self._host = host
         self._port = port
-        self._timeout = timeout
+        self._connect_timeout = connect_timeout
         self._frame_gap = frame_gap
         self._client: Any = None
         self._clock: Clock = clock if clock is not None else SystemClock()
@@ -150,13 +156,15 @@ class ModbusTcpConnection:
         async with self._lock:
             await self._close()
 
-    async def request(self, request: Request) -> Response:
+    async def request(self, request: Request, *, timeout: float) -> Response:
+        """Send `request` and return its answer, waiting `timeout` seconds for it; opens the link
+        if it is closed."""
         async with self._lock:
             if not self.connected and not await self._open():
                 return Response(ok=False, no_answer=True, detail="the connection could not be opened")
             await self._keep_frame_gap()
             try:
-                return await self._send(request)
+                return await self._send(request, timeout)
             finally:
                 self._last_answer_at = self._clock.monotonic()
 
@@ -165,9 +173,11 @@ class ModbusTcpConnection:
     def _ensure_client(self) -> Any:
         if self._client is None:
             from pymodbus.client import AsyncModbusTcpClient
-            # retries=0: see `timeout` in __init__. reconnect_delay=0: pymodbus would otherwise
-            # reopen a dropped link by itself, racing the next request to open a second one.
-            self._client = AsyncModbusTcpClient(self._host, port=self._port, timeout=self._timeout,
+            # timeout=inf: pymodbus waits as long for the link to open as for any answer, where each
+            # request here waits as long as its own unit needs; both waits are kept here instead.
+            # retries=0: a lost answer is reported, not retried. reconnect_delay=0: pymodbus would
+            # otherwise reopen a dropped link by itself, racing the next request to open a second one.
+            self._client = AsyncModbusTcpClient(self._host, port=self._port, timeout=math.inf,
                                                 retries=0, reconnect_delay=0)
         return self._client
 
@@ -175,7 +185,8 @@ class ModbusTcpConnection:
         if self.connected:
             return True
         try:
-            return bool(await self._ensure_client().connect())
+            async with asyncio.timeout(self._connect_timeout):
+                return bool(await self._ensure_client().connect())
         except Exception:
             return False
 
@@ -231,16 +242,15 @@ class ModbusTcpConnection:
         return client.mask_write_register(address=address, and_mask=request.and_mask,
                                           or_mask=request.or_mask, **unit)
 
-    async def _send(self, request: Request) -> Response:
+    async def _send(self, request: Request, timeout: float) -> Response:
         name = request.function.name
         unit = self._unit_kwargs(request.unit_id)      # outside the try: an incompatible pymodbus is a bug
         try:
             pending = self._call(request, unit)
-            # A guard above pymodbus's own timeout: if the client hangs anyway, drop the link so
-            # a late reply is never taken as the answer to the next request.
-            async with asyncio.timeout(self._timeout * 2):
+            async with asyncio.timeout(timeout):
                 response: Any = await pending
         except TimeoutError:
+            # The link is dropped, so that a late answer is never taken as the next request's.
             await self._close()
             return Response(ok=False, no_answer=True, detail=f"{name}: no answer in time")
         except Exception as err:
