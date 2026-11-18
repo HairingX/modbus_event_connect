@@ -183,7 +183,7 @@ class MicroNabtoDevice:
         if value.bit_index is not None:
             raise ValueError(f"point {point.key!r}: a single bit cannot be written over micro_nabto")
         items = [(access.obj, access.address + i, register) for i, register in enumerate(value.registers)]
-        answer = await self._connection.request(wire.setpoint_write(items))
+        answer = await self._connection.request(wire.setpoint_write(items), answer_wait=self.answer_wait)
         status = wire.write_status(answer) if answer is not None else None
         self._recent.append((self._connection.clock.monotonic(), f"SetpointRegister write of {len(items)}: " + (
             "no answer" if answer is None else "no status" if status is None else f"status 0x{status:02x}")))

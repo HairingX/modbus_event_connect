@@ -190,6 +190,23 @@ async def test_a_read_waits_for_an_acknowledged_answer_as_long_as_the_model_says
         await device.disconnect()
 
 
+async def test_a_write_waits_for_an_acknowledged_answer_as_long_as_the_model_says() -> None:
+    async with _simulated() as simulated:
+        host, port = simulated.address
+        connection = MicroNabtoConnection(EMAIL, host=host, port=port, timeout=0.05, retries=1, answer_wait=5.0,
+                                          reconnect=HANDSHAKE_NEVER_AGAIN, session_idle=12.0, rediscovery_timeout=0.1, rediscovery_resend=0.5)
+        brief = micro_nabto_model(answer_wait=0.2)
+        device = MicroNabtoDevice(connection, models=[brief], owns_connection=True)
+        device.use(brief)
+        assert await device.connect() is not None
+        simulated.answer_delay = 2.0
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        result = await device.write(_sp(30), EncodedWrite((5,)))
+        assert result.outcome is not Outcome.OK and loop.time() - started < 1.5
+        await device.disconnect()
+
+
 async def test_points_on_the_same_register_ask_for_it_once_and_each_get_its_value() -> None:
     async with _simulated() as simulated:
         device = await _connected(simulated)
