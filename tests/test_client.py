@@ -11,6 +11,8 @@ import pytest
 
 from event_connect import (
     NO_RETRY,
+    DeviceClient,
+    ModelInfo,
     Attempts,
     CannotConnectError,
     Change,
@@ -1342,7 +1344,75 @@ def test_a_failed_connect_on_a_silent_device_reports_it_unreachable() -> None:
 
 
 
-# ======================================================================== what a client is told
+# ======================================================================== the shared client
+
+
+def test_a_client_is_a_device_client_and_its_model_a_model_info() -> None:
+    client, _, _ = _connected()
+    shared: DeviceClient = client
+    info: ModelInfo = client.model
+    assert isinstance(shared, DeviceClient) and isinstance(_client()[0], DeviceClient)
+    assert (info.name, info.manufacturer) == ("TEST", "TEST")
+
+
+def test_after_disconnect_nothing_is_read_or_written_until_connect() -> None:
+    client, device, clock = _connected()
+    asyncio.run(client.disconnect())
+    assert client.status(Status.CONNECTED).value is False and not device.connected
+    clock.advance(3600)
+    for attempt in (client.poll(), client.refresh(), client.write(MODE, 2), client.write_sequence([Write(MODE, 2)])):
+        with pytest.raises(NotConnectedError):
+            asyncio.run(attempt)
+    assert device.reads == [] and device.writes == [] and not device.connected
+    asyncio.run(client.connect())
+    assert asyncio.run(client.write(MODE, 2)) is True and client.status(Status.CONNECTED).value is True
+
+
+def test_before_connect_nothing_is_read_or_written() -> None:
+    client, device, _ = _client()
+    for attempt in (client.poll(), client.refresh(), client.write(MODE, 2)):
+        with pytest.raises(NotConnectedError):
+            asyncio.run(attempt)
+    assert device.reads == [] and device.writes == []
+
+
+def test_a_key_no_model_has_is_refused_before_connect() -> None:
+    client, _, _ = _client()
+    with pytest.raises(KeyError, match="no_such_point"):
+        client.subscribe(Key("no_such_point", int), Recorder())
+    client.subscribe(Key("room_3_temp", float), Recorder())                    # made by a repeated section
+    client.subscribe(HARDWARE, Recorder())                                    # an identity point
+    client.subscribe(COOLING_TEMP, Recorder())                                # only some units have it
+
+
+def test_a_client_choosing_its_model_knows_the_keys_of_every_model_the_device_may_be() -> None:
+    other = modbus_model([Section([Point(Key("other_only", int), read=InputRegister(90), poll_rate=PollRate.SLOW)])],
+                         name="OTHER")
+    device = FakeDevice(REGISTERS, models=[MODEL, other])
+    client = Client(device, lambda identity: MODEL, offline_after_intervals=OFFLINE_AFTER_INTERVALS,
+                    clock=FakeClock())
+    client.subscribe(Key("other_only", int), Recorder())
+    client.subscribe(TEMP, Recorder())
+    with pytest.raises(KeyError):
+        client.subscribe(Key("nowhere", int), Recorder())
+
+
+def test_a_key_of_a_model_not_chosen_is_told_of_once_connected_and_refused_after(
+        caplog: pytest.LogCaptureFixture) -> None:
+    other = modbus_model([Section([Point(Key("other_only", int), read=InputRegister(90), poll_rate=PollRate.SLOW)])],
+                         name="OTHER")
+    device = FakeDevice({**REGISTERS, "other_only": (4,)}, models=[MODEL, other])
+    client = Client(device, lambda identity: other if identity.get("device_model") == 2 else MODEL,
+                    offline_after_intervals=OFFLINE_AFTER_INTERVALS, clock=FakeClock())
+    client.subscribe(Key("other_only", int), Recorder())
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(client.connect())
+    assert "'other_only' is subscribed to, but the TEST model does not have it" in caplog.text
+    with pytest.raises(KeyError, match="the TEST model has no point 'other_only'"):
+        client.subscribe(Key("other_only", int), Recorder())
+    device.identity = {"device_model": 2}
+    asyncio.run(client.connect())
+    assert client.model is other and set(client.values) == {"other_only"}
 
 
 def test_a_key_the_unit_has_no_value_for_has_none() -> None:
@@ -1382,3 +1452,97 @@ def test_a_busy_write_is_sent_again_as_the_chosen_model_says() -> None:
     device.busy_writes["mode"] = 5
     assert asyncio.run(client.write(MODE, 2)) is False
     assert [key for key, _ in device.writes] == ["mode"] * 3
+
+
+class Sleeper:
+    """A `sleep` that waits until the test lets it end, moving the clock by what it was asked."""
+
+    def __init__(self, clock: FakeClock) -> None:
+        self.clock = clock
+        self.asked: list[float] = []
+        self._woken = asyncio.Event()
+
+    async def __call__(self, seconds: float) -> None:
+        self.asked.append(seconds)
+        self._woken.clear()
+        await self._woken.wait()
+        self.clock.advance(seconds)
+
+    def wake(self) -> None:
+        self._woken.set()
+
+
+async def _settle() -> None:
+    """Let every task run until it waits."""
+    for _ in range(20):
+        await asyncio.sleep(0)
+
+
+async def test_run_polls_whenever_something_is_due_until_cancelled() -> None:
+    device = FakeDevice(REGISTERS)
+    clock = FakeClock()
+    sleeper = Sleeper(clock)
+    client = Client(device, MODEL, offline_after_intervals=OFFLINE_AFTER_INTERVALS, clock=clock, sleep=sleeper)
+    await client.connect()
+    client.subscribe(TEMP, Recorder())                                        # MEDIUM: 30 s
+    device.reads.clear()
+    device.answer("temp", 225)
+    running = asyncio.create_task(client.run())
+    await _settle()
+    assert sleeper.asked == [10.0] and device.reads == []                     # alarm_summary is FAST: 10 s
+    for _ in range(3):
+        sleeper.wake()
+        await _settle()
+    assert sleeper.asked == [10.0, 10.0, 10.0, 10.0]
+    assert [set(keys) for keys in device.reads] == [{"alarm_summary"}, {"alarm_summary"},
+                                                    {"alarm_summary", "counter", "temp"}]   # counter is a trigger
+    current = client.value(TEMP)
+    assert current is not None and current.value == 22.5
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+
+async def test_run_is_woken_by_what_makes_a_read_due_sooner() -> None:
+    device = FakeDevice(REGISTERS)
+    clock = FakeClock()
+    sleeper = Sleeper(clock)
+    client = Client(device, MODEL, offline_after_intervals=OFFLINE_AFTER_INTERVALS, clock=clock, sleep=sleeper)
+    await client.connect()
+    device.reads.clear()
+    running = asyncio.create_task(client.run())
+    await _settle()
+    assert sleeper.asked == [10.0]
+    await client.refresh(["fan_out"], after=2.0)
+    await _settle()
+    assert sleeper.asked == [10.0, 2.0]
+    sleeper.wake()
+    await _settle()
+    assert device.reads == [("fan_out",)] and sleeper.asked[-1] == 8.0
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+
+async def test_run_waits_while_the_client_is_not_connected() -> None:
+    device = FakeDevice(REGISTERS)
+    clock = FakeClock()
+    sleeper = Sleeper(clock)
+    client = Client(device, MODEL, offline_after_intervals=OFFLINE_AFTER_INTERVALS, clock=clock, sleep=sleeper)
+    running = asyncio.create_task(client.run())
+    await _settle()
+    assert sleeper.asked == [] and device.reads == []
+    await client.connect()
+    await _settle()
+    assert sleeper.asked == [10.0]
+    await client.disconnect()
+    clock.advance(3600)
+    device.reads.clear()
+    await _settle()
+    assert sleeper.asked == [10.0] and device.reads == []
+    await client.connect()
+    await _settle()
+    assert sleeper.asked == [10.0, 10.0]
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
