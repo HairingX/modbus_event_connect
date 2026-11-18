@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import Counter
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -37,9 +37,8 @@ class WriteQueue:
     one's outcome; a command is always sent. A pulse writes its idle value back after its time.
     """
 
-    def __init__(self, device: Device, *, clock: Clock, sleep: Callable[[float], Awaitable[None]],
-                 retry: Callable[[], Retry], statuses: StatusBoard, answered: Callable[[bool], None],
-                 written: Callable[[Point[Any], object], None]) -> None:
+    def __init__(self, device: Device, *, clock: Clock, retry: Callable[[], Retry], statuses: StatusBoard,
+                 answered: Callable[[bool], None], written: Callable[[Point[Any], object], None]) -> None:
         """Args:
             retry: when a write the device answered `BUSY` is sent again, counting its sendings
                 and the time since the first; asked for each write as it is sent.
@@ -50,7 +49,6 @@ class WriteQueue:
         """
         self._device = device
         self._clock = clock
-        self._sleep = sleep
         self._retry = retry
         self._statuses = statuses
         self._answered = answered
@@ -168,7 +166,7 @@ class WriteQueue:
             if delay is None:
                 return result
             _LOGGER.debug("'%s' was not taken %.1f s after it was first sent: %s", point.key, waited, result.detail)
-            await self._sleep(delay)
+            await self._clock.sleep(delay)
             if overtaken():
                 return None
 
@@ -177,7 +175,7 @@ class WriteQueue:
         assert pulse is not None
 
         async def back_to_idle() -> None:
-            await asyncio.sleep(pulse.after)
+            await self._clock.sleep(pulse.after)
             await self._enqueue(_Write(point, pulse.idle, returns_to_idle=True))
         task = asyncio.get_running_loop().create_task(back_to_idle())
         self._pulses.add(task)

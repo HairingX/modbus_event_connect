@@ -106,7 +106,7 @@ MODEL = modbus_model([
 
 def _device(gateway: SimulatedModbusGateway, unit_id: int, clock: FakeClock, *, reconnect: CircuitBreaker = NEVER_AGAIN,
             model: ModbusModel = MODEL) -> ModbusDevice:
-    return ModbusDevice(gateway, unit_id=unit_id, clock=clock, sleep=_no_wait, reconnect=reconnect, models=[model],
+    return ModbusDevice(gateway, unit_id=unit_id, clock=clock, reconnect=reconnect, models=[model],
                         timeout_margin=TIMEOUT_MARGIN)
 
 
@@ -132,19 +132,14 @@ def _unit() -> SimulatedModbusDevice:
     )
 
 
-async def _no_wait(seconds: float) -> None:
-    return None
-
-
 def _stack(units: dict[int, SimulatedModbusDevice] | None = None, *, unit_id: int = 1, read_only: bool = False,
            delay: float = 0.0, write_retry: Retry = NO_RETRY,
            reconnect: CircuitBreaker = NEVER_AGAIN) -> tuple[Client, SimulatedModbusGateway, FakeClock, ModbusDevice]:
     gateway = SimulatedModbusGateway(units if units is not None else {1: _unit()}, delay=delay)
-    clock = FakeClock()
+    clock = FakeClock(autojump=True)
     model = MODEL if write_retry is NO_RETRY else replace(MODEL, write_retry=write_retry)
     device = _device(gateway, unit_id, clock, reconnect=reconnect, model=model)
-    client = Client(device, model, offline_after_intervals=OFFLINE_AFTER_INTERVALS, clock=clock, read_only=read_only,
-                    sleep=_no_wait)
+    client = Client(device, model, offline_after_intervals=OFFLINE_AFTER_INTERVALS, clock=clock, read_only=read_only)
     return client, gateway, clock, device
 
 
@@ -545,10 +540,10 @@ def test_writes_land_in_order_even_when_the_device_is_busy() -> None:
 def test_after_an_outage_of_15_s_a_value_read_every_10_s_is_back_20_s_after_it_began() -> None:
     """A device's own breaker decides when it is asked again; nothing on top of it may delay that."""
     gateway = SimulatedModbusGateway({1: _unit()})
-    clock = FakeClock()
+    clock = FakeClock(autojump=True)
     every_10_s = replace(MODEL, poll_intervals={**MODEL.poll_intervals, PollRate.MEDIUM: 10.0})
     client = Client(_device(gateway, 1, clock, model=every_10_s), every_10_s,
-                    offline_after_intervals=OFFLINE_AFTER_INTERVALS, clock=clock, sleep=_no_wait)
+                    offline_after_intervals=OFFLINE_AFTER_INTERVALS, clock=clock)
     asyncio.run(client.connect())
     client.subscribe(TEMP, _nothing)
     gateway.link_down = True

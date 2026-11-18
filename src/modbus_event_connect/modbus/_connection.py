@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import inspect
 import math
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import Any, Protocol, runtime_checkable
@@ -124,7 +123,7 @@ class ModbusTcpConnection:
     """
 
     def __init__(self, host: str, port: int = PORT, *, connect_timeout: float, frame_gap: float,
-                 clock: Clock | None = None, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
+                 clock: Clock | None = None) -> None:
         """Args:
             connect_timeout: seconds to wait for the link to open. How long an answer is waited
                 for is each request's; a lost answer is reported, not retried.
@@ -139,7 +138,6 @@ class ModbusTcpConnection:
         self._frame_gap = frame_gap
         self._client: Any = None
         self._clock: Clock = clock if clock is not None else SystemClock()
-        self._sleep = sleep
         self._lock = asyncio.Lock()
         self._last_answer_at: float | None = None
         self._unit_keyword: str | None = None
@@ -200,7 +198,7 @@ class ModbusTcpConnection:
             return
         wait = self._last_answer_at + self._frame_gap - self._clock.monotonic()
         if wait > 0:
-            await self._sleep(wait)
+            await self._clock.sleep(wait)
 
     def _unit_kwargs(self, unit: int) -> dict[str, int]:
         """The keyword carrying the unit id: `device_id` or `slave`, whichever pymodbus accepts."""

@@ -72,16 +72,13 @@ class LaggingDevice:
 
 def _measure(lag: float, *, applies: bool = True, read_only: bool = False,
              delays: Sequence[float] = (1, 2, 3, 4)) -> tuple[ReadBackMeasurement, LaggingDevice]:
-    clock = FakeClock()
+    clock = FakeClock(autojump=True)
     device = LaggingDevice(clock, lag, applies=applies)
     client = Client(device, MODEL, clock=clock, read_only=read_only, offline_after_intervals=OFFLINE_AFTER_INTERVALS)
 
-    async def sleep(seconds: float) -> None:
-        clock.advance(seconds)
-
     async def run() -> ReadBackMeasurement:
         await client.connect()
-        return await measure_read_back(client, SETTING.key, (10, 20), delays=delays, repeats=3, sleep=sleep)
+        return await measure_read_back(client, SETTING.key, (10, 20), delays=delays, repeats=3, clock=clock)
     return asyncio.run(run()), device
 
 

@@ -75,6 +75,8 @@ class FakeDevice:
         self.busy_writes: dict[str, int] = {}
         """How many of the next writes to a key are answered BUSY."""
         self.write_raises: set[str] = set()
+        self.read_raises = 0
+        """How many of the next reads raise."""
         self.used: list[Model] = []
         self.connected = False
         self.delay = 0.0
@@ -95,6 +97,9 @@ class FakeDevice:
         if self.delay:
             await asyncio.sleep(self.delay)
         self.reads.append(tuple(p.key for p in points))
+        if self.read_raises > 0:
+            self.read_raises -= 1
+            raise RuntimeError("the transport broke")
         missing = ReadResult(Outcome.MISSING, exception_code=2)
         return {p.key: self.answers.get(p.key, missing) for p in points}
 
@@ -195,13 +200,8 @@ def _client(registers: Mapping[str, tuple[int, ...]] | None = None, *, read_only
             write_retry: Retry = NO_RETRY) -> tuple[Client, FakeDevice, FakeClock]:
     model = MODEL if write_retry is NO_RETRY else replace(MODEL, write_retry=write_retry)
     device = FakeDevice(REGISTERS if registers is None else registers)
-    clock = FakeClock()
-
-    async def sleep(seconds: float) -> None:
-        clock.advance(seconds)
-        await asyncio.sleep(0)
-    return (Client(device, model, offline_after_intervals=OFFLINE_AFTER_INTERVALS, clock=clock, read_only=read_only,
-                   sleep=sleep),
+    clock = FakeClock(autojump=True)
+    return (Client(device, model, offline_after_intervals=OFFLINE_AFTER_INTERVALS, clock=clock, read_only=read_only),
             device, clock)
 
 
@@ -1139,6 +1139,19 @@ def test_a_pulse_returns_to_idle_by_itself() -> None:
     assert [(key, value.registers) for key, value in device.writes] == [("bell", (1,)), ("bell", (0,))]
 
 
+async def test_a_pulse_waits_on_the_clients_clock() -> None:
+    device = FakeDevice(REGISTERS)
+    clock = FakeClock()
+    client = Client(device, MODEL, offline_after_intervals=OFFLINE_AFTER_INTERVALS, clock=clock)
+    await client.connect()
+    await client.write(BELL, True)
+    await asyncio.sleep(0.05)
+    assert [value.registers for _, value in device.writes] == [(1,)]
+    clock.advance(0.01)
+    await _settle()
+    assert [value.registers for _, value in device.writes] == [(1,), (0,)]
+
+
 def test_disconnect_cancels_a_pending_pulse() -> None:
     client, device, _ = _connected()
 
@@ -1443,33 +1456,13 @@ def test_a_device_is_given_at_least_one_missed_read() -> None:
 def test_a_busy_write_is_sent_again_as_the_chosen_model_says() -> None:
     patient = replace(MODEL, write_retry=Retry(Fixed(1.0), Attempts(3)))
     device = FakeDevice(REGISTERS, models=[patient])
-    clock = FakeClock()
-
-    async def sleep(seconds: float) -> None:
-        clock.advance(seconds)
-    client = Client(device, patient, offline_after_intervals=OFFLINE_AFTER_INTERVALS, clock=clock, sleep=sleep)
+    clock = FakeClock(autojump=True)
+    client = Client(device, patient, offline_after_intervals=OFFLINE_AFTER_INTERVALS, clock=clock)
     asyncio.run(client.connect())
     device.busy_writes["mode"] = 5
     assert asyncio.run(client.write(MODE, 2)) is False
     assert [key for key, _ in device.writes] == ["mode"] * 3
-
-
-class Sleeper:
-    """A `sleep` that waits until the test lets it end, moving the clock by what it was asked."""
-
-    def __init__(self, clock: FakeClock) -> None:
-        self.clock = clock
-        self.asked: list[float] = []
-        self._woken = asyncio.Event()
-
-    async def __call__(self, seconds: float) -> None:
-        self.asked.append(seconds)
-        self._woken.clear()
-        await self._woken.wait()
-        self.clock.advance(seconds)
-
-    def wake(self) -> None:
-        self._woken.set()
+    assert clock.sleeps == [1.0, 1.0]
 
 
 async def _settle() -> None:
@@ -1478,71 +1471,102 @@ async def _settle() -> None:
         await asyncio.sleep(0)
 
 
+async def _cancel(running: asyncio.Task[Any]) -> None:
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+
 async def test_run_polls_whenever_something_is_due_until_cancelled() -> None:
     device = FakeDevice(REGISTERS)
     clock = FakeClock()
-    sleeper = Sleeper(clock)
-    client = Client(device, MODEL, offline_after_intervals=OFFLINE_AFTER_INTERVALS, clock=clock, sleep=sleeper)
+    client = Client(device, MODEL, offline_after_intervals=OFFLINE_AFTER_INTERVALS, clock=clock)
     await client.connect()
     client.subscribe(TEMP, Recorder())                                        # MEDIUM: 30 s
     device.reads.clear()
     device.answer("temp", 225)
     running = asyncio.create_task(client.run())
     await _settle()
-    assert sleeper.asked == [10.0] and device.reads == []                     # alarm_summary is FAST: 10 s
-    for _ in range(3):
-        sleeper.wake()
+    assert clock.sleeps == [10.0] and device.reads == []                      # alarm_summary is FAST: 10 s
+    clock.advance(9.9)
+    await _settle()
+    assert device.reads == []
+    clock.advance(0.1)
+    await _settle()
+    for _ in range(2):
+        clock.advance(10.0)
         await _settle()
-    assert sleeper.asked == [10.0, 10.0, 10.0, 10.0]
+    assert clock.sleeps == [10.0, 10.0, 10.0, 10.0]
     assert [set(keys) for keys in device.reads] == [{"alarm_summary"}, {"alarm_summary"},
                                                     {"alarm_summary", "counter", "temp"}]   # counter is a trigger
     current = client.value(TEMP)
     assert current is not None and current.value == 22.5
-    running.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await running
+    await _cancel(running)
 
 
 async def test_run_is_woken_by_what_makes_a_read_due_sooner() -> None:
     device = FakeDevice(REGISTERS)
     clock = FakeClock()
-    sleeper = Sleeper(clock)
-    client = Client(device, MODEL, offline_after_intervals=OFFLINE_AFTER_INTERVALS, clock=clock, sleep=sleeper)
+    client = Client(device, MODEL, offline_after_intervals=OFFLINE_AFTER_INTERVALS, clock=clock)
     await client.connect()
     device.reads.clear()
     running = asyncio.create_task(client.run())
     await _settle()
-    assert sleeper.asked == [10.0]
+    assert clock.sleeps == [10.0]
     await client.refresh(["fan_out"], after=2.0)
     await _settle()
-    assert sleeper.asked == [10.0, 2.0]
-    sleeper.wake()
+    assert clock.sleeps == [10.0, 2.0]
+    clock.advance(2.0)
     await _settle()
-    assert device.reads == [("fan_out",)] and sleeper.asked[-1] == 8.0
-    running.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await running
+    assert device.reads == [("fan_out",)] and clock.sleeps[-1] == 8.0
+    await _cancel(running)
 
 
 async def test_run_waits_while_the_client_is_not_connected() -> None:
     device = FakeDevice(REGISTERS)
     clock = FakeClock()
-    sleeper = Sleeper(clock)
-    client = Client(device, MODEL, offline_after_intervals=OFFLINE_AFTER_INTERVALS, clock=clock, sleep=sleeper)
+    client = Client(device, MODEL, offline_after_intervals=OFFLINE_AFTER_INTERVALS, clock=clock)
     running = asyncio.create_task(client.run())
     await _settle()
-    assert sleeper.asked == [] and device.reads == []
+    assert clock.sleeps == [] and device.reads == []
     await client.connect()
     await _settle()
-    assert sleeper.asked == [10.0]
+    assert clock.sleeps == [10.0]
     await client.disconnect()
     clock.advance(3600)
     device.reads.clear()
     await _settle()
-    assert sleeper.asked == [10.0] and device.reads == []
+    assert clock.sleeps == [10.0] and device.reads == []
     await client.connect()
     await _settle()
-    assert sleeper.asked == [10.0, 10.0]
-    running.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await running
+    assert clock.sleeps == [10.0, 10.0]
+    device.reads.clear()
+    clock.advance(10.0)
+    await _settle()
+    assert device.reads == [("alarm_summary",)]
+    await _cancel(running)
+
+
+async def test_run_logs_a_failing_poll_once_and_polls_on_after_a_pause(caplog: pytest.LogCaptureFixture) -> None:
+    device = FakeDevice(REGISTERS)
+    clock = FakeClock()
+    client = Client(device, MODEL, offline_after_intervals=OFFLINE_AFTER_INTERVALS, clock=clock)
+    await client.connect()
+    device.reads.clear()
+    device.read_raises = 3
+    with caplog.at_level(logging.DEBUG, logger="modbus_event_connect"):
+        running = asyncio.create_task(client.run())
+        await _settle()
+        for _ in range(3):
+            clock.advance(clock.sleeps[-1])
+            await _settle()
+        assert clock.sleeps == [10.0, 1.0, 1.0, 1.0]
+        assert len(device.reads) == 3
+        clock.advance(1.0)
+        await _settle()
+        await _cancel(running)
+    assert len(device.reads) == 4 and clock.sleeps[-1] == 10.0
+    failures = [r for r in caplog.records if "could not be polled" in r.getMessage()]
+    assert [(r.levelno, r.exc_info is not None) for r in failures] == [
+        (logging.ERROR, True), (logging.DEBUG, False), (logging.DEBUG, False)]
+    assert [r.levelno for r in caplog.records if "is polled again" in r.getMessage()] == [logging.INFO]

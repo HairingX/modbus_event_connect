@@ -1,11 +1,10 @@
 """Measuring how long a device takes before a read shows what was written to it."""
 from __future__ import annotations
 
-import asyncio
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 
-from event_connect import Key, Quality
+from event_connect import Clock, Key, Quality, SystemClock
 
 from .._client import Client
 from .._conversion import encode
@@ -47,8 +46,10 @@ class ReadBackMeasurement:
 
 async def measure_read_back[T](client: Client, key: Key[T], values: tuple[T, T], *,
                             delays: Sequence[float], repeats: int,
-                            sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> ReadBackMeasurement:
+                            clock: Clock | None = None) -> ReadBackMeasurement:
     """Write to `key` and count, for each delay, how often a read that long after shows the value.
+
+    It waits on `clock`, the system's by default; give the client's own where it has another.
 
     This writes to the device: choose a point you may change, and two values it may take. Each
     write starts from the other value, written and given the longest delay to show first, so a
@@ -76,6 +77,7 @@ async def measure_read_back[T](client: Client, key: Key[T], values: tuple[T, T],
     for value in (*values, restore):
         encode(client.points[key], value)
     longest = max(delays)
+    waits = clock if clock is not None else SystemClock()
 
     async def shows(value: T) -> bool:
         await client.refresh([key])
@@ -90,11 +92,11 @@ async def measure_read_back[T](client: Client, key: Key[T], values: tuple[T, T],
                 start, target = values if attempt % 2 == 0 else (values[1], values[0])
                 if not await client.write(key, start):
                     continue
-                await sleep(longest)
+                await waits.sleep(longest)
                 if not await shows(start) or not await client.write(key, target):
                     continue
                 written += 1
-                await sleep(delay)
+                await waits.sleep(delay)
                 if await shows(target):
                     seen += 1
             trials.append(ReadBackTrial(delay, written, seen))

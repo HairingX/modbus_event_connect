@@ -85,9 +85,12 @@ async def main():
 asyncio.run(main())
 ```
 
-**`run()` reads whatever is due, whenever it is due**, until it is cancelled, and is woken when a
-subscription, a refresh or a write makes something due sooner. While the client is not
-connected - before `connect()`, or after `disconnect()` - it waits until it is.
+**`run()` reads whatever is due, whenever it is due**, until it is cancelled - it never ends by
+itself - and is woken when a subscription, a refresh or a write makes something due sooner. While
+the client is not connected - before `connect()`, or after `disconnect()` - it waits until it is.
+A poll that raises is logged, the first of a run of failures as an error with its traceback, and
+polling goes on after a pause. It waits on the client's clock, as every pause the client makes
+does: a test that gives the client a `FakeClock` moves it on with `clock.advance()`.
 
 A program with its own loop calls `poll()` instead, which reads the points that are due. A call
 when nothing is due returns at once without contacting the device; `seconds_until_next_poll()`

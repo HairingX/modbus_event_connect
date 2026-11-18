@@ -1,5 +1,5 @@
 """The Modbus protocol layer: `ModbusDevice` against simulated units behind a simulated gateway,
-with a fake clock and a `sleep` that does not wait."""
+with a fake clock whose sleeps do not wait."""
 import asyncio
 import math
 from collections.abc import Callable
@@ -60,16 +60,6 @@ HOST = "modbus.invalid"
 # ================================================================================ helpers
 
 
-class Sleeps:
-    """An injected `sleep` that records what it was asked to wait, and does not wait."""
-
-    def __init__(self) -> None:
-        self.waits: list[float] = []
-
-    async def __call__(self, seconds: float) -> None:
-        self.waits.append(seconds)
-
-
 MODEL = modbus_model()
 BIT_WRITER = Point(Key("bit", bool), write=HoldingRegister(9), data_type=DataType.bit(0))
 """A point that writes one bit of a holding register, for a model that says how one is written."""
@@ -98,10 +88,8 @@ class Rig:
                  delay: float = 0.0, **device: Any) -> None:
         self.unit = unit
         self.gateway = SimulatedModbusGateway({unit_id: unit}, delay=delay)
-        self.clock = FakeClock()
-        self.sleeps = Sleeps()
-        self.device = used(modbus_device(self.gateway, unit_id, model=model, clock=self.clock,
-                                               sleep=self.sleeps, **device))
+        self.clock = FakeClock(autojump=True)
+        self.device = used(modbus_device(self.gateway, unit_id, model=model, clock=self.clock, **device))
 
     def sent(self) -> list[tuple[FunctionCode, int, int]]:
         """(function, address, count) of every request the unit received."""
@@ -365,7 +353,7 @@ async def test_asking_for_more_than_the_unit_accepts_is_an_error() -> None:
 async def test_a_unit_the_gateway_cannot_reach_has_not_answered() -> None:
     """0x0B is the gateway speaking for a silent device - NO_ANSWER, not OFFLINE."""
     gateway = SimulatedModbusGateway({1: SimulatedModbusDevice(holding_registers={0: 1})})
-    device = used(modbus_device(gateway, 9, clock=FakeClock(), sleep=Sleeps()))
+    device = used(modbus_device(gateway, 9, clock=FakeClock(autojump=True)))
     raw = (await device.read([u16("p", HoldingRegister(0))]))["p"]
     assert (raw.outcome, raw.exception_code) == (Outcome.NO_ANSWER, 0x0B)
 
@@ -373,7 +361,7 @@ async def test_a_unit_the_gateway_cannot_reach_has_not_answered() -> None:
 async def test_a_unit_the_gateway_cannot_reach_is_backed_off() -> None:
     """The gateway's bus timeout before saying 0x0B costs every other device on the bus that time."""
     gateway = SimulatedModbusGateway({1: SimulatedModbusDevice(holding_registers={0: 1})})
-    device = used(modbus_device(gateway, 9, clock=FakeClock(), sleep=Sleeps()))
+    device = used(modbus_device(gateway, 9, clock=FakeClock(autojump=True)))
     for _ in range(3):
         await device.read([u16("p", HoldingRegister(0))])
     assert device.diagnostics()["open"] is True
@@ -400,7 +388,7 @@ async def test_a_fault_on_one_address_fails_the_whole_batch_that_touches_it() ->
 async def test_busy_is_retried_with_a_growing_wait_until_it_succeeds() -> None:
     rig = Rig(SimulatedModbusDevice(holding_registers={0: 42}, busy_for=2))
     assert (await rig.device.read([u16("p", HoldingRegister(0))]))["p"] == ok(42)
-    assert rig.sleeps.waits == [0.2, 0.4]
+    assert rig.clock.sleeps == [0.2, 0.4]
     assert len(rig.unit.requests) == 3
 
 
@@ -409,7 +397,7 @@ async def test_busy_gives_up_after_its_retries() -> None:
               model=modbus_model(busy=Retry(Exponential(0.5, factor=2.0, max=None), Attempts(5))))
     raw = (await rig.device.read([u16("p", HoldingRegister(0))]))["p"]
     assert (raw.outcome, raw.exception_code) == (Outcome.BUSY, 0x06)
-    assert rig.sleeps.waits == [0.5, 1.0, 2.0, 4.0]
+    assert rig.clock.sleeps == [0.5, 1.0, 2.0, 4.0]
     assert len(rig.unit.requests) == 5
     assert "after 4 busy retries" in raw.detail
 
@@ -419,35 +407,35 @@ async def test_a_write_answered_busy_is_busy_and_sent_once() -> None:
     point = Point(Key("s", int), write=HoldingRegister(0), data_type=DataType.UINT16)
     result = await rig.device.write(point, EncodedWrite((9,)))
     assert (result.outcome, result.exception_code) == (Outcome.BUSY, 0x06)
-    assert rig.unit.holding_registers[0] == 0 and rig.sleeps.waits == []
+    assert rig.unit.holding_registers[0] == 0 and rig.clock.sleeps == []
     assert len(rig.unit.requests) == 1
 
 
 async def test_without_busy_retries_busy_is_answered_at_once() -> None:
     rig = Rig(SimulatedModbusDevice(holding_registers={0: 42}, busy_for=1), model=modbus_model(busy=NO_RETRY))
     assert (await rig.device.read([u16("p", HoldingRegister(0))]))["p"].outcome is Outcome.BUSY
-    assert rig.sleeps.waits == []
+    assert rig.clock.sleeps == []
 
 
 async def test_a_model_states_how_its_unit_is_tried_again_when_busy() -> None:
     rig = Rig(SimulatedModbusDevice(holding_registers={0: 42}, busy_for=100),
               model=modbus_model(busy=Retry(Steps(1, 3), Attempts(3))))
     await rig.device.read([u16("p", HoldingRegister(0))])
-    assert rig.sleeps.waits == [1, 3]
+    assert rig.clock.sleeps == [1, 3]
 
 
 async def test_each_model_is_tried_again_when_busy_as_it_says() -> None:
     patient = modbus_model(name="Patient", busy=Retry(Fixed(1), Attempts(3)))
     hasty = modbus_model(name="Hasty", busy=NO_RETRY)
     unit = SimulatedModbusDevice(holding_registers={0: 42}, busy_for=100)
-    sleeps = Sleeps()
+    clock = FakeClock(autojump=True)
     device = ModbusDevice(SimulatedModbusGateway({1: unit}), 1, reconnect=NEVER_AGAIN, timeout_margin=TIMEOUT_MARGIN,
-                          clock=FakeClock(), sleep=sleeps, models=[patient, hasty])
+                          clock=clock, models=[patient, hasty])
     device.use(hasty)
     await device.read([u16("p", HoldingRegister(0))])
     device.use(patient)
     await device.read([u16("p", HoldingRegister(0))])
-    assert sleeps.waits == [1, 1]
+    assert clock.sleeps == [1, 1]
 
 
 # ================================================================================ writing
@@ -885,9 +873,9 @@ def two_devices(delay: float = 0.0) -> tuple[SimulatedModbusGateway, ModbusDevic
     one = SimulatedModbusDevice(holding_registers={0: 111, 1: 112})
     two = SimulatedModbusDevice(holding_registers={0: 221, 1: 222})
     gateway = SimulatedModbusGateway({1: one, 2: two}, delay=delay)
-    clock = FakeClock()
-    return (gateway, used(modbus_device(gateway, 1, clock=clock, sleep=Sleeps())),
-            used(modbus_device(gateway, 2, clock=clock, sleep=Sleeps())), one, two)
+    clock = FakeClock(autojump=True)
+    return (gateway, used(modbus_device(gateway, 1, clock=clock)),
+            used(modbus_device(gateway, 2, clock=clock)), one, two)
 
 
 async def test_each_device_reaches_its_own_unit() -> None:
@@ -945,15 +933,13 @@ async def test_connect_reports_an_unreachable_link_as_none() -> None:
 
 def test_tcp_owns_a_pymodbus_connection_and_passes_it_the_link_settings() -> None:
     clock = FakeClock()
-    sleeps = Sleeps()
     device = ModbusDevice.tcp(HOST, port=1502, unit_id=4, reconnect=NEVER_AGAIN, models=[MODEL], timeout_margin=1.0,
-                              connect_timeout=1.5, frame_gap=0.02, clock=clock, sleep=sleeps)
+                              connect_timeout=1.5, frame_gap=0.02, clock=clock)
     connection = device._connection
     assert isinstance(connection, ModbusTcpConnection) and device._owns_connection
-    assert (connection._port, connection._connect_timeout, connection._frame_gap, connection._clock,
-            connection._sleep) == (1502, 1.5, 0.02, clock, sleeps)
-    assert (device.unit_id, device._clock, device._sleep, device.reconnect, device.models) == (
-        4, clock, sleeps, NEVER_AGAIN, (MODEL,))
+    assert (connection._port, connection._connect_timeout, connection._frame_gap, connection._clock) == (
+        1502, 1.5, 0.02, clock)
+    assert (device.unit_id, device._clock, device.reconnect, device.models) == (4, clock, NEVER_AGAIN, (MODEL,))
     assert device.timeout == MODEL.answers_within + 1.0
     assert connection._client is None                              # nothing opened yet
 
@@ -989,9 +975,9 @@ class Timed:
 
 
 async def test_diagnostics_count_what_happened_and_hold_no_host() -> None:
-    clock = FakeClock()
+    clock = FakeClock(autojump=True)
     unit = SimulatedModbusDevice(holding_registers={0: 1}, busy_for=1)
-    device = used(modbus_device(Timed(SimulatedModbusGateway({1: unit}), clock, 0.05), 1, clock=clock, sleep=Sleeps()))
+    device = used(modbus_device(Timed(SimulatedModbusGateway({1: unit}), clock, 0.05), 1, clock=clock))
     await device.read([u16("a", HoldingRegister(0))])                       # busy, then OK
     await device.read([u16("b", HoldingRegister(5))])                       # missing
     d = device.diagnostics()
@@ -1030,7 +1016,7 @@ async def test_nothing_a_device_reports_names_its_host(monkeypatch: pytest.Monke
     monkeypatch.setattr(pymodbus.client, "AsyncModbusTcpClient", making(LeakyClient()))
     device = used(ModbusDevice.tcp(HOST, port=1502, unit_id=1, reconnect=NEVER_AGAIN, models=[MODEL],
                                    timeout_margin=TIMEOUT_MARGIN, connect_timeout=CONNECT_TIMEOUT, frame_gap=FRAME_GAP,
-                                   clock=FakeClock(), sleep=Sleeps()))
+                                   clock=FakeClock(autojump=True)))
     raw = (await device.read([u16("a", HoldingRegister(0))]))["a"]
     write = await device.write(setting(HoldingRegister(0)), EncodedWrite((1,)))
     assert raw.outcome is Outcome.NO_ANSWER and write.outcome is Outcome.NO_ANSWER
@@ -1059,12 +1045,12 @@ class SilentClient:
 
 async def test_a_silent_device_is_reconnected_to_only_until_the_breaker_opens_and_once_per_probe(
         monkeypatch: pytest.MonkeyPatch) -> None:
-    clock = FakeClock()
+    clock = FakeClock(autojump=True)
     client = SilentClient()
     monkeypatch.setattr(pymodbus.client, "AsyncModbusTcpClient", making(client))
     device = used(ModbusDevice.tcp(HOST, unit_id=1, reconnect=CircuitBreaker(after=3, retry=Retry(Fixed(60.0), None)),
                                    models=[MODEL], timeout_margin=TIMEOUT_MARGIN, connect_timeout=CONNECT_TIMEOUT,
-                                   frame_gap=FRAME_GAP, clock=clock, sleep=Sleeps()))
+                                   frame_gap=FRAME_GAP, clock=clock))
     for _ in range(10):
         await device.read([u16("a", HoldingRegister(0))])
     assert client.connects == 3

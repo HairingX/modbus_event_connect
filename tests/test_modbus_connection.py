@@ -298,14 +298,9 @@ async def test_concurrent_callers_are_sent_one_at_a_time() -> None:
 
 
 async def test_the_frame_gap_is_kept_after_each_answer() -> None:
-    clock = FakeClock()
-    waits: list[float] = []
-
-    async def sleep(seconds: float) -> None:
-        waits.append(seconds)
-        clock.advance(seconds)
-
-    conn = on(FakeClient(), frame_gap=0.05, clock=clock, sleep=sleep)
+    clock = FakeClock(autojump=True)
+    waits = clock.sleeps
+    conn = on(FakeClient(), frame_gap=0.05, clock=clock)
     await conn.request(holding(1), timeout=TIMEOUT)
     assert waits == []                            # nothing before the first request
     await conn.request(holding(1), timeout=TIMEOUT)
@@ -319,15 +314,11 @@ async def test_the_frame_gap_is_kept_after_each_answer() -> None:
 
 
 async def test_no_frame_gap_means_no_waiting() -> None:
-    waits: list[float] = []
-
-    async def sleep(seconds: float) -> None:
-        waits.append(seconds)
-
-    conn = on(FakeClient(), clock=FakeClock(), sleep=sleep)
+    clock = FakeClock(autojump=True)
+    conn = on(FakeClient(), clock=clock)
     for _ in range(3):
         await conn.request(holding(1), timeout=TIMEOUT)
-    assert waits == []
+    assert clock.sleeps == []
 
 
 # ======================================================================= opening, lazily

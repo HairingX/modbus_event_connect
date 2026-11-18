@@ -54,6 +54,10 @@ _LOGGER = logging.getLogger(__name__)
 
 _UNANSWERED = frozenset({Outcome.NO_ANSWER, Outcome.BUSY})
 
+_PAUSE_AFTER_FAILURE = 1.0  # guess
+"""Seconds `run()` waits after a poll that raised, so that a failure that repeats is not retried
+without a pause."""
+
 _DEFINITIVE = frozenset({Outcome.OK, Outcome.MISSING, Outcome.UNSUPPORTED, Outcome.OFFLINE})
 """Answers that say what the unit has. Any other leaves a check's outcome unknown."""
 
@@ -101,8 +105,7 @@ class Client:
     """
 
     def __init__(self, device: Device, model: Model | ModelSelector, *, offline_after_intervals: int,
-                 read_only: bool = False, clock: Clock | None = None,
-                 sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
+                 read_only: bool = False, clock: Clock | None = None) -> None:
         """Args:
             offline_after_intervals: how many reads of the chosen model's fastest poll rate the
                 device may leave unanswered before `Status.CONNECTED` turns False.
@@ -115,7 +118,6 @@ class Client:
         known = (model,) if isinstance(model, Model) else tuple(device.models)
         self._known_keys: frozenset[str] = frozenset().union(*(known_model.keys for known_model in known))
         self._clock: Clock = clock or SystemClock()
-        self._sleep = sleep
         self._read_only = read_only
         self._offline_after_intervals = offline_after_intervals
         self._connected = False
@@ -146,7 +148,7 @@ class Client:
         self._statuses = StatusBoard(self._clock)
 
         self._passes = Passes()
-        self._writes = WriteQueue(device, clock=self._clock, sleep=sleep,
+        self._writes = WriteQueue(device, clock=self._clock,
                                   retry=lambda: self._require_model().model.write_retry,
                                   statuses=self._statuses, answered=self._update_reachability,
                                   written=self._taken)
@@ -548,25 +550,40 @@ class Client:
     # ============================================================================= reading
 
     async def run(self) -> NoReturn:
-        """
-        Poll whenever something is due, until cancelled. While the client is not connected - before
-        `connect()`, or after `disconnect()` - it waits until it is.
+        """Poll whenever something is due, until cancelled; it never ends by itself.
 
-        Raises:
-            UnsupportedDeviceError: the unit changed, and no model matches it any more.
+        While the client is not connected - before `connect()`, or after `disconnect()` - it
+        waits until it is. A poll that raises is logged, and polling goes on after a pause: the
+        first failure in a row at error level with its traceback, the ones after it at debug
+        level, and the first poll that succeeds after them at info level.
         """
+        failing = False
         while True:
             if self._connected:
-                await self.poll()
-            # Cleared only now: whatever the pass scheduled, the wait below is planned with.
+                try:
+                    await self.poll()
+                except Exception as error:
+                    if failing:
+                        _LOGGER.debug("%s could not be polled: %r", self._reachability.name, error)
+                    else:
+                        _LOGGER.exception("%s could not be polled; polling goes on", self._reachability.name)
+                    failing = True
+                else:
+                    if failing:
+                        _LOGGER.info("%s is polled again", self._reachability.name)
+                    failing = False
+            # Cleared only now: whatever the poll scheduled, the wait below is planned with.
             self._wake.clear()
-            await self._doze(self.seconds_until_next_poll() if self._connected else None)
+            if not self._connected:
+                await self._doze(None)
+            else:
+                await self._doze(_PAUSE_AFTER_FAILURE if failing else self.seconds_until_next_poll())
 
     async def _doze(self, seconds: float | None) -> None:
         """Wait `seconds`, or until woken; None waits until woken."""
         waits: set[asyncio.Future[Any]] = {asyncio.ensure_future(self._wake.wait())}
         if seconds is not None:
-            waits.add(asyncio.ensure_future(self._sleep(seconds)))
+            waits.add(asyncio.ensure_future(self._clock.sleep(seconds)))
         try:
             await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
         finally:

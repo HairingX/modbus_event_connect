@@ -6,7 +6,7 @@ import asyncio
 import logging
 import math
 from collections import Counter
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -96,7 +96,7 @@ class ModbusDevice:
 
     def __init__(self, connection: ModbusConnection, unit_id: int, *, reconnect: CircuitBreaker,
                  models: Sequence[ModbusModel], timeout_margin: float, owns_connection: bool = False,
-                 clock: Clock | None = None, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
+                 clock: Clock | None = None) -> None:
         """Args:
             reconnect: when the device is no longer asked, after requests in a row went
                 unanswered, and when it is asked again, which also reopens a closed connection;
@@ -118,7 +118,6 @@ class ModbusDevice:
         self._unit = unit_id
         self._owns_connection = owns_connection
         self._clock: Clock = clock if clock is not None else SystemClock()
-        self._sleep = sleep
         self._reconnect = reconnect
         self._timeout_margin = timeout_margin
         self._models = checked_models(models)
@@ -135,13 +134,13 @@ class ModbusDevice:
     @classmethod
     def tcp(cls, host: str, *, port: int = PORT, unit_id: int, reconnect: CircuitBreaker,
             models: Sequence[ModbusModel], timeout_margin: float, connect_timeout: float, frame_gap: float,
-            clock: Clock | None = None, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> ModbusDevice:
+            clock: Clock | None = None) -> ModbusDevice:
         """A device on a Modbus TCP connection of its own, which `disconnect()` closes;
-        `connect_timeout` and `frame_gap` are the connection's, `clock` and `sleep` both's."""
+        `connect_timeout` and `frame_gap` are the connection's, `clock` both's."""
         connection = ModbusTcpConnection(host, port, connect_timeout=connect_timeout, frame_gap=frame_gap,
-                                         clock=clock, sleep=sleep)
+                                         clock=clock)
         return cls(connection, unit_id, reconnect=reconnect, models=models, timeout_margin=timeout_margin,
-                   owns_connection=True, clock=clock, sleep=sleep)
+                   owns_connection=True, clock=clock)
 
     # ---------------------------------------------------------------- Device
 
@@ -352,7 +351,7 @@ class ModbusDevice:
             if delay is None:
                 break
             self._busy_repeats += 1
-            await self._sleep(delay)
+            await self._clock.sleep(delay)
         outcome = _outcome(response)
         self._outcomes[outcome] += 1
         return _Answer(outcome, response, _describe(request, response, outcome, tries - 1))
