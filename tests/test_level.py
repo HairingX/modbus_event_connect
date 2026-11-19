@@ -17,6 +17,7 @@ from modbus_event_connect import (
     Client,
     DataType,
     Key,
+    Labels,
     Level,
     ModelError,
     Point,
@@ -105,7 +106,7 @@ def test_at_the_test_level_a_candidate_takes_the_place_of_the_point_it_replaces(
     resolved = resolve(WITH_CANDIDATES, {}, Level.TEST)
     assert list(resolved.used) == ["seen", "stated", "guess", "coil", "preheat", "min_air"]
     assert resolved.points["preheat"].read == HoldingRegister(16)
-    assert resolved.left_out == {}
+    assert dict(resolved.left_out) == {"reheat": "replaced by the candidate 'coil' at the test level"}
 
 
 def test_a_level_leaves_out_the_points_of_a_certainty_it_does_not_admit_with_the_reason() -> None:
@@ -150,12 +151,34 @@ def test_a_candidate_with_the_key_of_a_point_it_does_not_replace_is_a_duplicate_
      "identity point 'seen' is a candidate, but identity points are read at every level"),
     ([Section([_point(SEEN, 1), _point(Key("seen", float), 2, candidate=Candidate(replaces=SEEN))])], [],
      "'seen': the candidate replaces its own key, but holds a float where the point it replaces holds another type"),
-], ids=["unknown key", "another candidate", "an identity point", "identity candidate", "another type"])
+    ([Section([_point(SEEN, 1), _point(STATED, 2, candidate=Candidate(replaces=SEEN)),
+               _point(GUESS, 3, candidate=Candidate(replaces=SEEN))])], [],
+     "'seen' is replaced by more than one candidate: 'stated', 'guess'"),
+    ([Section([_point(SEEN, 1), _point(SEEN, 2, candidate=Candidate(replaces=SEEN)),
+               _point(STATED, 3, candidate=Candidate(replaces=SEEN))])], [],
+     "'seen' is replaced by more than one candidate: 'seen', 'stated'"),
+    ([Section([_point(SEEN, 1, write=HoldingRegister(1), on_write=Refresh(["stated"])), _point(STATED, 2),
+               _point(GUESS, 3, candidate=Candidate(replaces=STATED))])], [],
+     "'seen': on_write names 'stated', which a candidate of another key replaces; name it by labels"),
+    ([Section([_point(SEEN, 1, on_change=Refresh(["stated"])), _point(STATED, 2),
+               _point(GUESS, 3, candidate=Candidate(replaces=STATED))])], [],
+     "'seen': on_change names 'stated', which a candidate of another key replaces; name it by labels"),
+], ids=["unknown key", "another candidate", "an identity point", "identity candidate", "another type",
+        "two candidates", "two candidates, one of its own key", "on_write", "on_change"])
 def test_a_model_refuses_a_candidate_that_replaces_nothing_it_may_replace(
         sections: Sequence[Section], identity_points: Sequence[Point[Any]], problem: str) -> None:
     with pytest.raises(ModelError) as raised:
         modbus_model(sections, identity_points=identity_points)
     assert problem in str(raised.value)
+
+
+def test_a_refresh_may_name_a_point_a_candidate_of_its_own_key_replaces_or_one_by_labels() -> None:
+    model = modbus_model([Section([
+        _point(SEEN, 1, write=HoldingRegister(1), on_write=Refresh(["stated"]), on_change=Refresh(Labels(group=1))),
+        _point(STATED, 2, labels={"group": 1}), _point(GUESS, 3, labels={"group": 1}),
+        _point(STATED, 4, candidate=Candidate(replaces=STATED)),
+        _point(MIN_AIR, 5, candidate=Candidate(replaces=GUESS), labels={"group": 1})])])
+    assert all(problems(model, {}, level) == [] for level in Level)
 
 
 def test_a_candidate_may_replace_a_point_of_its_own_key_and_type_declared_after_it() -> None:
@@ -253,6 +276,18 @@ def test_a_scan_reads_a_point_the_level_leaves_out_and_what_it_finds_missing_of_
     assert "stated" in _read(device)
     assert client.unavailable_reasons == unavailable
     assert not client.has(GUESS)
+
+
+SCANNED_AND_REPLACED = modbus_model(
+    [Section([_point(STATED, 2), _point(GUESS, 3), _point(MIN_AIR, 22, candidate=Candidate(replaces=STATED))])],
+    name="SCANNED_AND_REPLACED", scan_steps=[_guess_absent_without_stated], scan_check=PollRate.RARE)
+
+
+def test_a_scan_reads_a_point_a_candidate_of_another_key_replaces_at_the_test_level() -> None:
+    client, device, _ = _connected(Level.TEST, SCANNED_AND_REPLACED, {**REGISTERS, "stated": (0,)})
+    assert "stated" in _read(device)
+    assert client.unavailable_reasons == {"guess": "no guess without a statement"}
+    assert not client.has(STATED) and client.has(MIN_AIR)
 
 
 def test_a_value_the_level_leaves_out_in_the_model_chosen_afresh_is_dropped() -> None:

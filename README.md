@@ -343,8 +343,10 @@ points it admits:
 A candidate is the model's next guess at a point, for testers to confirm: a point declared with
 `candidate=Candidate()`, or `Candidate(replaces=KEY)` to take the place of the point of that
 key. Below `Level.TEST` it does not exist, and the point it replaces is used as before; at
-`Level.TEST` that point is gone. A candidate that replaces a point of its own key reads the same
-key from another place, so an application that stores the key keeps it.
+`Level.TEST` that point is left out. A candidate that replaces a point of its own key reads the
+same key from another place, so an application that stores the key keeps it. One point is
+replaced by one candidate at most, and a refresh names a point a candidate of another key
+replaces by labels, not by its key, which reads nothing at `Level.TEST`.
 
 A point the level leaves out is not in `client.points`, is never read on its schedule, cannot be
 subscribed to or written, and is not among `client.unavailable_reasons`. The model's scans still
@@ -468,8 +470,9 @@ A model checks itself when it is made, and raises `ModelError` naming every prob
 its readable points use with no interval, an interval of a rate nothing is read at, a
 `scan_check` missing where it scans or given where it does not, a `bit_write` missing where a
 point writes one bit of a holding register or given where none does, a candidate that replaces
-a key no other point of its sections has, or its own key with another type, an identity point
-that is a candidate, and a count or a time its protocol cannot have.
+a key no other point of its sections has, or its own key with another type, two candidates
+replacing one point, a refresh naming by key a point a candidate of another key replaces, an
+identity point that is a candidate, and a count or a time its protocol cannot have.
 
 A point read on a unit says `certainty=Certainty.VERIFIED`, with the record of it on the line
 above; one worked out rather than stated says `Certainty.INFERRED`. A candidate goes in the same

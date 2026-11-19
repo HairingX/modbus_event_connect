@@ -471,13 +471,14 @@ Candidates and the certainty of a point are weighed apart, because they mean dif
 
 - **A candidate and the point it replaces never exist together.** Resolving puts the level's
   candidates in place before anything else: below `TEST` no candidate is in the resolved model,
-  and at `TEST` no point a candidate replaces is. A candidate of the same key as the point it
+  and at `TEST` no point a candidate replaces is used. A candidate of the same key as the point it
   replaces could not coexist with it anyway, and two readings of one register as different
   things are alternatives, not neighbours. Every check of a resolved model - duplicate keys,
   overlaps, selectors - is made on what that level has, so a candidate is checked at `TEST`, and
   `assert_models_valid` resolves every level.
-- **A point the level leaves out for its certainty is still part of the model.** It stays in the
-  resolved model, recorded in `left_out` with the reason, because the model itself may need it:
+- **A point the level leaves out is still part of the model**, for its certainty, or at `TEST`
+  as a candidate of another key replaces it. It stays in the resolved model, recorded in
+  `left_out` with the reason, because the model itself may need it:
   a scan may read it to find out what the unit has, and a refresh or a check may name it. The
   client treats it as a point the unit does not have - not in `points`, never polled, refused by
   `subscribe()` and `write()`, a refresh naming it reads nothing - but does not count it among
@@ -485,8 +486,12 @@ Candidates and the certainty of a point are weighed apart, because they mean dif
 
 At construction, a model refuses a candidate whose `replaces` names no other point of its
 sections, one that replaces its own key with another type (a consumer stores the key with its
-type), and an identity point that is a candidate: identity points decide what the unit is, and
-are read at every level. `Model.keys_at(level)` is every key a unit may have at a level, which
+type), two candidates replacing one point (the alternatives would have to be weighed against each
+other, which no level does), a refresh that names by key a point a candidate of another key
+replaces (it would read nothing at `TEST`; labels select whichever of the two the level has), and
+an identity point that is a candidate: identity points decide what the unit is, and are read at
+every level. A scan step is code the model cannot inspect, so a point a candidate of another key
+replaces stays readable by scans at `TEST`, as one left out for its certainty does. `Model.keys_at(level)` is every key a unit may have at a level, which
 `subscribe()` checks before the scan; at `TEST` it keeps a replaced key, as the candidate's
 section may not apply to the unit.
 

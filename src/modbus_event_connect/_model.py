@@ -111,7 +111,8 @@ class Model(ABC):
             check use or hold one nothing uses, a `scan_check` missing where the model scans or
             given where it does not, a candidate among the identity points, a candidate that
             replaces a key no other point of its sections has, or one that replaces its own key
-            with another type, and whatever its protocol finds.
+            with another type, two candidates replacing one point, a refresh naming by key a point
+            a candidate of another key replaces, and whatever its protocol finds.
     """
     name: str
     manufacturer: str
@@ -210,8 +211,9 @@ def _declared_points(model: Model) -> list[Point[Any]]:
 
 
 def _candidate_problems(model: Model) -> list[str]:
-    """Identity points that are candidates, and candidates that replace no other point of the
-    model's sections, or their own key with another type."""
+    """Identity points that are candidates; candidates that replace no other point of the model's
+    sections, their own key with another type, or a point another candidate replaces too; and
+    refreshes that name by key a point a candidate of another key replaces."""
     found = [f"identity point {point.key!r} is a candidate, but identity points are read at every level"
              for point in model.identity_points if point.candidate is not None]
     sections = _declared_points(model)[len(model.identity_points):]
@@ -219,10 +221,12 @@ def _candidate_problems(model: Model) -> list[str]:
     for point in sections:
         if point.candidate is None:
             replaceable.setdefault(point.key, set()).add(point.key.type)
+    replacing: dict[str, list[str]] = {}
     for point in sections:
         replaces = point.candidate.replaces if point.candidate is not None else None
         if replaces is None:
             continue
+        replacing.setdefault(replaces, []).append(point.key)
         if replaces not in replaceable:
             found.append(f"{point.key!r}: the candidate replaces {replaces!r}, which no point of the model's "
                          f"sections that is not a candidate has")
@@ -230,6 +234,16 @@ def _candidate_problems(model: Model) -> list[str]:
             # A consumer stores the key with its type, so one key must keep it at every level.
             found.append(f"{point.key!r}: the candidate replaces its own key, but holds a {point.key.type.__name__} "
                          f"where the point it replaces holds another type")
+    found.extend(f"{replaced!r} is replaced by more than one candidate: {', '.join(map(repr, keys))}"
+                 for replaced, keys in replacing.items() if len(keys) > 1)
+    # At the Test level such a point is gone: a refresh naming it by key would read nothing there.
+    renamed = {replaced for replaced, keys in replacing.items() if any(key != replaced for key in keys)}
+    for point in _declared_points(model):
+        for name, refresh in (("on_write", point.on_write), ("on_change", point.on_change)):
+            if refresh is not None and isinstance(refresh.targets, tuple):
+                for target in sorted(renamed.intersection(refresh.targets)):
+                    found.append(f"{point.key!r}: {name} names {target!r}, which a candidate of another key "
+                                 f"replaces; name it by labels")
     return found
 
 
@@ -309,12 +323,14 @@ class ResolvedModel:
     identity: Identity
     points: Mapping[str, Point[Any]]
     """Every resolved point, keyed by `key`, in declaration order: those the level uses, and those
-    it leaves out for their certainty, which a scan or a refresh may still name."""
+    it leaves out for their certainty or as a candidate of another key replaces them, which a scan
+    or a refresh may still name."""
     instances: Mapping[str, tuple[int, ...]]
     """label -> the instance numbers resolved for it (failed factories excluded)."""
     level: Level
     left_out: Mapping[str, str]
-    """The keys of `points` the level leaves out for their certainty, with the reason."""
+    """The keys of `points` the level leaves out, for their certainty or as a candidate of another
+    key replaces them, with the reason."""
 
     @property
     def used(self) -> Mapping[str, Point[Any]]:
@@ -429,10 +445,20 @@ def _resolve(model: Model, identity: Identity, level: Level) -> _Resolution:
             all_points.extend(section.points)
 
     present = candidates_in_place(all_points, level)
-    points: dict[str, Point[Any]] = {point.key: point for point in present}
+    kept = {id(point) for point in present}
+    present_keys = {point.key for point in present}
+    # A point a candidate of another key replaces stays, left out, so that a scan may still read it.
+    replaced = {id(point): point for point in all_points
+                if point.candidate is None and id(point) not in kept and point.key not in present_keys}
+    replacer = {str(point.candidate.replaces): point.key for point in present
+                if point.candidate is not None and point.candidate.replaces is not None}
+    points: dict[str, Point[Any]] = {point.key: point for point in all_points
+                                     if id(point) in kept or id(point) in replaced}
     problems.extend(_cross_problems(model, present, points))
     left_out: dict[str, str] = {point.key: f"{point.certainty} points are left out at the {level} level"
-                for point in present if not level.admits(point.certainty)}
+                                for point in present if not level.admits(point.certainty)}
+    left_out.update({point.key: f"replaced by the candidate {replacer[point.key]!r} at the {level} level"
+                     for point in replaced.values()})
     return _Resolution(points=points, instances=instances, left_out=left_out, problems=problems)
 
 
