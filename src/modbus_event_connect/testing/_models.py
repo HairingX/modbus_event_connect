@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from event_connect import Identity
+from event_connect import Identity, Level
 
 from .._model import Model, applies, problems, resolve, section_label
 from .._point import Point
@@ -15,7 +15,8 @@ unit conversions work with."""
 
 
 def assert_models_valid(models: Sequence[Model], *, identities: Sequence[Identity]) -> None:
-    """Resolve every model against every identity, and check what resolving does not.
+    """Resolve every model against every identity at every level, and check what resolving does
+    not.
 
     Raises:
         AssertionError: listing every problem found - a model given twice, a model that does not
@@ -42,15 +43,16 @@ def _model_findings(model: Model, identities: Sequence[Identity]) -> list[str]:
     findings: list[str] = []
     included = [False] * len(model.sections)
     for identity in identities:
-        prefix = f"{model.name} / {identity}"
-        found = problems(model, identity)
-        findings.extend(f"{prefix}: {problem}" for problem in found)
         for index, section in enumerate(model.sections):
             label = section_label(index, section)
             included[index] = included[index] or applies(section, identity, label, [])
-        if not found:
-            points = resolve(model, identity).points.values()
-            findings.extend(f"{prefix}: {issue}" for issue in map(_transform_problem, points) if issue)
+        for level in Level:
+            prefix = f"{model.name} / {identity} / {level}"
+            found = problems(model, identity, level)
+            findings.extend(f"{prefix}: {problem}" for problem in found)
+            if not found:
+                points = resolve(model, identity, level).points.values()
+                findings.extend(f"{prefix}: {issue}" for issue in map(_transform_problem, points) if issue)
     for index, section in enumerate(model.sections):
         if section.when is not None and not included[index]:
             findings.append(f"{model.name}: {section_label(index, section)} never resolved - untested")

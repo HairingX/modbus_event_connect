@@ -1,6 +1,6 @@
 """What a device is, and how it is talked to: a model - its identity points, sections of points,
 the scan steps, its timing and what its protocol needs to know of it. Resolving a model against
-one device's identity produces the points that device actually has."""
+one device's identity, at a level, produces the points that device actually has."""
 from __future__ import annotations
 
 import dataclasses
@@ -11,7 +11,19 @@ from dataclasses import KW_ONLY, dataclass, field
 from types import MappingProxyType
 from typing import Any, Protocol
 
-from event_connect import DataValue, Identity, ModelError, PollRate, Retry, Selector, Timing, select
+from event_connect import (
+    DataValue,
+    Identity,
+    Level,
+    ModelError,
+    PollRate,
+    Retry,
+    Selector,
+    Timing,
+    candidates_in_place,
+    points_at,
+    select,
+)
 
 from ._point import Access, Point
 
@@ -97,7 +109,9 @@ class Model(ABC):
         ModelError: at construction, listing every problem: an empty name or manufacturer, timing
             that is not valid, `poll_intervals` that miss a rate the readable points or the scan
             check use or hold one nothing uses, a `scan_check` missing where the model scans or
-            given where it does not, and whatever its protocol finds.
+            given where it does not, a candidate among the identity points, a candidate that
+            replaces a key no other point of its sections has, or one that replaces its own key
+            with another type, and whatever its protocol finds.
     """
     name: str
     manufacturer: str
@@ -121,7 +135,8 @@ class Model(ABC):
     """Its `poll_intervals` and `read_back_after`, as a scheduler plans by them."""
     keys: frozenset[str] = field(init=False, repr=False)
     """Every key a unit of this model may have: of its identity points, and of every section and
-    every instance, whatever the identity."""
+    every instance, whatever the identity and the level."""
+    _keys_at: Mapping[Level, frozenset[str]] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "sections", tuple(self.sections))
@@ -130,6 +145,9 @@ class Model(ABC):
         object.__setattr__(self, "poll_intervals", MappingProxyType(dict(self.poll_intervals)))
         declared = _declared_points(self)
         object.__setattr__(self, "keys", frozenset(point.key for point in declared))
+        object.__setattr__(self, "_keys_at", MappingProxyType({
+            level: self.keys if level is Level.TEST else frozenset(point.key for point in points_at(declared, level))
+            for level in Level}))
         found: list[str] = []
         if not self.name:
             found.append("the model name must not be empty")
@@ -140,11 +158,16 @@ class Model(ABC):
                                                       read_back_after=self.read_back_after))
         except ValueError as err:
             found.append(f"timing: {err}")
-        found += _scan_check_problems(self) + _interval_problems(self, declared)
+        found += _scan_check_problems(self) + _interval_problems(self, declared) + _candidate_problems(self)
         found += self.declaration_problems(declared)
         if found:
             listed = "\n".join(f"  - {problem}" for problem in found)
             raise ModelError(f"model {self.name!r} is not valid:\n{listed}")
+
+    def keys_at(self, level: Level) -> frozenset[str]:
+        """Every key a unit of this model may have at `level`, whatever the identity: at TEST every
+        key, a key a candidate replaces included, as the candidate may not apply to the unit."""
+        return self._keys_at[level]
 
     @abstractmethod
     def problems(self, point: Point[Any]) -> list[str]:
@@ -184,6 +207,30 @@ def _declared_points(model: Model) -> list[Point[Any]]:
         else:
             points.extend(section.points)
     return points
+
+
+def _candidate_problems(model: Model) -> list[str]:
+    """Identity points that are candidates, and candidates that replace no other point of the
+    model's sections, or their own key with another type."""
+    found = [f"identity point {point.key!r} is a candidate, but identity points are read at every level"
+             for point in model.identity_points if point.candidate is not None]
+    sections = _declared_points(model)[len(model.identity_points):]
+    replaceable: dict[str, set[type[object]]] = {}
+    for point in sections:
+        if point.candidate is None:
+            replaceable.setdefault(point.key, set()).add(point.key.type)
+    for point in sections:
+        replaces = point.candidate.replaces if point.candidate is not None else None
+        if replaces is None:
+            continue
+        if replaces not in replaceable:
+            found.append(f"{point.key!r}: the candidate replaces {replaces!r}, which no point of the model's "
+                         f"sections that is not a candidate has")
+        elif replaces == point.key and replaceable[replaces] != {point.key.type}:
+            # A consumer stores the key with its type, so one key must keep it at every level.
+            found.append(f"{point.key!r}: the candidate replaces its own key, but holds a {point.key.type.__name__} "
+                         f"where the point it replaces holds another type")
+    return found
 
 
 def _scan_check_problems(model: Model) -> list[str]:
@@ -256,13 +303,23 @@ def model_among[M: Model](models: Sequence[M], model: Model) -> M:
 
 @dataclass(frozen=True)
 class ResolvedModel:
-    """A model resolved against one identity: matched sections, expanded, checked, ready to use."""
+    """A model resolved against one identity at one level: matched sections, expanded, with the
+    level's candidates in place, checked, ready to use."""
     model: Model
     identity: Identity
     points: Mapping[str, Point[Any]]
-    """Every resolved point, keyed by `key`, in declaration order."""
+    """Every resolved point, keyed by `key`, in declaration order: those the level uses, and those
+    it leaves out for their certainty, which a scan or a refresh may still name."""
     instances: Mapping[str, tuple[int, ...]]
     """label -> the instance numbers resolved for it (failed factories excluded)."""
+    level: Level
+    left_out: Mapping[str, str]
+    """The keys of `points` the level leaves out for their certainty, with the reason."""
+
+    @property
+    def used(self) -> Mapping[str, Point[Any]]:
+        """The points the level uses: `points`, less those `left_out`, in declaration order."""
+        return {key: point for key, point in self.points.items() if key not in self.left_out}
 
     def select(self, targets: Selector) -> tuple[Point[Any], ...]:
         """The points `targets` selects: for keys, in the order given; for labels, every point
@@ -289,8 +346,9 @@ class _Resolution:
     """What resolving one model against one identity produced, problems included."""
     points: dict[str, Point[Any]]
     instances: dict[str, tuple[int, ...]]
+    left_out: dict[str, str]
     problems: list[str]
-    """Everything wrong with the model against this identity; empty when nothing is."""
+    """Everything wrong with the model against this identity at this level; empty when nothing is."""
 
 
 def section_label(index: int, section: Section | RepeatedSection) -> str:
@@ -344,9 +402,9 @@ def _overlap_problems(all_points: Sequence[Point[Any]], model: Model) -> list[st
     return found
 
 
-def _resolve(model: Model, identity: Identity) -> _Resolution:
-    """Everything `resolve()` and `problems()` share: expand `model` against `identity` and check
-    every validation rule, without raising."""
+def _resolve(model: Model, identity: Identity, level: Level) -> _Resolution:
+    """Everything `resolve()` and `problems()` share: expand `model` against `identity`, put the
+    candidates of `level` in place, and check every validation rule, without raising."""
     problems: list[str] = []
     all_points: list[Point[Any]] = []
     instances: dict[str, tuple[int, ...]] = {}
@@ -370,9 +428,12 @@ def _resolve(model: Model, identity: Identity) -> _Resolution:
         else:
             all_points.extend(section.points)
 
-    points: dict[str, Point[Any]] = {point.key: point for point in all_points}
-    problems.extend(_cross_problems(model, all_points, points))
-    return _Resolution(points=points, instances=instances, problems=problems)
+    present = candidates_in_place(all_points, level)
+    points: dict[str, Point[Any]] = {point.key: point for point in present}
+    problems.extend(_cross_problems(model, present, points))
+    left_out: dict[str, str] = {point.key: f"{point.certainty} points are left out at the {level} level"
+                for point in present if not level.admits(point.certainty)}
+    return _Resolution(points=points, instances=instances, left_out=left_out, problems=problems)
 
 
 def applies(section: Section | RepeatedSection, identity: Identity, label: str, problems: list[str]) -> bool:
@@ -435,21 +496,25 @@ def _cross_problems(model: Model, all_points: Sequence[Point[Any]],
 # ==================================================================================== api
 
 
-def resolve(model: Model, identity: Identity) -> ResolvedModel:
-    """Resolve `model` against `identity`, raising `ModelError` listing every problem found."""
-    result = _resolve(model, identity)
+def resolve(model: Model, identity: Identity, level: Level) -> ResolvedModel:
+    """Resolve `model` against `identity` at `level`, raising `ModelError` listing every problem
+    found."""
+    result = _resolve(model, identity, level)
     if result.problems:
         listed = "\n".join(f"  - {problem}" for problem in result.problems)
-        raise ModelError(f"model {model.name!r} does not resolve against this identity:\n{listed}")
+        raise ModelError(f"model {model.name!r} does not resolve against this identity at the {level} level:\n"
+                         f"{listed}")
     return ResolvedModel(
         model=model,
         identity=identity,
         points=MappingProxyType(result.points),
         instances=MappingProxyType(result.instances),
+        level=level,
+        left_out=MappingProxyType(result.left_out),
     )
 
 
-def problems(model: Model, identity: Identity) -> list[str]:
+def problems(model: Model, identity: Identity, level: Level) -> list[str]:
     """The same checks as `resolve()`, without raising - every problem `model` has against
-    `identity`, or an empty list when it has none."""
-    return _resolve(model, identity).problems
+    `identity` at `level`, or an empty list when it has none."""
+    return _resolve(model, identity, level).problems

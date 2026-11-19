@@ -20,7 +20,7 @@ from event_connect import (
     UnsupportedDeviceError,
     Within,
 )
-from modbus_event_connect import Fixed, Retry, Status
+from modbus_event_connect import Fixed, Level, Retry, Status
 from modbus_event_connect._client import Client
 from modbus_event_connect._data_type import DataType
 from event_connect import Identity
@@ -558,7 +558,7 @@ def _select(identity: Identity) -> MicroNabtoModel | None:
 def _client(simulated: SimulatedMicroNabtoDevice, *, clock: FakeClock | None = None, read_only: bool = False,
             email: str = EMAIL, reconnect: CircuitBreaker = HANDSHAKE_NEVER_AGAIN) -> Client:
     return Client(_device(simulated, clock=clock, email=email, reconnect=reconnect), _select,
-                  offline_after_intervals=1, clock=clock, read_only=read_only)
+                  offline_after_intervals=1, level=Level.DOCUMENTED, clock=clock, read_only=read_only)
 
 
 async def test_a_client_picks_its_model_from_the_handshake_and_reads_negative_values() -> None:

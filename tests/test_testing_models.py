@@ -1,7 +1,7 @@
 """`assert_models_valid`: the check a device repository runs over its models in its tests."""
 import pytest
 
-from event_connect import Identity, Key, PollRate, Transform, Transforms
+from event_connect import Identity, Key, Level, PollRate, Transform, Transforms
 from modbus_event_connect._data_type import DataType
 from modbus_event_connect._model import Model, Section, problems, resolve
 from modbus_event_connect._point import Point
@@ -103,5 +103,5 @@ def test_a_transform_that_raises_is_caught() -> None:
 
 def test_resolving_a_model_leaves_sampling_its_transforms_to_the_tests() -> None:
     lossy = _with_transform(Transform(read=lambda s: round(s / 60), write=lambda m: m * 60))
-    assert problems(lossy, {}) == []
-    assert "value" in resolve(lossy, {}).points
+    assert problems(lossy, {}, Level.DOCUMENTED) == []
+    assert "value" in resolve(lossy, {}, Level.DOCUMENTED).points
