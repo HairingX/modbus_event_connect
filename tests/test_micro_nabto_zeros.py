@@ -16,7 +16,7 @@ from modbus_event_connect.micro_nabto._access import DatapointRegister
 from modbus_event_connect.micro_nabto._connection import MicroNabtoConnection
 from modbus_event_connect.micro_nabto._device import MicroNabtoDevice
 from modbus_event_connect.micro_nabto._model import TAKE_ZEROS, MicroNabtoModel, RereadZeros
-from modbus_event_connect import Exponential, Fixed, Retry, Steps
+from modbus_event_connect import Exponential, Fixed, Level, Retry, Steps
 from event_connect.testing import FakeClock
 from modbus_event_connect.testing._micro_nabto import SimulatedMicroNabtoDevice
 from models import HANDSHAKE_NEVER_AGAIN, OFFLINE_AFTER_INTERVALS, ZEROS, micro_nabto_model
@@ -312,7 +312,7 @@ def _select(identity: Identity) -> MicroNabtoModel | None:
 async def test_a_client_shows_the_last_values_while_zeros_are_read_again_and_reads_them_on_time() -> None:
     clock = FakeClock()
     async with _simulated(clock) as simulated:
-        client = Client(_device(simulated, clock), _select, offline_after_intervals=OFFLINE_AFTER_INTERVALS,
+        client = Client(_device(simulated, clock), _select, offline_after_intervals=OFFLINE_AFTER_INTERVALS, level=Level.DOCUMENTED,
                         clock=clock)
         await client.connect()
         for point in POINTS:

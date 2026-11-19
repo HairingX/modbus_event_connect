@@ -12,6 +12,7 @@ from modbus_event_connect import (
     InstanceScanStep,
     Key,
     Labels,
+    Level,
     Model,
     ModelError,
     Point,
@@ -158,7 +159,7 @@ def _connected(registers: Mapping[str, int] = REGISTERS,
                model: ModbusModel | None = None) -> tuple[Client, FakeDevice, FakeClock, PointsSeen]:
     device = FakeDevice(registers)
     clock = FakeClock()
-    client = Client(device, model or _model(), clock=clock, offline_after_intervals=OFFLINE_AFTER_INTERVALS)
+    client = Client(device, model or _model(), clock=clock, offline_after_intervals=OFFLINE_AFTER_INTERVALS, level=Level.DOCUMENTED)
     asyncio.run(client.connect())
     seen = PointsSeen()
     client.subscribe_points(seen)
@@ -189,7 +190,7 @@ def test_an_instance_scan_may_not_mark_another_instances_points() -> None:
         scan.set_available(Labels(zone=n % 3 + 1), False, reason="not mine")
 
     device = FakeDevice(REGISTERS)
-    client = Client(device, _model(overreaching), clock=FakeClock(), offline_after_intervals=OFFLINE_AFTER_INTERVALS)
+    client = Client(device, _model(overreaching), clock=FakeClock(), offline_after_intervals=OFFLINE_AFTER_INTERVALS, level=Level.DOCUMENTED)
     with pytest.raises(ModelError, match="not its own"):
         asyncio.run(client.connect())
 
@@ -229,7 +230,7 @@ def test_the_checks_are_spread_evenly_over_the_scan_interval() -> None:
 def test_seconds_until_next_poll_counts_the_checks() -> None:
     device = FakeDevice({"version": 1, "zone_1_type": 0})
     clock = FakeClock()
-    client = Client(device, _model(), clock=clock, offline_after_intervals=OFFLINE_AFTER_INTERVALS)
+    client = Client(device, _model(), clock=clock, offline_after_intervals=OFFLINE_AFTER_INTERVALS, level=Level.DOCUMENTED)
     asyncio.run(client.connect())
     wait = client.seconds_until_next_poll()
     assert wait is not None and 0 < wait <= SCAN_INTERVAL, "nothing is subscribed, only checks are due"
@@ -364,7 +365,7 @@ def test_a_points_callback_that_fails_is_logged_and_the_others_are_told() -> Non
 
 def test_an_unsubscribed_points_callback_is_not_told() -> None:
     device = FakeDevice(REGISTERS)
-    client = Client(device, _model(), clock=FakeClock(), offline_after_intervals=OFFLINE_AFTER_INTERVALS)
+    client = Client(device, _model(), clock=FakeClock(), offline_after_intervals=OFFLINE_AFTER_INTERVALS, level=Level.DOCUMENTED)
     asyncio.run(client.connect())
     seen = PointsSeen()
     unsubscribe = client.subscribe_points(seen)

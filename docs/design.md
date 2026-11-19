@@ -239,7 +239,7 @@ write:  value → limits check → transform.write → inverse scale, offset →
   Transforms.INVERT_BOOL
   ```
 
-  The model walker (4.4) samples the round trip `write(read(x)) == x`, which
+  The model walker (4.5) samples the round trip `write(read(x)) == x`, which
   also catches lossy rounding such as `round(value / 60)`.
 - **A BOOL or a bit takes a transform too**, applied to its 0 or 1 after the register is
   read as one; it must turn 0 and 1 into 0 and 1. `INVERT_BOOL` is the one a device that says
@@ -382,7 +382,7 @@ for each number and labels every point with its instance, which is what lets the
 
 - remove a whole instance in one call (4.3),
 - hand the consumer one device per instance — a device per room,
-- validate every instance (4.4).
+- validate every instance (4.5).
 
 Models are Python. A loader for a register map in a file (the "Modbus editor" case) can be
 added on top later; it would produce the same objects.
@@ -452,19 +452,66 @@ scan.set_available(Labels(room=14), False, reason="room not configured")
 
 Only the scan writes it: a consumer cannot hide a point the unit has.
 
-### 4.4 Validation and the model walker
+### 4.4 Levels and candidates
+
+Every point says how certain it is that it is what the model claims (`Certainty`: verified,
+reported, inferred), and a client is given a `Level` that says which of them the unit has:
+`VERIFIED` only what has been read on a unit of the model, `DOCUMENTED` also what its
+documentation states, `TEST` everything, and *candidates*. A candidate is the model's next guess
+at a point, shipped in an ordinary release for testers to confirm; with `replaces` it takes the
+place of an existing point, its own key included, at `TEST` only. Below `TEST` it does not exist,
+so whoever does not choose `TEST` gets exactly what they had before it was written.
+
+The rule which points a level uses is protocol-free and lives in event_connect
+(`candidates_in_place`, `points_at`), so every client applies the same one. The client is given
+the level when it is made, and nothing defaults it: the device library's `create_client` chooses
+the default its users get.
+
+Candidates and the certainty of a point are weighed apart, because they mean different things:
+
+- **A candidate and the point it replaces never exist together.** Resolving puts the level's
+  candidates in place before anything else: below `TEST` no candidate is in the resolved model,
+  and at `TEST` no point a candidate replaces is used. A candidate of the same key as the point it
+  replaces could not coexist with it anyway, and two readings of one register as different
+  things are alternatives, not neighbours. Every check of a resolved model - duplicate keys,
+  overlaps, selectors - is made on what that level has, so a candidate is checked at `TEST`, and
+  `assert_models_valid` resolves every level.
+- **A point the level leaves out is still part of the model**, for its certainty, or at `TEST`
+  as a candidate of another key replaces it. It stays in the resolved model, recorded in
+  `left_out` with the reason, because the model itself may need it:
+  a scan may read it to find out what the unit has, and a refresh or a check may name it. The
+  client treats it as a point the unit does not have - not in `points`, never polled, refused by
+  `subscribe()` and `write()`, a refresh naming it reads nothing - but does not count it among
+  `unavailable_reasons`, which say what the unit lacks, not what the consumer chose.
+
+At construction, a model refuses a candidate whose `replaces` names no other point of its
+sections, one that replaces its own key with another type (a consumer stores the key with its
+type), two candidates replacing one point (the alternatives would have to be weighed against each
+other, which no level does), a refresh that names by key a point a candidate of another key
+replaces (it would read nothing at `TEST`; labels select whichever of the two the level has), and
+an identity point that is a candidate: identity points decide what the unit is, and are read at
+every level. A scan step is code the model cannot inspect, so a point a candidate of another key
+replaces stays readable by scans at `TEST`, as one left out for its certainty does. `Model.keys_at(level)` is every key a unit may have at a level, which
+`subscribe()` checks before the scan; at `TEST` it keeps a replaced key, as the candidate's
+section may not apply to the unit.
+
+`diagnostics()` names the level, the certainty of each point the unit has, and each candidate
+it uses with the key it replaces, so a report from a tester says what was tried.
+
+### 4.5 Validation and the model walker
 
 Point rules are checked at construction (3.1). So are the rules of a model that hold whatever
 the identity, when the model is made, as `ModelError` naming every problem: a name or a
 manufacturer that is empty, timing its scheduler refuses, `poll_intervals` that miss a rate its
 readable points or its scan check use - over every section and every instance, whatever the
 identity - or hold one nothing uses, a `scan_check` missing where the model scans or given
-where it does not, and the protocol's own: for Modbus, counts it cannot have, an answer time
-that is not a positive number, and a `bit_write` missing where a point writes one bit of a
-holding register or given where none does. Model rules that depend on the identity are checked
-when the model is resolved, at every `connect()`: duplicate keys (which would otherwise
-silently overwrite one another), overlapping multi-register points, selectors that select
-nothing, and what the protocol cannot carry. These are certain and cheap.
+where it does not, candidates that replace nothing they may (4.4), and the protocol's own: for
+Modbus, counts it cannot have, an answer time that is not a positive number, and a `bit_write`
+missing where a point writes one bit of a holding register or given where none does. Model
+rules that depend on the identity are checked when the model is resolved at the client's level,
+at every `connect()`: duplicate keys (which would otherwise silently overwrite one another),
+overlapping multi-register points, selectors that select nothing, and what the protocol cannot
+carry. These are certain and cheap.
 
 The **model walker**, `testing.assert_models_valid`, is what a device repository calls from
 one test, with its one list of models:
@@ -474,7 +521,7 @@ def test_every_model_variant_is_valid():
     assert_models_valid(MODELS, identities=IDENTITIES)
 ```
 
-It fails for a model given twice. Besides the rules above, it samples every transform: `write(read(x))` must give `x` back for
+It resolves every model at every level, and fails for a model given twice. Besides the rules above, it samples every transform: `write(read(x))` must give `x` back for
 negative, fractional and large values. A sample is a test, not a proof, so it runs in the
 device repository's tests and not at every connect. Test support lives in `testing`, never in
 the modules that run in production.
@@ -840,8 +887,9 @@ silent and the longest silence; handshakes it refused, by status; and of answers
 the time allowed, how many readings again were sent, how each episode ended (values at once,
 values after waiting, values in halves, zeros taken), how many are open, the longest until
 values, the largest request answered with values and the smallest answered with zeros. Per point:
-last quality and when it was last good. This is what a bug report needs — without a host address
-in it.
+last quality and when it was last good. The client adds its level, the certainty of each point
+the unit has and each candidate it uses (4.4). This is what a bug report needs — without a host
+address in it.
 
 micro_nabto logs each read's answer at debug: how old the session is, why it was established and
 how long after the answer before it, which of its requests this was, the sequence number, how many
@@ -898,7 +946,7 @@ too; the warnings carry what tells them apart. The answer is not taken at once:
   `SimulatedMicroNabtoDevice` on a localhost UDP port, answering byte for byte as a real device.
 - **An injectable clock** (5.7), so scheduling, `after`, `until_stable` and the breakers are tested
   without waiting.
-- **The model walker** (4.4) in every device repository.
+- **The model walker** (4.5) in every device repository.
 - **The key migration test** (3.8) for Sentio and Nilan.
 - **Live tests** stay read-only, opt-in, and use read-only mode.
 

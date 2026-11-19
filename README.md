@@ -145,12 +145,13 @@ model, and it picks one of the device's models from that:
 def pick_model(identity):
     return VENTILATION if identity["device_model"] == 1140 else None
 
-client = Client(ventilation, pick_model, offline_after_intervals=1)
+client = Client(ventilation, pick_model, offline_after_intervals=1, level=Level.DOCUMENTED)
 ```
 
 `offline_after_intervals` is how many reads of the chosen model's fastest poll rate the device
 may leave unanswered before it counts as not answering; see
-[Connection state](#connection-state).
+[Connection state](#connection-state). `level` is which of the model's points the client uses;
+see [Levels and candidates](#levels-and-candidates).
 
 micro_nabto devices on the local network are found with `discover`, which writes out how long
 it searches and how often it asks again: `await discover(timeout=2.0, resend=0.5,
@@ -287,7 +288,7 @@ against the point's limits, or its states, and `InvalidValueError` says why it w
   value first, then writes them in order and stops at the first refusal.
 - `client.status(Status.WRITE_PENDING).value` is `True` while writes are waiting or being sent.
 
-`Client(device, model, offline_after_intervals=3, read_only=True)` refuses every write with
+`Client(device, model, offline_after_intervals=3, level=Level.DOCUMENTED, read_only=True)` refuses every write with
 `ReadOnlyError` before it reaches the device. Use it while developing against a real
 installation.
 
@@ -323,8 +324,35 @@ rooms. After `connect()`:
 | `client.points` | the points this unit has, by their keys, each with its type |
 | `client.has(key)`, `client.can_write(key)` | whether it has the key, and whether it can be written |
 | `client.instances("room")` | which rooms, zones or channels are installed, such as `(1, 3)` |
-| `client.unavailable_reasons` | keys the unit does not have, with the reason |
+| `client.unavailable_reasons` | keys the unit does not have, with the reason; not those its level leaves out |
 | `client.subscribe_points(callback)` | told when the unit gains or loses points, such as a room set up later |
+
+## Levels and candidates
+
+Every point says how certain it is that it is what it claims, as its `certainty`: `VERIFIED`,
+read on a unit of the model; `REPORTED`, stated in the model's documentation; `INFERRED`, worked
+out from documentation that does not state it. A client is given a `Level`, and uses only the
+points it admits:
+
+| `level=` | The unit has |
+|---|---|
+| `Level.VERIFIED` | the points read on a unit of the model |
+| `Level.DOCUMENTED` | those, and the points stated in the model's documentation |
+| `Level.TEST` | every point, and each *candidate* in place of the point it replaces |
+
+A candidate is the model's next guess at a point, for testers to confirm: a point declared with
+`candidate=Candidate()`, or `Candidate(replaces=KEY)` to take the place of the point of that
+key. Below `Level.TEST` it does not exist, and the point it replaces is used as before; at
+`Level.TEST` that point is left out. A candidate that replaces a point of its own key reads the
+same key from another place, so an application that stores the key keeps it. One point is
+replaced by one candidate at most, and a refresh names a point a candidate of another key
+replaces by labels, not by its key, which reads nothing at `Level.TEST`.
+
+A point the level leaves out is not in `client.points`, is never read on its schedule, cannot be
+subscribed to or written, and is not among `client.unavailable_reasons`. The model's scans still
+read it where they need it to find out what the unit has, and a refresh that names it reads
+nothing. `client.level` is the level the client was given; `client.diagnostics()` names it, with
+the certainty of each point the unit has and each candidate it uses, with the key it replaces.
 
 ## In a larger application
 
@@ -351,7 +379,7 @@ rooms. After `connect()`:
 | `InvalidValueError` | `write()` | The point cannot take the value. |
 | `ReadOnlyError` | `write()` | The client is read-only. |
 | `ModelError` | creating a model, `connect()` | The model contradicts itself, or the device was not given it. |
-| `KeyError` | `subscribe()`, `write()` | No model of the client has the key, or this unit does not. |
+| `KeyError` | `subscribe()`, `write()` | No model of the client has the key at its level, or this unit does not. |
 | `TypeError` | `value()`, `subscribe()`, `write()` | The key names another type than the model gives the point. |
 
 ---
@@ -441,15 +469,43 @@ THERMOSTAT = ModbusModel(
 A model checks itself when it is made, and raises `ModelError` naming every problem: a poll rate
 its readable points use with no interval, an interval of a rate nothing is read at, a
 `scan_check` missing where it scans or given where it does not, a `bit_write` missing where a
-point writes one bit of a holding register or given where none does, and a count or a time its
-protocol cannot have.
+point writes one bit of a holding register or given where none does, a candidate that replaces
+a key no other point of its sections has, or its own key with another type, two candidates
+replacing one point, a refresh naming by key a point a candidate of another key replaces, an
+identity point that is a candidate, and a count or a time its protocol cannot have.
+
+A point read on a unit says `certainty=Certainty.VERIFIED`, with the record of it on the line
+above; one worked out rather than stated says `Certainty.INFERRED`. A candidate goes in the same
+sections as the point it replaces:
+
+```python
+from modbus_event_connect import Candidate, Certainty, DataType, Key, PollRate, Point, Section
+from modbus_event_connect.modbus import HoldingRegister
+
+PREHEAT = Key("preheat", bool)
+MIN_AIR = Key("min_air", int)
+
+PREHEAT_SECTION = Section([
+    # measured on the Example Ventilation: on and off as the panel shows (example/ventilation#3)
+    Point(PREHEAT, read=HoldingRegister(20), data_type=DataType.BOOL, poll_rate=PollRate.SLOW,
+          certainty=Certainty.VERIFIED),
+    # manual, register list: "16 Preheat (on/off)"; not read on a unit yet
+    Point(PREHEAT, read=HoldingRegister(16), data_type=DataType.BOOL, poll_rate=PollRate.SLOW,
+          candidate=Candidate(replaces=PREHEAT)),
+    # manual, register list: "20 Min air volume (%)"
+    Point(MIN_AIR, read=HoldingRegister(20), poll_rate=PollRate.SLOW, candidate=Candidate()),
+])
+```
+
+Once a tester has confirmed a candidate, it becomes an ordinary point, `VERIFIED` with the record
+of it, and the point it replaced is removed.
 
 The package lists every model once, and creates a client with only what depends on the
 installation, writing out what is needed before the model is known:
 
 ```python
 """my_devices/__init__.py"""
-from modbus_event_connect import Client, CircuitBreaker, Clock, Exponential, Retry
+from modbus_event_connect import Client, CircuitBreaker, Clock, Exponential, Level, Retry
 from modbus_event_connect.modbus import PORT, ModbusDevice
 
 from ._thermostat import MODE, SERIAL_NUMBER, TARGET, TEMPERATURE, THERMOSTAT, Mode
@@ -457,8 +513,8 @@ from ._thermostat import MODE, SERIAL_NUMBER, TARGET, TEMPERATURE, THERMOSTAT, M
 MODELS = [THERMOSTAT]
 
 
-def create_client(*, host: str, unit_id: int, port: int = PORT, read_only: bool = False,
-                  clock: Clock | None = None) -> Client:
+def create_client(*, host: str, unit_id: int, port: int = PORT, level: Level = Level.DOCUMENTED,
+                  read_only: bool = False, clock: Clock | None = None) -> Client:
     """A client for the thermostat at `host`; call `connect()` on it."""
     device = ModbusDevice.tcp(
         host, port=port, unit_id=unit_id, models=MODELS,
@@ -469,7 +525,7 @@ def create_client(*, host: str, unit_id: int, port: int = PORT, read_only: bool 
         clock=clock)
     return Client(device, THERMOSTAT,
                   offline_after_intervals=3,   # guess: three missed reads of MEDIUM, 90 s
-                  read_only=read_only, clock=clock)
+                  level=level, read_only=read_only, clock=clock)
 ```
 
 A second model is a second file, added to `MODELS`. A model reached over another protocol is a
@@ -767,12 +823,14 @@ A room set up later, or one taken away, is found while polling; nobody needs to 
 ## Testing a model
 
 Test a model without the device. `assert_models_valid` resolves each model against every
-identity you expect to meet, and fails listing every problem: a model given twice, overlapping
-registers, a register the protocol cannot carry, a refresh naming a key that does not exist, a
-transform that does not convert back, a section no identity includes.
+identity you expect to meet, at every level, and fails listing every problem: a model given
+twice, overlapping registers, a register the protocol cannot carry, a refresh naming a key that
+does not exist, a transform that does not convert back, a section no identity includes.
+`resolve(model, identity, level)` gives the model as one unit has it at one level: its `used`
+points are those the level uses.
 
 ```python
-from modbus_event_connect import NO_RETRY, CircuitBreaker, Client
+from modbus_event_connect import NO_RETRY, CircuitBreaker, Client, Level
 from modbus_event_connect.modbus import ModbusDevice
 from modbus_event_connect.testing import (SimulatedModbusDevice, SimulatedModbusGateway,
                                           assert_models_valid)
@@ -786,7 +844,7 @@ async def test_temperature_is_read():
                                  holding_registers={20: 210, 21: 1})
     device = ModbusDevice(SimulatedModbusGateway({1: unit}), 1, models=MODELS, timeout_margin=0.0,
                           reconnect=CircuitBreaker(after=3, retry=NO_RETRY))
-    client = Client(device, THERMOSTAT, offline_after_intervals=3)
+    client = Client(device, THERMOSTAT, offline_after_intervals=3, level=Level.DOCUMENTED)
     await client.connect()
     assert client.value(TEMPERATURE).value == 21.5
 ```

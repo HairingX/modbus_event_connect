@@ -16,6 +16,7 @@ from event_connect import (
     InvalidValueError,
     Key,
     Labels,
+    Level,
     ModelError,
     NotConnectedError,
     Passes,
@@ -105,10 +106,12 @@ class Client:
     """
 
     def __init__(self, device: Device, model: Model | ModelSelector, *, offline_after_intervals: int,
-                 read_only: bool = False, clock: Clock | None = None) -> None:
+                 level: Level, read_only: bool = False, clock: Clock | None = None) -> None:
         """Args:
             offline_after_intervals: how many reads of the chosen model's fastest poll rate the
                 device may leave unanswered before `Status.CONNECTED` turns False.
+            level: which of the model's points the unit has: those of a certainty it admits, and
+                at `Level.TEST` each candidate in place of the point it replaces.
 
         Raises:
             ValueError: `offline_after_intervals` is below 1.
@@ -116,7 +119,8 @@ class Client:
         self._device = device
         self._select_model: ModelSelector = (lambda _identity: model) if isinstance(model, Model) else model
         known = (model,) if isinstance(model, Model) else tuple(device.models)
-        self._known_keys: frozenset[str] = frozenset().union(*(known_model.keys for known_model in known))
+        self._level = level
+        self._known_keys: frozenset[str] = frozenset().union(*(known_model.keys_at(level) for known_model in known))
         self._clock: Clock = clock or SystemClock()
         self._read_only = read_only
         self._offline_after_intervals = offline_after_intervals
@@ -202,7 +206,7 @@ class Client:
         marks = self._writes.marks()
         answers = _ScanAnswers()
         try:
-            resolved = resolve(model, await self._identify(model, handshake, answers))
+            resolved = resolve(model, await self._identify(model, handshake, answers), self._level)
             _LOGGER.debug("%s chosen for a device that reports %r", model.name, dict(resolved.identity))
             scanned: dict[str, ReadResult] = {}
             found: dict[_Scope, dict[str, str]] = {}
@@ -210,7 +214,7 @@ class Client:
             for scope in _scopes(resolved):
                 found[scope], reads[scope] = await self._run_scan(resolved, scope, answers, scanned)
             unavailable = _union(found.values())
-            readable = [p for p in resolved.points.values() if p.readable and p.key not in unavailable]
+            readable = [p for p in resolved.used.values() if p.readable and p.key not in unavailable]
             unread = [p for p in readable if p.key not in scanned]
             first_answers: Mapping[str, ReadResult] = await self._device.read(unread) if unread else {}
             answers.note(first_answers.values())
@@ -335,12 +339,13 @@ class Client:
         self._checks = {scope: _Check(reads[scope],
                                       now + interval * (index + 1) / len(checked) if interval else math.inf)
                         for index, scope in enumerate(checked)}
-        for key in [k for k in self._values if k not in resolved.points]:
+        for key in [k for k in self._values if k not in resolved.used]:
             del self._values[key]
             self._subscriptions.forget(key)
         for key in self._subscriptions.keys():
-            if key not in resolved.points:
-                _LOGGER.warning("'%s' is subscribed to, but the %s model does not have it", key, model.name)
+            if key not in resolved.used:
+                _LOGGER.warning("'%s' is subscribed to, but the %s model does not have it at the %s level",
+                                key, model.name, self._level)
             elif resolved.points[key].key.type is not key.type:
                 _LOGGER.error("'%s' is subscribed to as a %s, but the %s model's point holds a %s; it is not "
                               "reported", key, key.type.__name__, model.name, resolved.points[key].key.type.__name__)
@@ -349,6 +354,12 @@ class Client:
         self._update_reachability(True)
 
     # ========================================================================= the picture
+
+    @property
+    def level(self) -> Level:
+        """Which of the model's points the unit has, by their certainty, and whether candidates are
+        tried."""
+        return self._level
 
     @property
     def model(self) -> Model:
@@ -367,7 +378,8 @@ class Client:
 
     @property
     def points(self) -> Mapping[Key[Any], Point[Any]]:
-        """The points this unit has, by key: declared by its model and not recorded as missing."""
+        """The points this unit has, by key: declared by its model, used at the client's level, and
+        not recorded as missing."""
         resolved = self._require_model()
         return {point.key: point for key, point in resolved.points.items() if self._is_available(key)}
 
@@ -393,9 +405,11 @@ class Client:
 
     @property
     def unavailable_reasons(self) -> Mapping[Key[Any], str]:
-        """The keys recorded as missing on this unit, with the reason."""
+        """The keys recorded as missing on this unit, with the reason; a key the level leaves out
+        is not among them."""
         resolved = self._require_model()
-        return {resolved.points[key].key: reason for key, reason in self._unavailable.items()}
+        return {resolved.points[key].key: reason for key, reason in self._unavailable.items()
+                if key not in resolved.left_out}
 
     # ============================================================================== values
 
@@ -439,8 +453,17 @@ class Client:
         return self._reachability.silent_for
 
     def diagnostics(self) -> Mapping[str, object]:
-        """The device's counters for a bug report: requests, failures by outcome, latency. No addresses."""
-        return self._device.diagnostics()
+        """What a bug report needs, with no address: the device's counters - requests, failures by
+        outcome, latency; the `level`; and, once the device has been scanned, the `certainty` of
+        each point the unit has, and the `candidates` among them, each with the key it replaces
+        or None."""
+        found: dict[str, object] = {**self._device.diagnostics(), "level": str(self._level)}
+        if self._resolved is not None:
+            points = self.points
+            found["certainty"] = {str(key): str(point.certainty) for key, point in points.items()}
+            found["candidates"] = {str(key): _replaced(point) for key, point in points.items()
+                                   if point.candidate is not None}
+        return found
 
     # ============================================================================ interest
 
@@ -450,14 +473,14 @@ class Client:
         value. With `poll`, the point is also read on its schedule. Returns the unsubscriber.
 
         Raises:
-            KeyError: no model the client may choose has `key`; after the scan, the chosen model
-                has no such key.
+            KeyError: no model the client may choose has `key` at the client's level; after the
+                scan, the chosen model has no such key at it.
             TypeError: the model gives the point another type than `key` does.
         """
         if key not in self._known_keys:
-            raise KeyError(f"no model of this client has a point {key!r}")
-        if self._resolved is not None and key not in self._resolved.points:
-            raise KeyError(f"the {self._resolved.model.name} model has no point {key!r}")
+            raise KeyError(f"no model of this client has a point {key!r} at the {self._level} level")
+        if self._resolved is not None and key not in self._resolved.used:
+            raise KeyError(f"the {self._resolved.model.name} model has no point {key!r} at the {self._level} level")
         self._check_type(key)
         subscriber = self._subscriptions.add(key, callback, polls=poll)
         self._update_polling(key)
@@ -510,7 +533,7 @@ class Client:
     # ======================================================================== availability
 
     def _is_available(self, key: str) -> bool:
-        return key not in self._unavailable
+        return key not in self._unavailable and (self._resolved is None or key not in self._resolved.left_out)
 
     def _recompute_unavailable(self) -> None:
         self._unavailable = {**_union(self._missing_by_scan.values()), **self._missing_by_read}
@@ -960,6 +983,12 @@ def _check_interval(model: Model, scheduler: Scheduler) -> float | None:
     """Seconds between the checks of what each scan read: those of the model's `scan_check` rate;
     None when they are never checked on a timer."""
     return scheduler.rate_interval(model.scan_check) if model.scan_check is not None else None
+
+
+def _replaced(point: Point[Any]) -> str | None:
+    """The key the candidate `point` replaces; None for one that replaces none."""
+    replaces = point.candidate.replaces if point.candidate is not None else None
+    return str(replaces) if replaces is not None else None
 
 
 def _union(marks: Iterable[Mapping[str, str]]) -> dict[str, str]:

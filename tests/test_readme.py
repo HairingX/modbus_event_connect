@@ -3,8 +3,13 @@ import inspect
 import re
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
+
+from event_connect import Level, points_at
+from modbus_event_connect import Section
+from modbus_event_connect.modbus import HoldingRegister
 
 README = Path(__file__).parent.parent / "README.md"
 
@@ -35,3 +40,13 @@ async def test_the_model_file_its_package_and_its_tests_work_as_the_readme_gives
     finally:
         for name in [name for name in sys.modules if name.split(".")[0] == "my_devices"]:
             del sys.modules[name]
+
+
+def test_the_candidate_example_declares_a_section_whose_candidates_are_used_only_at_the_test_level() -> None:
+    example: dict[str, Any] = {}
+    exec(_block("PREHEAT_SECTION = Section("), example)
+    section = example["PREHEAT_SECTION"]
+    assert isinstance(section, Section)
+    reads = {level: {point.key: point.read for point in points_at(section.points, level)} for level in Level}
+    assert reads[Level.DOCUMENTED] == {"preheat": HoldingRegister(20)}
+    assert reads[Level.TEST] == {"preheat": HoldingRegister(16), "min_air": HoldingRegister(20)}
