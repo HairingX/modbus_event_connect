@@ -17,6 +17,8 @@ BUSY = Retry(Exponential(0.2, factor=2.0, max=None), Attempts(5))
 """A read answered busy tried 4 times more, after 0.2 s, doubling."""
 ZEROS = RereadZeros(within=7.5, wait=Steps(0.5, then=Fixed(1.0)), at_once=True, halves=True)
 """Zeros read again at once, then after 0.5 s and every second, and in halves at 7.5 s."""
+WRITE_TAKEN = frozenset({0})
+"""The statuses a test's micro_nabto unit answers a write it took with."""
 NEVER_AGAIN = CircuitBreaker(after=3, retry=NO_RETRY)
 """A device not asked again, once 3 requests in a row went unanswered, until it is connected."""
 HANDSHAKE_NEVER_AGAIN = CircuitBreaker(after=1, retry=NO_RETRY)
@@ -78,11 +80,12 @@ def micro_nabto_model(sections: Sequence[Section | RepeatedSection] = (), *, nam
                       scan_steps: Sequence[ScanStep] = (), scan_check: PollRate | None = None,
                       read_back_after: float = READ_BACK_AFTER, write_retry: Retry = NO_RETRY,
                       max_registers: int = 64, answer_wait: float = 5.0, later_answer_wait: float = 5.0,
-                      zeros: RereadZeros = ZEROS) -> MicroNabtoModel:
+                      zeros: RereadZeros = ZEROS, write_taken: frozenset[int] = WRITE_TAKEN) -> MicroNabtoModel:
     """A micro_nabto model of `sections`, read at `intervals()`."""
     return MicroNabtoModel(
         name, manufacturer, sections,
         poll_intervals=intervals(sections, identity_points, scan_check),
         read_back_after=read_back_after, write_retry=write_retry, scan_check=scan_check,
         identity_points=identity_points, scan_steps=scan_steps,
-        max_registers=max_registers, answer_wait=answer_wait, later_answer_wait=later_answer_wait, zeros=zeros)
+        max_registers=max_registers, answer_wait=answer_wait, later_answer_wait=later_answer_wait, zeros=zeros,
+        write_taken=write_taken)

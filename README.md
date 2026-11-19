@@ -238,6 +238,7 @@ What the model states is about its unit itself, and has no default either:
 | `MicroNabtoModel(zeros=RereadZeros(within=7.5, wait=Steps(0.5, then=Fixed(1.0)), at_once=True, halves=True))` | how an answer of only zeros, where values were, is read again before the zeros are taken: here at once, after 0.5 s, then every second, and in two halves at 7.5 s |
 | `MicroNabtoModel(zeros=TAKE_ZEROS)` | zeros are taken as they come |
 | `MicroNabtoModel(answer_wait=2.0)` | how long an answer is waited for once the device has said it has the request; never shorter than the connection's timeout |
+| `MicroNabtoModel(write_taken=frozenset({0}))` | the statuses the unit answers a write it took with; a write answered with another is `BUSY`, and sent again as `write_retry` says. A CTS 402 answered 0 to the writes it took, and a Genvex Optima 270 answered 0x01 to every write it took |
 
 A retry that checks something before each probe is a subclass with its own `ready`. It is
 frozen, like every `Retry`, so it asks something outside itself:
@@ -542,8 +543,8 @@ them the device takes. Neighbouring points are read together, up to that limit.
 **micro_nabto** points name an object and an address, `DatapointRegister(27, obj=0)`, as the
 device's documentation gives them. A `MicroNabtoModel` states how many registers one read asks
 for, at most as many as one UDP datagram can ask for, how long an acknowledged request is waited
-for, how long a later answer to a read sent again is waited for, and how an answer of only zeros
-is read again:
+for, how long a later answer to a read sent again is waited for, how an answer of only zeros
+is read again, and which statuses answer a write it took:
 
 ```python
 from modbus_event_connect import Fixed, PollRate, Retry, Steps, Within
@@ -561,6 +562,7 @@ VENTILATION = MicroNabtoModel(
     answer_wait=2.0,                      # guess
     later_answer_wait=5.0,                # guess
     zeros=RereadZeros(within=7.5, wait=Steps(0.5, then=Fixed(1.0)), at_once=True, halves=True),   # guess
+    write_taken=frozenset({0}),           # guess
 )
 ```
 
@@ -792,7 +794,8 @@ async def test_temperature_is_read():
 `SimulatedModbusDevice` refuses an unknown address with exception 0x02, Illegal Data Address,
 as the Modbus specification says, and can be made busy or silent; `SimulatedModbusGateway` can
 be made slow or cut off. `SimulatedMicroNabtoDevice` answers as a Nilan CTS 402 was measured
-to, and can be made to answer late (`answer_delay`) or to refuse writes (`write_statuses`).
+to, and can be made to answer late (`answer_delay`), to answer writes with other statuses
+(`write_statuses`), and to take writes answered with statuses other than 0 (`write_taken`).
 `FakeClock` lets a test move time forward without waiting.
 
 ---

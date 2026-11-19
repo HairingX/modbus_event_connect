@@ -1,6 +1,7 @@
 """`MicroNabtoDevice`, alone and under a client, against a simulated device on localhost UDP."""
 import asyncio
 import logging
+import re
 from typing import Any
 
 import pytest
@@ -39,6 +40,7 @@ from models import HANDSHAKE_NEVER_AGAIN, micro_nabto_model
 EMAIL = "user@example.invalid"
 DATAPOINT_READ, SETPOINT_READ, SETPOINT_WRITE = 0x2D, 0x2A, 0x2B
 BARE = micro_nabto_model(answer_wait=0.5, later_answer_wait=0.2)
+TAKES_ONE = micro_nabto_model(name="Takes one", answer_wait=0.5, later_answer_wait=0.2, write_taken=frozenset({0, 1}))
 
 
 def _key(text: str, data_type: DataType) -> Key[Any]:
@@ -67,7 +69,7 @@ def _device(simulated: SimulatedMicroNabtoDevice, *, clock: FakeClock | None = N
     host, port = simulated.address
     device = MicroNabtoDevice(MicroNabtoConnection(email, host=host, port=port, timeout=0.05, retries=1,
                                                    answer_wait=0.5, clock=clock, reconnect=reconnect, session_idle=12.0, rediscovery_timeout=0.1, rediscovery_resend=0.5),
-                              models=[BARE, CTS],
+                              models=[BARE, CTS, TAKES_ONE],
                               owns_connection=True)
     device.use(BARE)
     return device
@@ -391,6 +393,42 @@ async def test_a_write_the_device_did_not_take_is_busy_naming_its_status_and_sen
         assert simulated.setpoint_registers[(0, 30)] == 130
 
 
+async def test_a_write_answered_with_a_status_its_model_names_as_taken_is_ok_and_sent_once() -> None:
+    """A Genvex Optima 270 answered 0x01 to every write, and took each of them."""
+    async with _simulated() as simulated:
+        simulated.write_taken = frozenset({0, 1})
+        device = await _connected(simulated)
+        device.use(TAKES_ONE)
+        simulated.write_statuses = [1]
+        result = await device.write(_sp(30), EncodedWrite((5,)))
+        assert result.outcome is Outcome.OK
+        assert len(simulated.received(SETPOINT_WRITE)) == 1
+        assert simulated.setpoint_registers[(0, 30)] == 5
+
+
+async def test_a_status_only_another_model_names_as_taken_is_busy() -> None:
+    async with _simulated() as simulated:
+        simulated.write_taken = frozenset({0, 1})
+        device = await _connected(simulated)
+        simulated.write_statuses = [1]
+        result = await device.write(_sp(30), EncodedWrite((5,)))
+        assert (result.outcome, result.exception_code) == (Outcome.BUSY, 1)
+
+
+async def test_a_write_before_a_model_is_chosen_is_refused_and_not_sent() -> None:
+    async with _simulated() as simulated:
+        host, port = simulated.address
+        connection = MicroNabtoConnection(EMAIL, host=host, port=port, timeout=0.05, retries=1,
+                                          reconnect=HANDSHAKE_NEVER_AGAIN, answer_wait=0.5, session_idle=12.0,
+                                          rediscovery_timeout=0.1, rediscovery_resend=0.5)
+        device = MicroNabtoDevice(connection, models=[BARE], owns_connection=True)
+        assert await device.connect() is not None
+        with pytest.raises(RuntimeError, match="use"):
+            await device.write(_sp(30), EncodedWrite((5,)))
+        assert simulated.received(SETPOINT_WRITE) == []
+        await device.disconnect()
+
+
 async def test_a_write_answered_without_a_status_is_an_error() -> None:
     async with _simulated() as simulated:
         device = await _connected(simulated)
@@ -460,6 +498,16 @@ def test_one_read_can_ask_for_as_many_registers_as_a_datagram_carries() -> None:
     items = [(0, a) for a in range(MAX_REGISTERS_PER_READ)]
     request = wire.data_request(bytes(4), bytes(4), 1, wire.datapoint_read(items))
     assert len(request) <= wire.MAX_DATAGRAM < len(request) + wire.DATAPOINT_ITEM
+
+
+@pytest.mark.parametrize("statuses,problem", [
+    (frozenset[int](), "at least one status"),
+    (frozenset({0, 256}), "0-255, got [256]"),
+    (frozenset({-1, 0}), "0-255, got [-1]"),
+])
+def test_write_taken_names_statuses_an_answer_can_carry(statuses: frozenset[int], problem: str) -> None:
+    with pytest.raises(ModelError, match=re.escape(problem)):
+        micro_nabto_model(write_taken=statuses)
 
 
 def test_a_later_answer_wait_cannot_be_negative() -> None:

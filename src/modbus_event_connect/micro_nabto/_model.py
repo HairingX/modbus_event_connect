@@ -19,6 +19,8 @@ MAX_REGISTERS_PER_READ = (wire.MAX_DATAGRAM - wire.EMPTY_DATAPOINT_READ) // wire
 datagram. A device may answer fewer."""
 
 _MAX_OBJECT = 0xFF
+_MAX_STATUS = 0xFF
+"""A write's status is the first byte of its answer."""
 _MAX_ADDRESS: Mapping[tuple[str, type[Access]], int] = {
     ("read", DatapointRegister): 0xFFFF_FFFF,
     ("read", SetpointRegister): 0xFFFF,
@@ -57,8 +59,9 @@ class MicroNabtoModel(Model):
 
     Raises:
         ModelError: at construction, listing every problem; besides the model's own, a
-            `max_registers` outside what one datagram carries, and a wait that is not a finite
-            number of seconds it can wait.
+            `max_registers` outside what one datagram carries, a wait that is not a finite
+            number of seconds it can wait, and `write_taken` empty or holding a status no answer
+            can carry.
     """
     max_registers: int
     """Most registers the unit is asked for in one read: 1 to `MAX_REGISTERS_PER_READ`."""
@@ -70,9 +73,13 @@ class MicroNabtoModel(Model):
     for a later answer."""
     zeros: RereadZeros
     """How an answer of only zeros, where values were, is read again before the zeros are taken."""
+    write_taken: frozenset[int]
+    """The statuses, 0 to 255, the unit answers a setpoint write it took with; any other status
+    means it did not take the write."""
 
     def declaration_problems(self, points: Sequence[Point[Any]]) -> list[str]:
-        """What is wrong with the model over micro_nabto: a count or a wait it cannot have."""
+        """What is wrong with the model over micro_nabto: a count, a wait or a write status it
+        cannot have."""
         found: list[str] = []
         if not 1 <= self.max_registers <= MAX_REGISTERS_PER_READ:
             found.append(f"max_registers must be 1-{MAX_REGISTERS_PER_READ}, got {self.max_registers}")
@@ -80,6 +87,11 @@ class MicroNabtoModel(Model):
             found.append(f"answer_wait must be a finite number above 0, got {self.answer_wait}")
         if not (math.isfinite(self.later_answer_wait) and self.later_answer_wait >= 0):
             found.append(f"later_answer_wait must be a finite number >= 0, got {self.later_answer_wait}")
+        if not self.write_taken:
+            found.append("write_taken must name at least one status")
+        outside = sorted(status for status in self.write_taken if not 0 <= status <= _MAX_STATUS)
+        if outside:
+            found.append(f"write_taken must hold statuses 0-{_MAX_STATUS}, got {outside}")
         return found
 
     def address(self, access: Access) -> int:

@@ -158,6 +158,17 @@ class MicroNabtoDevice:
         """
         self._model = model_among(self._models, model)
 
+    def _chosen(self) -> MicroNabtoModel:
+        """The chosen model: without it, no answer to a write can be told taken or not.
+
+        Raises:
+            RuntimeError: `use()` has not chosen one.
+        """
+        if self._model is None:
+            raise RuntimeError("use() the device with its model first: which statuses mean a write was "
+                               "taken is the model's")
+        return self._model
+
     async def read(self, points: Sequence[Point[Any]]) -> Mapping[str, ReadResult]:
         spaces: dict[tuple[type[Access], int], list[Point[Any]]] = {}
         for point in points:
@@ -174,14 +185,19 @@ class MicroNabtoDevice:
         return result
 
     async def write(self, point: Point[Any], value: EncodedWrite) -> WriteResult:
-        """Write once and wait for the device's answer: OK when it took the write, BUSY when it
-        answered another status - a Nilan CTS 402 answered 0x63 and 0x85 to writes it took later -
-        and ERROR for an answer without a status."""
+        """Write once and wait for the device's answer: OK when its status is one of the chosen
+        model's `write_taken`, BUSY when it is another - a Nilan CTS 402 answered 0x63 and 0x85 to
+        writes it took later - and ERROR for an answer without a status.
+
+        Raises:
+            RuntimeError: `use()` has not chosen a model; nothing is sent.
+        """
         access = point.write
         if not isinstance(access, SetpointRegister):
             raise TypeError(f"point {point.key!r}: only a SetpointRegister can be written over micro_nabto")
         if value.bit_index is not None:
             raise ValueError(f"point {point.key!r}: a single bit cannot be written over micro_nabto")
+        taken = self._chosen().write_taken
         items = [(access.obj, access.address + i, register) for i, register in enumerate(value.registers)]
         answer = await self._connection.request(wire.setpoint_write(items), answer_wait=self.answer_wait)
         status = wire.write_status(answer) if answer is not None else None
@@ -191,7 +207,7 @@ class MicroNabtoDevice:
             return self._written(WriteResult(Outcome.NO_ANSWER, detail="no answer from the device"))
         if status is None:
             return self._written(WriteResult(Outcome.ERROR, detail="an answer without a status"))
-        if status == 0:
+        if status in taken:
             return self._written(WriteResult(Outcome.OK))
         return self._written(WriteResult(Outcome.BUSY, exception_code=status,
                                          detail=f"the device answered with status 0x{status:02x}"))
