@@ -5,7 +5,8 @@ import gc
 from dataclasses import replace
 import logging
 from collections.abc import Awaitable, Mapping, Sequence
-from typing import Any, TypeVar
+from datetime import timedelta
+from typing import Any, TypeVar, cast
 
 import pytest
 
@@ -48,6 +49,7 @@ from modbus_event_connect._device import (
 from modbus_event_connect._model import Model, RepeatedSection, Scan, Section
 from modbus_event_connect._point import Point
 from modbus_event_connect import Write
+from modbus_event_connect.modbus import BitWrite
 from modbus_event_connect.modbus._access import (
     Coil,
     HoldingRegister,
@@ -73,6 +75,8 @@ class FakeDevice:
         self.reads: list[tuple[str, ...]] = []
         self.writes: list[tuple[str, EncodedWrite]] = []
         self.write_outcomes: dict[str, Outcome] = {}
+        self.write_answers: dict[str, WriteResult] = {}
+        """The answer to every write to a key, in place of what the others say."""
         self.busy_writes: dict[str, int] = {}
         """How many of the next writes to a key are answered BUSY."""
         self.write_raises: set[str] = set()
@@ -110,6 +114,8 @@ class FakeDevice:
         self.writes.append((point.key, value))
         if point.key in self.write_raises:
             raise RuntimeError("the transport broke")
+        if point.key in self.write_answers:
+            return self.write_answers[point.key]
         if self.busy_writes.get(point.key, 0) > 0:
             self.busy_writes[point.key] -= 1
             return WriteResult(Outcome.BUSY)
@@ -317,18 +323,18 @@ def test_connect_reads_the_device_once() -> None:
     assert device.reads == [], "nothing is due right after connect"
 
 
-def test_diagnostics_are_the_devices_counters_with_the_level_and_the_certainty_of_each_point() -> None:
+def test_diagnostics_are_the_devices_counters_with_the_level_the_writes_and_the_certainty_of_each_point() -> None:
     client, device, _ = _connected()
     asyncio.run(client.poll())
-    assert client.diagnostics() == {**device.diagnostics(), "level": "documented",
+    assert client.diagnostics() == {**device.diagnostics(), "level": "documented", "writes": {},
                                     "certainty": {str(key): "reported" for key in client.points},
                                     "candidates": {}}
     assert device.diagnostics() == {"reads": len(device.reads)}
 
 
-def test_diagnostics_before_the_scan_are_the_devices_counters_with_the_level() -> None:
+def test_diagnostics_before_the_scan_are_the_devices_counters_with_the_level_and_the_writes() -> None:
     client, device, _ = _client()
-    assert client.diagnostics() == {**device.diagnostics(), "level": "documented"}
+    assert client.diagnostics() == {**device.diagnostics(), "level": "documented", "writes": {}}
 
 
 def test_a_scan_step_removes_what_the_unit_does_not_have() -> None:
@@ -1171,6 +1177,136 @@ def test_disconnect_cancels_a_pending_pulse() -> None:
     asyncio.run(press_and_leave())
     assert [value.registers for _, value in device.writes] == [(1,)]
     assert client.status(Status.CONNECTED).value is False
+
+
+# ============================================================================== write log
+
+def _logged(client: Client, key: str) -> list[dict[str, Any]]:
+    """The writes to `key` the client's diagnostics show, the newest last."""
+    writes = client.diagnostics()["writes"]
+    assert isinstance(writes, dict)
+    return cast(dict[str, list[dict[str, Any]]], writes).get(key, [])
+
+
+def _endings(client: Client, key: str) -> list[tuple[Any, ...]]:
+    return [(r["value"], r["outcome"], r["attempts"], r["detail"]) for r in _logged(client, key)]
+
+
+def test_a_taken_write_is_logged_with_what_was_sent_and_the_read_that_followed() -> None:
+    client, _, clock = _connected()
+    client.subscribe(MODE, Recorder())
+    sent_at = clock.now().isoformat()
+    assert asyncio.run(client.write(MODE, 2)) is True
+    assert _logged(client, "mode")[0]["read_back"] is None, "the value held as written is no read-back"
+    clock.advance(MODEL.timing.read_back_after)
+    asyncio.run(client.poll())
+    assert _logged(client, "mode") == [{
+        "number": 1, "value": 2, "raw": [2], "sent_at": sent_at, "attempts": 1, "outcome": "taken",
+        "detail": "", "ended_at": sent_at,
+        "read_back": {"value": 2, "quality": "GOOD", "raw": [2], "at": clock.now().isoformat()},
+    }]
+
+
+def test_a_busy_write_taken_in_the_end_is_logged_with_every_sending() -> None:
+    client, device, clock = _connected(write_retry=Retry(Fixed(0.5), Within(10.0)))
+    device.busy_writes["mode"] = 3
+    sent_at = clock.now()
+    asyncio.run(client.write(MODE, 2))
+    [record] = _logged(client, "mode")
+    assert (record["outcome"], record["attempts"]) == ("taken", 4)
+    assert record["ended_at"] == (sent_at + timedelta(seconds=1.5)).isoformat()
+
+
+def test_a_busy_write_given_up_is_logged_refused_as_busy() -> None:
+    client, device, _ = _connected(write_retry=Retry(Fixed(2.0), Attempts(3)))
+    device.busy_writes["mode"] = 1000
+    asyncio.run(client.write(MODE, 2))
+    assert _endings(client, "mode") == [(2, "refused", 3, "busy")]
+
+
+@pytest.mark.parametrize(("answer", "outcome", "detail"), [
+    (WriteResult(Outcome.MISSING, 2, "illegal data address"), "refused", "missing (0x02): illegal data address"),
+    (WriteResult(Outcome.UNSUPPORTED, 1), "refused", "unsupported (0x01)"),
+    (WriteResult(Outcome.OFFLINE, 4), "refused", "offline (0x04)"),
+    (WriteResult(Outcome.NO_ANSWER, detail="timed out"), "no_answer", "no_answer: timed out"),
+    (WriteResult(Outcome.ERROR, 3), "error", "error (0x03)"),
+])
+def test_a_write_not_taken_is_logged_with_the_devices_answer(answer: WriteResult, outcome: str, detail: str) -> None:
+    client, device, _ = _connected()
+    device.write_answers["mode"] = answer
+    assert asyncio.run(client.write(MODE, 2)) is False
+    assert _endings(client, "mode") == [(2, outcome, 1, detail)]
+
+
+def test_a_write_overtaken_while_sent_again_is_logged_overtaken() -> None:
+    client, device, _ = _connected(write_retry=Retry(Fixed(0.5), Within(10.0)))
+    device.busy_writes["mode"] = 2
+
+    async def taps() -> None:
+        await asyncio.gather(client.write(MODE, 1), client.write(MODE, 3))
+    within(2, taps())
+    assert _endings(client, "mode") == [(1, "overtaken", 1, ""), (3, "taken", 2, "")]
+
+
+def test_a_write_that_raises_is_logged_as_an_error() -> None:
+    client, device, _ = _connected()
+    device.write_raises.add("mode")
+    with pytest.raises(RuntimeError):
+        asyncio.run(client.write(MODE, 2))
+    assert _endings(client, "mode") == [(2, "error", 1, "RuntimeError: the transport broke")]
+
+
+def test_a_write_cancelled_while_sent_is_logged_as_an_error() -> None:
+    client, device, _ = _connected()
+    device.delay = 0.05
+
+    async def cancel() -> None:
+        task = asyncio.ensure_future(client.write(MODE, 2))
+        await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    asyncio.run(cancel())
+    assert _endings(client, "mode") == [(2, "error", 1, "CancelledError")]
+
+
+def test_a_write_sequence_logs_what_it_sent_in_order() -> None:
+    client, device, _ = _connected()
+    device.write_outcomes["relay"] = Outcome.ERROR
+    asyncio.run(client.write_sequence([Write(MODE, 2), Write(RELAY, True), Write(NAME, "AB")]))
+    assert [(r["number"], r["outcome"]) for r in _logged(client, "mode") + _logged(client, "relay")] == [
+        (1, "taken"), (2, "error")]
+    assert _logged(client, "name") == [], "a write never sent is not logged"
+
+
+def test_a_pulse_logs_the_press_and_the_release() -> None:
+    client, _, _ = _connected()
+
+    async def press_and_wait() -> None:
+        await client.write(BELL, True)
+        await asyncio.sleep(0.05)
+    asyncio.run(press_and_wait())
+    assert [(r["value"], r["raw"], r["outcome"]) for r in _logged(client, "bell")] == [
+        (True, [1], "taken"), (False, [0], "taken")]
+
+
+def test_a_write_of_one_bit_logs_the_bit_sent() -> None:
+    lamp = Key("lamp", bool)
+    point = Point(lamp, read=HoldingRegister(10), write=HoldingRegister(10), data_type=DataType.bit(3),
+                  poll_rate=PollRate.MEDIUM)
+    model = modbus_model([Section([point])], name="S", manufacturer="S", bit_write=BitWrite.MASK)
+    client = Client(FakeDevice({"lamp": (0,)}), model, clock=FakeClock(),
+                    offline_after_intervals=OFFLINE_AFTER_INTERVALS, level=Level.DOCUMENTED)
+    asyncio.run(client.connect())
+    asyncio.run(client.write(lamp, True))
+    assert [r["raw"] for r in _logged(client, "lamp")] == [[1]]
+
+
+def test_the_latest_writes_of_a_key_are_kept() -> None:
+    client, _, _ = _connected()
+    for n in range(client_module._WRITES_KEPT + 1):
+        asyncio.run(client.write(RELAY, n % 2 == 0))
+    assert [r["number"] for r in _logged(client, "relay")] == list(range(2, client_module._WRITES_KEPT + 2))
 
 
 # ===================================================== regression scenarios

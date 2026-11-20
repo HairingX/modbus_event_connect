@@ -37,6 +37,7 @@ from event_connect import (
     ValueCallback,
     Write,
     WriteKind,
+    WriteLog,
     changed,
     is_key,
     selector,
@@ -58,6 +59,10 @@ _UNANSWERED = frozenset({Outcome.NO_ANSWER, Outcome.BUSY})
 _PAUSE_AFTER_FAILURE = 1.0  # guess
 """Seconds `run()` waits after a poll that raised, so that a failure that repeats is not retried
 without a pause."""
+
+_WRITES_KEPT = 5
+"""How many of the latest writes to each point are kept: enough to see a value set, set again,
+and read back."""
 
 _DEFINITIVE = frozenset({Outcome.OK, Outcome.MISSING, Outcome.UNSUPPORTED, Outcome.OFFLINE})
 """Answers that say what the unit has. Any other leaves a check's outcome unknown."""
@@ -152,10 +157,11 @@ class Client:
         self._statuses = StatusBoard(self._clock)
 
         self._passes = Passes()
+        self._write_log = WriteLog(self._clock, per_key=_WRITES_KEPT)
         self._writes = WriteQueue(device, clock=self._clock,
                                   retry=lambda: self._require_model().model.write_retry,
-                                  statuses=self._statuses, answered=self._update_reachability,
-                                  written=self._taken)
+                                  statuses=self._statuses, log=self._write_log,
+                                  answered=self._update_reachability, written=self._taken)
 
     # ================================================================================= scan
 
@@ -454,10 +460,12 @@ class Client:
 
     def diagnostics(self) -> Mapping[str, object]:
         """What a bug report needs, with no address: the device's counters - requests, failures by
-        outcome, latency; the `level`; and, once the device has been scanned, the `certainty` of
-        each point the unit has, and the `candidates` among them, each with the key it replaces
-        or None."""
-        found: dict[str, object] = {**self._device.diagnostics(), "level": str(self._level)}
+        outcome, latency; the `level`; the `writes` sent to each key, the latest few, the newest
+        last, each with how it ended and the first answered read of the key after it; and, once
+        the device has been scanned, the `certainty` of each point the unit has, and the
+        `candidates` among them, each with the key it replaces or None."""
+        found: dict[str, object] = {**self._device.diagnostics(), "level": str(self._level),
+                                    "writes": self._write_log.diagnostics()}
         if self._resolved is not None:
             points = self.points
             found["certainty"] = {str(key): str(point.certainty) for key, point in points.items()}
@@ -737,6 +745,7 @@ class Client:
             answer = answers[point.key]
             previous = self._values.get(point.key)
             data = self._data_value(point, answer, previous)
+            self._write_log.read(point.key, data)
             if data.quality is Quality.MISSING:
                 reason = answer.detail or answer.outcome.name.lower()
                 self._missing_by_read[point.key] = self._unavailable[point.key] = reason

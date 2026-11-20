@@ -287,6 +287,12 @@ against the point's limits, or its states, and `InvalidValueError` says why it w
 - `await client.write_sequence([Write(MODE, Mode.HEAT), Write(TARGET, 21.5)])` checks every
   value first, then writes them in order and stops at the first refusal.
 - `client.status(Status.WRITE_PENDING).value` is `True` while writes are waiting or being sent.
+- `client.diagnostics()["writes"]` shows the latest five writes sent to each key, the newest
+  last: the value asked for, the registers or bit sent, when it was first sent and how many
+  times, how it ended - `taken`, `refused`, `no_answer`, `overtaken` or `error`, with the
+  device's answer and exception code in `detail` - when, and the first answered read of the key
+  after it, as its `read_back`. A value refused before sending, or overtaken before it was first
+  sent, is not among them.
 
 `Client(device, model, offline_after_intervals=3, level=Level.DOCUMENTED, read_only=True)` refuses every write with
 `ReadOnlyError` before it reaches the device. Use it while developing against a real
