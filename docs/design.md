@@ -888,8 +888,11 @@ the time allowed, how many readings again were sent, how each episode ended (val
 values after waiting, values in halves, zeros taken), how many are open, the longest until
 values, the largest request answered with values and the smallest answered with zeros. Per point:
 last quality and when it was last good. The client adds its level, the certainty of each point
-the unit has and each candidate it uses (4.4). This is what a bug report needs — without a host
-address in it.
+the unit has and each candidate it uses (4.4), and the writes it sent: the latest five per key,
+each with the value asked for, what was sent, how many times, how it ended with the device's
+answer, and the first answered read of the key after it. A tester's report then shows whether a
+write reached the unit and held, without the tester describing it. This is what a bug report
+needs — without a host address in it.
 
 micro_nabto logs each read's answer at debug: how old the session is, why it was established and
 how long after the answer before it, which of its requests this was, the sequence number, how many

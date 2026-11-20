@@ -8,7 +8,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from event_connect import Clock, Retry, Status, StatusBoard, WriteKind
+from event_connect import Clock, Retry, Status, StatusBoard, WriteKind, WriteLog, WriteOutcome, WriteRecord
 
 from ._conversion import encode
 from ._device import Device, EncodedWrite, Outcome, WriteResult
@@ -38,17 +38,20 @@ class WriteQueue:
     """
 
     def __init__(self, device: Device, *, clock: Clock, retry: Callable[[], Retry], statuses: StatusBoard,
-                 answered: Callable[[bool], None], written: Callable[[Point[Any], object], None]) -> None:
+                 log: WriteLog, answered: Callable[[bool], None],
+                 written: Callable[[Point[Any], object], None]) -> None:
         """Args:
             retry: when a write the device answered `BUSY` is sent again, counting its sendings
                 and the time since the first; asked for each write as it is sent.
             statuses: holds `Status.WRITE_PENDING` from the first queued write until the last one
                 has finished.
+            log: records every write sent, each sending again, and how it ended.
             answered: told after every sending whether the device answered it.
             written: told the point and the value of every accepted write.
         """
         self._device = device
         self._clock = clock
+        self._log = log
         self._retry = retry
         self._statuses = statuses
         self._answered = answered
@@ -76,7 +79,7 @@ class WriteQueue:
     async def _send_sequence(self, writes: Sequence[tuple[Point[Any], object]]) -> bool:
         async with self._lock:
             for point, value in writes:
-                result = await self._until_taken(point, encode(point, value), lambda: False)
+                result = await self._until_taken(point, value, lambda: False)
                 assert result is not None
                 if not result.ok:
                     _LOGGER.warning("write sequence stopped at '%s': %s", point.key, result.outcome.name)
@@ -137,7 +140,7 @@ class WriteQueue:
     async def _send(self, write: _Write) -> bool | None:
         """Whether the device took `write`; None when a newer setting overtook it first."""
         point = write.point
-        result = await self._until_taken(point, encode(point, write.value), lambda: write.superseded)
+        result = await self._until_taken(point, write.value, lambda: write.superseded)
         if result is None:
             return None
         if not result.ok:
@@ -148,14 +151,33 @@ class WriteQueue:
             self._start_pulse(point)
         return True
 
-    async def _until_taken(self, point: Point[Any], value: EncodedWrite,
+    async def _until_taken(self, point: Point[Any], value: object,
                            overtaken: Callable[[], bool]) -> WriteResult | None:
         """Write, and send again as `retry` says while the device answers `BUSY`; None once
-        `overtaken()`."""
+        `overtaken()`. How it ended is recorded in the log."""
+        encoded = encode(point, value)
+        record = self._log.sent(point.key, value, _raw(encoded))
+        try:
+            result = await self._send_until_taken(point, encoded, overtaken, record)
+        except BaseException as err:
+            self._log.ended(record, WriteOutcome.ERROR, detail=_error(err))
+            raise
+        if result is None:
+            self._log.ended(record, WriteOutcome.OVERTAKEN)
+        else:
+            self._log.ended(record, _OUTCOMES.get(result.outcome, WriteOutcome.REFUSED), detail=_detail(result))
+        return result
+
+    async def _send_until_taken(self, point: Point[Any], value: EncodedWrite, overtaken: Callable[[], bool],
+                                record: WriteRecord) -> WriteResult | None:
+        """Send `value` until the device takes it or `retry` gives up, counting each sending after
+        the first in `record`; None once `overtaken()`."""
         retry = self._retry()
         started = self._clock.monotonic()
         sendings = 0
         while True:
+            if sendings:
+                self._log.resent(record)
             result = await self._device.write(point, value)
             sendings += 1
             self._answered(result.outcome is not Outcome.NO_ANSWER)
@@ -190,3 +212,25 @@ class WriteQueue:
         for key in keys:
             self._writing[key] -= 1
             self._changes[key] += 1
+
+
+_OUTCOMES = {Outcome.OK: WriteOutcome.TAKEN, Outcome.NO_ANSWER: WriteOutcome.NO_ANSWER, Outcome.ERROR: WriteOutcome.ERROR}
+"""How a write ended, by the device's last answer; any other answer refused it."""
+
+
+def _raw(encoded: EncodedWrite) -> tuple[int, ...]:
+    """What `encoded` sends: its registers, or its one bit."""
+    return encoded.registers or (int(encoded.bit_value),)
+
+
+def _detail(result: WriteResult) -> str:
+    """The device's answer, in the protocol's words: none for one that took the write."""
+    if result.ok:
+        return ""
+    code = f" (0x{result.exception_code:02X})" if result.exception_code else ""
+    return f"{result.outcome.name.lower()}{code}" + (f": {result.detail}" if result.detail else "")
+
+
+def _error(err: BaseException) -> str:
+    """What `err` says, after what it is."""
+    return f"{type(err).__name__}: {err}" if str(err) else type(err).__name__
