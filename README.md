@@ -333,6 +333,36 @@ rooms. After `connect()`:
 | `client.unavailable_reasons` | keys the unit does not have, with the reason; not those its level leaves out |
 | `client.subscribe_points(callback)` | told when the unit gains or loses points, such as a room set up later |
 
+## Mapping a unit
+
+To find out what a unit's registers mean, its owner changes one thing at a time on the unit's own
+panel, and the registers are read as raw words before and after each change. The registers read
+follow from the model: for each table its points read, the span from the lowest to the highest
+address they read or write, gaps included, and above it up to a limit you state:
+
+```python
+found = await client.map_areas(limit=300)       # finds which registers the unit holds, and reads them
+# ... the owner opens the bypass damper on the unit's panel ...
+after = await client.read_mapped(found)          # reads only the registers found
+for change in difference(found, after):
+    print(change.address, change.before, change.after, change.bits)   # datapoint 23 0 1 (0,)
+```
+
+- `client.mapping_areas(limit=300)` gives the areas, as `Area`s of the protocol's own tables:
+  `"input"`, `"holding"`, `"coil"` and `"discrete_input"` over Modbus, numbered as the model's
+  points are, and `"datapoint"` and `"setpoint"` over micro_nabto, in the gateway's own numbers.
+- Nothing is read until one of them is called: reads only, never a write, as a polling pass of
+  their own, through the device's requests, paced and tried again when busy as every read is.
+- A device refuses a whole request for one register it does not have. Inside the span, after
+  such a register, `map_areas` asks for one register at a time again, doubling while each
+  answers, so a run of absent registers costs one request each. Above the span it asks for one
+  register in ten alone, and reads only the stretches around one that answers: a run of ten or
+  more is always found, a shorter one only near another.
+- `read_mapped(found)` reads only the registers `found` holds a word for, as many in one request
+  as the model reads.
+- A request answered busy after its tries, left unanswered, or answered so that it cannot be read
+  stops the read with `CannotConnectError`.
+
 ## Levels and candidates
 
 Every point says how certain it is that it is what it claims, as its `certainty`: `VERIFIED`,

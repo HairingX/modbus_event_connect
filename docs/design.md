@@ -533,6 +533,37 @@ section through.
 
 ---
 
+### 4.6 Mapping a unit
+
+What a register means is found on a unit by its owner: they change one thing at a time on the
+unit's own panel, and the registers are read as raw words before and after, so that what changed
+can be told from what did not. Which registers are read follows from the model, so no model
+states them: for each table its points read, from the lowest to the highest address they read,
+the gaps included, as the gaps are where the unknown registers lie, and writes counted too; and above it, up to a limit
+the caller states, as how far a device's numbering goes is not known. For micro_nabto these are
+the gateway's own numbers, never a manual's Modbus numbers.
+
+`Client.map_areas(limit=...)` and `Client.read_mapped(found)` are the only things that read them,
+so a unit nobody maps is read exactly as before. Each runs as a polling pass of its own, through
+the device's requests, paced and tried again when busy as every read is, and never writes. A
+request answered busy after its tries, left unanswered, or answered so that it cannot be read
+stops it with `CannotConnectError`: a mapping is worth less than the unit's own work, and the
+owner decides when to try again.
+
+A device refuses a whole request for one register it does not have, and the device halves a
+refused request until each refusal is pinned to one register: two requests for each absent
+register in a run of them. So `map_areas` reads the span in requests as large as the model reads,
+and after a request that held an absent register from one register at a time, doubling while
+each answers: a run of absent registers costs one request each, and a run of present ones a few.
+Above the span, where most registers are absent, one in ten is asked for alone, and only the
+stretches around one that answers are read: a run of ten or more is always found, a shorter one
+only near another. On simulated gateways of Nilan's and Genvex's units, with a limit of 300, the
+first read costs between about 15 and 500 requests; `read_mapped` then reads only the registers
+found, in two to seven requests.
+
+What a read found is an `event_connect.Snapshot`, and `difference()` gives what changed between
+two; both are protocol-free.
+
 ## 5. Freshness and scheduling
 
 ### 5.1 The idea

@@ -35,6 +35,8 @@ class Access:
     """Whether this space accepts writes."""
     bits: ClassVar[bool] = False
     """Whether each address holds one bit rather than a 16-bit register."""
+    table_name: ClassVar[str]
+    """What the protocol calls the space, such as "input" or "datapoint"."""
 
     def __post_init__(self) -> None:
         if self.address < 0:
@@ -44,6 +46,11 @@ class Access:
     def space(self) -> Hashable:
         """Identifies the address space; two accesses can share a request only when it's equal."""
         return type(self)
+
+    @property
+    def table(self) -> str:
+        """The space by name, as a raw snapshot of registers names it."""
+        return self.table_name
 
 
 # ================================================================================== point

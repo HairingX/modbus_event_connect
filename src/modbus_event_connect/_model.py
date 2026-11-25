@@ -144,7 +144,7 @@ class Model(ABC):
         object.__setattr__(self, "identity_points", tuple(self.identity_points))
         object.__setattr__(self, "scan_steps", tuple(self.scan_steps))
         object.__setattr__(self, "poll_intervals", MappingProxyType(dict(self.poll_intervals)))
-        declared = _declared_points(self)
+        declared = declared_points(self)
         object.__setattr__(self, "keys", frozenset(point.key for point in declared))
         object.__setattr__(self, "_keys_at", MappingProxyType({
             level: self.keys if level is Level.TEST else frozenset(point.key for point in points_at(declared, level))
@@ -183,6 +183,10 @@ class Model(ABC):
         """
 
     @abstractmethod
+    def read_limit(self, access: Access) -> int:
+        """Most registers, or bits, of the space of `access` one read asks for."""
+
+    @abstractmethod
     def declaration_problems(self, points: Sequence[Point[Any]]) -> list[str]:
         """What is wrong with the model over its protocol, given every point it declares. Empty when
         nothing is."""
@@ -194,7 +198,7 @@ def _scans(model: Model) -> bool:
                                          for section in model.sections)
 
 
-def _declared_points(model: Model) -> list[Point[Any]]:
+def declared_points(model: Model) -> list[Point[Any]]:
     """Every point `model` declares, whatever the identity; an instance whose factory raises is left
     out, as resolving reports it."""
     points = list(model.identity_points)
@@ -216,7 +220,7 @@ def _candidate_problems(model: Model) -> list[str]:
     refreshes that name by key a point a candidate of another key replaces."""
     found = [f"identity point {point.key!r} is a candidate, but identity points are read at every level"
              for point in model.identity_points if point.candidate is not None]
-    sections = _declared_points(model)[len(model.identity_points):]
+    sections = declared_points(model)[len(model.identity_points):]
     replaceable: dict[str, set[type[object]]] = {}
     for point in sections:
         if point.candidate is None:
@@ -238,7 +242,7 @@ def _candidate_problems(model: Model) -> list[str]:
                  for replaced, keys in replacing.items() if len(keys) > 1)
     # At the Test level such a point is gone: a refresh naming it by key would read nothing there.
     renamed = {replaced for replaced, keys in replacing.items() if any(key != replaced for key in keys)}
-    for point in _declared_points(model):
+    for point in declared_points(model):
         for name, refresh in (("on_write", point.on_write), ("on_change", point.on_change)):
             if refresh is not None and isinstance(refresh.targets, tuple):
                 for target in sorted(renamed.intersection(refresh.targets)):

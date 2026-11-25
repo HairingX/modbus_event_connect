@@ -71,6 +71,10 @@ class ModbusModel(Model):
             found.append(f"bit_write is {self.bit_write.name}, but no point writes one bit of a holding register")
         return found
 
+    def read_limit(self, access: Access) -> int:
+        """`max_bits` for a coil or discrete input, `max_registers` for a register."""
+        return self.max_bits if access.bits else self.max_registers
+
     def address(self, access: Access) -> int:
         """The address sent for `access`, as `numbering` gives it.
 

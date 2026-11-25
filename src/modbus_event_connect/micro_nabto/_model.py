@@ -94,6 +94,10 @@ class MicroNabtoModel(Model):
             found.append(f"write_taken must hold statuses 0-{_MAX_STATUS}, got {outside}")
         return found
 
+    def read_limit(self, access: Access) -> int:
+        """`max_registers`, in either space."""
+        return self.max_registers
+
     def address(self, access: Access) -> int:
         """The address sent for `access`: the one it carries."""
         return access.address
