@@ -41,6 +41,10 @@ from modbus_event_connect.modbus import (
     InputRegister,
     ModbusDevice,
     ModbusModel,
+    NumberRange,
+    RegisterNumbering,
+    modicon,
+    plain,
 )
 from modbus_event_connect.testing import (
     NO_ANSWER,
@@ -118,6 +122,36 @@ def test_the_areas_run_from_0_in_each_space_the_points_read_or_write_up_to_the_l
 
 def test_the_areas_reach_the_highest_address_a_point_reads_where_it_is_above_the_limit() -> None:
     assert areas(_model(), 1) == (Area("input", 0, 30), Area("holding", 0, 6))
+
+
+def test_a_space_starts_at_the_lowest_number_its_numbering_gives_and_skips_numbers_without_an_address() -> None:
+    def model(numbering: RegisterNumbering, number: int) -> ModbusModel:
+        return modbus_model([Section([Point(LOW, read=InputRegister(number), poll_rate=PollRate.FAST)])],
+                            numbering=numbering)
+
+    assert areas(model(plain(first_address=0), 1), 300) == (Area("input", 1, 300),)
+    assert areas(model(modicon(digits=5, first_address=0), 30005), 300) == (Area("input", 30001, 300),)
+    gapped = RegisterNumbering(input_registers=[NumberRange(20, 30, address=100), NumberRange(1, 10, address=0)])
+    assert areas(model(gapped, 5), 300) == (Area("input", 1, 10), Area("input", 20, 11))
+    assert micro_nabto_model().numbers(SetpointRegister(0)) == (range(0, 0x10000),)
+
+
+@pytest.mark.parametrize(("numbering", "number", "image"), [
+    (plain(first_address=0), 1, {0: 1, 5: 2, 299: 3}),
+    (modicon(digits=5, first_address=0), 30005, {4: 1, 150: 2, 299: 3}),
+    (RegisterNumbering(input_registers=[NumberRange(1, 10, address=0), NumberRange(20, 30, address=100)]), 5,
+     {4: 1, 100: 2, 110: 3}),
+], ids=["numbered-from-1", "modicon", "with-a-gap"])
+async def test_a_unit_numbered_otherwise_is_mapped_completely_from_its_lowest_number(
+        numbering: RegisterNumbering, number: int, image: dict[int, int]) -> None:
+    model = modbus_model([Section([Point(LOW, read=InputRegister(number), poll_rate=PollRate.FAST)])],
+                         numbering=numbering, max_registers=8)
+    unit = SimulatedModbusDevice(input_registers=image)
+    client = await _connected(model, unit)
+    snapshot = await client.map_areas(limit=300)
+    expected = {a for area in areas(model, 300) for a in area.addresses()}
+    assert set(snapshot.values) | snapshot.missing == expected
+    assert sorted(snapshot.values.values()) == sorted(image.values())
 
 
 def test_the_limit_is_at_least_one_address() -> None:

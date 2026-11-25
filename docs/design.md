@@ -538,10 +538,11 @@ section through.
 What a register means is found on a unit by its owner: they change one thing at a time on the
 unit's own panel, and the registers are read as raw words before and after, so that what changed
 can be told from what did not. Which registers are read follows from the model, so no model
-states them: for each address space its points read or write, every address from 0 up to a limit
-the caller states, or up to the highest address a point reads or writes where that is higher. No
-address in between is skipped, as a register no one knows can be anywhere; for micro_nabto these
-are the gateway's own numbers, never a manual's Modbus numbers.
+states them: for each address space its points read or write, every number its numbering gives
+an address, from the space's lowest number for as many numbers as the caller states, or up to the
+highest number a point reads or writes where that is higher. No number in between is skipped, as
+a register no one knows can be anywhere; for micro_nabto these are the gateway's own numbers, from
+0, never a manual's Modbus numbers.
 
 `Client.map_areas(limit=...)` and `Client.read_mapped(found)` are the only things that read them,
 so a unit nobody maps is read exactly as before. Each runs as a polling pass of its own, through
@@ -562,9 +563,11 @@ in a few requests.
 
 Registers answered with only zeros where they held values open an episode of zeros on the
 micro_nabto device: it answers `BUSY` with a `retry_after`. A mapping waits that long and
-reads them again, until the device takes the zeros as its model's `RereadZeros` says, or values
-come. So zeros the owner's change brought are taken, and the zeros of a gateway that holds nothing
-yet at the start of a session are not recorded as values.
+reads them again, until values come or the device takes the zeros at its model's
+`RereadZeros.within`. So zeros the owner's change brought are taken, and the zeros of a gateway
+that holds nothing yet at the start of a session are recorded only if they last that long: 7.5 s
+for a Nilan gateway, whose session start was once seen answering zeros for about 10 s. As the
+client's polls keep a session going, a mapping rarely meets a new one.
 
 What a read found is an `event_connect.Snapshot`, and `difference()` gives what changed between
 two; both are protocol-free.

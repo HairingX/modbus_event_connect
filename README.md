@@ -337,11 +337,12 @@ rooms. After `connect()`:
 
 To find out what a unit's registers mean, its owner changes one thing at a time on the unit's own
 panel, and the registers are read as raw words before and after each change. For each address
-space the model's points read or write, every address from 0 up to a limit you state - or up to
-the highest address a point reads or writes, where that is higher - is read once:
+space the model's points read or write, every number of it that has an address is read once: from
+the space's lowest number, as the model's numbering gives it, for as many numbers as the limit you
+state - or up to the highest number a point reads or writes, where that is higher:
 
 ```python
-found = await client.map_areas(limit=300)       # every address 0-299: a word, or missing
+found = await client.map_areas(limit=300)       # the first 300 numbers of each space: a word, or missing
 # ... the owner opens the bypass damper on the unit's panel ...
 after = await client.read_mapped(found)          # only the addresses that answered
 for change in difference(found, after):
@@ -359,8 +360,9 @@ for change in difference(found, after):
   `map_areas` asks for one register at a time again, doubling while each answers, so a run of
   absent registers costs one request each.
 - Registers answered with only zeros where they held values are read again when the device
-  says, until it takes the zeros as its model's `RereadZeros` says, or values come: zeros the
-  owner's change brought are taken, those of a gateway that holds nothing yet are not.
+  says, until values come or the device takes the zeros at its model's `RereadZeros.within` -
+  7.5 s for a Nilan gateway: zeros the owner's change brought are taken, and the zeros of a
+  gateway that holds nothing yet at the start of a session are taken only if they last that long.
 - `read_mapped(found)` reads only the registers `found` holds a word for, as many in one request
   as the model reads.
 - A request answered busy after its tries, left unanswered, or answered so that it cannot be read

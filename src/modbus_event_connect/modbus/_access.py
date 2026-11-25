@@ -62,7 +62,8 @@ class Coil(Access):
         return "coil"
 
 
-TABLES: tuple[type[Access], ...] = (Coil, DiscreteInput, InputRegister, HoldingRegister)
+SPACES: tuple[type[Access], ...] = (Coil, DiscreteInput, InputRegister, HoldingRegister)
+"""Modbus's four address spaces, which its specification calls tables."""
 
 
 @dataclass(frozen=True)

@@ -13,7 +13,7 @@ from ._access import (
     MAX_BITS_PER_READ,
     MAX_REGISTERS_PER_READ,
     MAX_REGISTERS_PER_WRITE,
-    TABLES,
+    SPACES,
     BitWrite,
     HoldingRegister,
     RegisterNumbering,
@@ -75,6 +75,11 @@ class ModbusModel(Model):
         """`max_bits` for a coil or discrete input, `max_registers` for a register."""
         return self.max_bits if access.bits else self.max_registers
 
+    def numbers(self, access: Access) -> tuple[range, ...]:
+        """The numbers `numbering` gives the space of `access`, lowest first."""
+        ranges = sorted(self.numbering.ranges(type(access)), key=lambda numbers: numbers.first)
+        return tuple(range(numbers.first, numbers.last + 1) for numbers in ranges)
+
     def address(self, access: Access) -> int:
         """The address sent for `access`, as `numbering` gives it.
 
@@ -90,8 +95,8 @@ class ModbusModel(Model):
         for side, access in (("read", point.read), ("write", point.write)):
             if access is None:
                 continue
-            if type(access) not in TABLES:
-                found.append(f"the {side} side is {type(access).__name__}, which is not a Modbus table")
+            if type(access) not in SPACES:
+                found.append(f"the {side} side is {type(access).__name__}, which is not a Modbus space")
                 continue
             try:
                 start = self.address(access)

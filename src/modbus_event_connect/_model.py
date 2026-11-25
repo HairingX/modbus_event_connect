@@ -6,7 +6,7 @@ from __future__ import annotations
 import dataclasses
 from abc import ABC, abstractmethod
 from collections import Counter
-from collections.abc import Awaitable, Callable, Hashable, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import KW_ONLY, dataclass, field
 from types import MappingProxyType
 from typing import Any, Protocol
@@ -185,6 +185,10 @@ class Model(ABC):
     @abstractmethod
     def read_limit(self, access: Access) -> int:
         """Most registers, or bits, of the space of `access` one read asks for."""
+
+    @abstractmethod
+    def numbers(self, access: Access) -> tuple[range, ...]:
+        """The numbers of the space of `access` that have an address, lowest first."""
 
     @abstractmethod
     def declaration_problems(self, points: Sequence[Point[Any]]) -> list[str]:
@@ -378,11 +382,6 @@ def section_label(index: int, section: Section | RepeatedSection) -> str:
     return f"sections[{index}] (Section)"
 
 
-def _space_name(space: Hashable) -> str:
-    name = getattr(space, "__name__", None)
-    return name if isinstance(name, str) else str(space)
-
-
 def _selection_problem(points: Mapping[str, Point[Any]], targets: Selector) -> str | None:
     """What is wrong with a selector used inside a model (`on_write` / `on_change`): it must
     select at least one point of *this* resolved model. None means it is fine."""
@@ -397,7 +396,7 @@ def _overlap_problems(all_points: Sequence[Point[Any]], model: Model) -> list[st
     """Partial overlaps of addresses within one access space, read and write sides separately."""
     found: list[str] = []
     for side in ("read", "write"):
-        by_space: dict[Hashable, list[tuple[str, int, int]]] = {}
+        by_space: dict[str, list[tuple[str, int, int]]] = {}
         for point in all_points:
             access = point.read if side == "read" else point.write
             if access is None or access.bits:
@@ -418,7 +417,7 @@ def _overlap_problems(all_points: Sequence[Point[Any]], model: Model) -> list[st
                     if intersects and not identical:
                         found.append(
                             f"the {side} sides of {key_i!r} [{start_i}, {end_i}) and {key_j!r} "
-                            f"[{start_j}, {end_j}) overlap in {_space_name(space)}")
+                            f"[{start_j}, {end_j}) overlap in {space}")
     return found
 
 

@@ -60,15 +60,25 @@ def _spaces(model: Model) -> dict[str, _Space]:
 
 
 def areas(model: Model, limit: int) -> tuple[Area, ...]:
-    """For each space `model` reads or writes, every address from 0 up to `limit` - 1, or up to the
-    highest address its points read or write where that is higher.
+    """For each space `model` reads or writes, every number of it that has an address, from its
+    lowest for `limit` numbers, or up to the highest number its points read or write where that is
+    higher; an area for each run of numbers that have one.
 
     Raises:
         ValueError: `limit` is below 1.
     """
     if limit < 1:
         raise ValueError(f"the limit is at least 1, got {limit}")
-    return tuple(Area(name, 0, max(limit, space.high + 1)) for name, space in _spaces(model).items())
+    found: list[Area] = []
+    for name, space in _spaces(model).items():
+        numbers = model.numbers(space.access)
+        start = min((run.start for run in numbers), default=0)
+        end = max(start + limit, space.high + 1)
+        for run in numbers:
+            low, high = max(run.start, start), min(run.stop, end)
+            if low < high:
+                found.append(Area(name, low, high - low))
+    return tuple(found)
 
 
 class Mapper:

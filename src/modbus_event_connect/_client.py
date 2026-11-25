@@ -728,8 +728,8 @@ class Client:
 
     def mapping_areas(self, *, limit: int) -> tuple[Area, ...]:
         """The areas `map_areas(limit=limit)` reads: for each address space the model's points read
-        or write, every address from 0 up to `limit` - 1, or up to the highest address they read
-        or write where that is higher.
+        or write, every number of it that has an address, from its lowest for `limit` numbers, or
+        up to the highest number they read or write where that is higher.
 
         Raises:
             NotConnectedError: the device has not been scanned.
