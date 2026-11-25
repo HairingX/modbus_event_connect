@@ -12,7 +12,7 @@ from dataclasses import KW_ONLY, dataclass
 from datetime import date, datetime
 from enum import IntEnum
 from types import MappingProxyType
-from typing import Any, ClassVar, Hashable
+from typing import Any, ClassVar
 
 from event_connect import VALUE_TYPES, Transform, WriteRange, is_key, is_state_type
 from event_connect import Point as BasePoint
@@ -35,22 +35,16 @@ class Access:
     """Whether this space accepts writes."""
     bits: ClassVar[bool] = False
     """Whether each address holds one bit rather than a 16-bit register."""
-    table_name: ClassVar[str]
-    """What the protocol calls the space, such as "input" or "datapoint"."""
 
     def __post_init__(self) -> None:
         if self.address < 0:
             raise ValueError(f"an address cannot be negative, got {self.address}")
 
     @property
-    def space(self) -> Hashable:
-        """Identifies the address space; two accesses can share a request only when it's equal."""
-        return type(self)
-
-    @property
-    def table(self) -> str:
-        """The space by name, as a raw snapshot of registers names it."""
-        return self.table_name
+    def space(self) -> str:
+        """The address space by name; two accesses can share a request only when it's equal. The
+        kind's name, unless the protocol names it."""
+        return type(self).__name__
 
 
 # ================================================================================== point

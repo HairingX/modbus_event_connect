@@ -336,32 +336,36 @@ rooms. After `connect()`:
 ## Mapping a unit
 
 To find out what a unit's registers mean, its owner changes one thing at a time on the unit's own
-panel, and the registers are read as raw words before and after each change. The registers read
-follow from the model: for each table its points read, the span from the lowest to the highest
-address they read or write, gaps included, and above it up to a limit you state:
+panel, and the registers are read as raw words before and after each change. For each address
+space the model's points read or write, every address from 0 up to a limit you state - or up to
+the highest address a point reads or writes, where that is higher - is read once:
 
 ```python
-found = await client.map_areas(limit=300)       # finds which registers the unit holds, and reads them
+found = await client.map_areas(limit=300)       # every address 0-299: a word, or missing
 # ... the owner opens the bypass damper on the unit's panel ...
-after = await client.read_mapped(found)          # reads only the registers found
+after = await client.read_mapped(found)          # only the addresses that answered
 for change in difference(found, after):
     print(change.address, change.before, change.after, change.bits)   # datapoint 23 0 1 (0,)
 ```
 
-- `client.mapping_areas(limit=300)` gives the areas, as `Area`s of the protocol's own tables:
-  `"input"`, `"holding"`, `"coil"` and `"discrete_input"` over Modbus, numbered as the model's
-  points are, and `"datapoint"` and `"setpoint"` over micro_nabto, in the gateway's own numbers.
+- `client.mapping_areas(limit=300)` gives the areas, as `Area`s of the protocol's own address
+  spaces: `"input"`, `"holding"`, `"coil"` and `"discrete_input"` over Modbus, numbered as the
+  model's points are, and `"datapoint"` and `"setpoint"` over micro_nabto - `"datapoint:N"` and
+  `"setpoint:N"` for an object other than 0 - in the gateway's own numbers.
+- Every address of them ends in the snapshot with its word, or in `missing`: none is skipped.
 - Nothing is read until one of them is called: reads only, never a write, as a polling pass of
   their own, through the device's requests, paced and tried again when busy as every read is.
-- A device refuses a whole request for one register it does not have. Inside the span, after
-  such a register, `map_areas` asks for one register at a time again, doubling while each
-  answers, so a run of absent registers costs one request each. Above the span it asks for one
-  register in ten alone, and reads only the stretches around one that answers: a run of ten or
-  more is always found, a shorter one only near another.
+- A device refuses a whole request for one register it does not have. After such a request,
+  `map_areas` asks for one register at a time again, doubling while each answers, so a run of
+  absent registers costs one request each.
+- Registers answered with only zeros where they held values are read again when the device
+  says, until it takes the zeros as its model's `RereadZeros` says, or values come: zeros the
+  owner's change brought are taken, those of a gateway that holds nothing yet are not.
 - `read_mapped(found)` reads only the registers `found` holds a word for, as many in one request
   as the model reads.
 - A request answered busy after its tries, left unanswered, or answered so that it cannot be read
-  stops the read with `CannotConnectError`.
+  stops the read with `CannotConnectError`. Over Modbus that includes 0x04, so a unit that
+  answers 0x04 for an address cannot be mapped yet.
 
 ## Levels and candidates
 

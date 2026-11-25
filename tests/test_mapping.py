@@ -1,6 +1,7 @@
 """Mapping a unit: the areas its model's points span, found and read as raw words by the client."""
 import asyncio
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import pytest
@@ -8,6 +9,7 @@ import pytest
 from event_connect import (
     Area,
     CannotConnectError,
+    Fixed,
     Key,
     Level,
     NotConnectedError,
@@ -20,10 +22,11 @@ from event_connect.testing import FakeClock
 from modbus_event_connect import Section, Snapshot
 from modbus_event_connect._client import Client
 from modbus_event_connect._data_type import DataType
-from modbus_event_connect._device import ReadResult
-from modbus_event_connect._mapping import PROBE_STRIDE, areas
-from modbus_event_connect._point import Point
+from modbus_event_connect._device import Outcome, ReadResult
+from modbus_event_connect._mapping import areas
+from modbus_event_connect._point import Access, Point
 from modbus_event_connect.micro_nabto import (
+    RereadZeros,
     DatapointRegister,
     MicroNabtoConnection,
     MicroNabtoDevice,
@@ -39,10 +42,27 @@ from modbus_event_connect.modbus import (
     ModbusDevice,
     ModbusModel,
 )
-from modbus_event_connect.testing import NO_ANSWER, SimulatedMicroNabtoDevice, SimulatedModbusDevice, SimulatedModbusGateway
-from models import HANDSHAKE_NEVER_AGAIN, NEVER_AGAIN, OFFLINE_AFTER_INTERVALS, TIMEOUT_MARGIN, micro_nabto_model, modbus_model
+from modbus_event_connect.testing import (
+    NO_ANSWER,
+    SimulatedMicroNabtoDevice,
+    SimulatedModbusDevice,
+    SimulatedModbusGateway,
+)
+from models import (
+    HANDSHAKE_NEVER_AGAIN,
+    NEVER_AGAIN,
+    OFFLINE_AFTER_INTERVALS,
+    TIMEOUT_MARGIN,
+    micro_nabto_model,
+    modbus_model,
+)
 
 EMAIL = "user@example.invalid"
+
+
+@dataclass(frozen=True)
+class _Other(Access):
+    """An access of a protocol that does not name its space."""
 DATAPOINT_READ, SETPOINT_READ, SETPOINT_WRITE = 0x2D, 0x2A, 0x2B
 LOW, HIGH, FLAG = Key("low", int), Key("high", int), Key("flag", bool)
 
@@ -85,20 +105,19 @@ def ir(number: int) -> RawAddress:
 # ================================================================================= areas
 
 
-def test_each_access_names_its_table() -> None:
-    assert [access.table for access in (InputRegister(0), HoldingRegister(0), Coil(0), DiscreteInput(0),
+def test_each_access_names_its_space() -> None:
+    assert [access.space for access in (InputRegister(0), HoldingRegister(0), Coil(0), DiscreteInput(0),
                                         DatapointRegister(0), SetpointRegister(0), DatapointRegister(0, obj=2))] == [
         "input", "holding", "coil", "discrete_input", "datapoint", "setpoint", "datapoint:2"]
+    assert (SetpointRegister(0, obj=3).space, _Other(0).space) == ("setpoint:3", "_Other")
 
 
-def test_the_areas_span_each_table_the_points_read_or_write_gaps_included_and_above_up_to_the_limit() -> None:
-    assert areas(_model(), 300) == (Area("input", 10, 20), Area("input", 30, 270), Area("holding", 5, 1),
-                                    Area("holding", 6, 294))
+def test_the_areas_run_from_0_in_each_space_the_points_read_or_write_up_to_the_limit() -> None:
+    assert areas(_model(), 300) == (Area("input", 0, 300), Area("holding", 0, 300))
 
 
-def test_a_limit_at_or_below_a_span_adds_nothing_above_it() -> None:
-    assert areas(_model(), 30) == (Area("input", 10, 20), Area("holding", 5, 1), Area("holding", 6, 24))
-    assert areas(_model(), 1) == (Area("input", 10, 20), Area("holding", 5, 1))
+def test_the_areas_reach_the_highest_address_a_point_reads_where_it_is_above_the_limit() -> None:
+    assert areas(_model(), 1) == (Area("input", 0, 30), Area("holding", 0, 6))
 
 
 def test_the_limit_is_at_least_one_address() -> None:
@@ -106,23 +125,23 @@ def test_the_limit_is_at_least_one_address() -> None:
         areas(_model(), 0)
 
 
-def test_a_bit_table_spans_one_address_a_point() -> None:
+def test_a_bit_space_spans_one_address_a_point() -> None:
     model = modbus_model([Section([Point(FLAG, read=Coil(3), data_type=DataType.BOOL, poll_rate=PollRate.FAST),
                                    Point(Key("other", bool), read=Coil(7), data_type=DataType.BOOL,
                                          poll_rate=PollRate.FAST)])])
-    assert areas(model, 1) == (Area("coil", 3, 5),)
+    assert areas(model, 1) == (Area("coil", 0, 8),)
 
 
-async def test_a_bit_table_is_mapped_as_bits_and_a_point_only_written_widens_the_span() -> None:
+async def test_a_bit_space_is_mapped_as_bits_and_a_point_only_written_widens_the_span() -> None:
     model = modbus_model([Section([
         Point(FLAG, read=Coil(3), data_type=DataType.BOOL, poll_rate=PollRate.FAST),
         Point(Key("other", bool), read=Coil(5), data_type=DataType.BOOL, poll_rate=PollRate.FAST),
         Point(Key("reset", bool), write=Coil(9), data_type=DataType.BOOL)])], bit_write=None)
-    unit = SimulatedModbusDevice(coils={a: a % 2 for a in range(3, 10)})
+    unit = SimulatedModbusDevice(coils={a: a % 2 for a in range(10)})
     client = await _connected(model, unit)
     snapshot = await client.map_areas(limit=1)
-    assert dict(snapshot.values) == {RawAddress("coil", a): a % 2 for a in range(3, 10)}
-    assert _reads(unit) == [(FunctionCode.READ_COILS, 3, 7)]
+    assert dict(snapshot.values) == {RawAddress("coil", a): a % 2 for a in range(10)}
+    assert _reads(unit) == [(FunctionCode.READ_COILS, 0, 10)]
 
 
 def test_a_model_reads_as_many_registers_or_bits_in_one_request_as_it_states() -> None:
@@ -150,49 +169,75 @@ async def test_the_areas_are_known_only_once_the_unit_is_scanned() -> None:
 # ============================================================================== mapping
 
 
-async def test_mapping_reads_every_register_of_the_span_and_finds_the_absent_ones() -> None:
+async def test_mapping_reads_every_address_from_0_and_finds_the_absent_ones() -> None:
     unit = _unit()
     client = await _connected(_model(), unit)
     snapshot = await client.map_areas(limit=1)
     assert dict(snapshot.values) == {**{ir(a): 100 + a for a in range(10, 30) if a not in (15, 16)},
                                      RawAddress("holding", 5): 105}
-    assert snapshot.missing == frozenset({ir(15), ir(16)})
+    assert snapshot.missing == frozenset({*(ir(a) for a in (*range(10), 15, 16)),
+                                          *(RawAddress("holding", a) for a in range(5))})
     assert all(function.is_read for function, _, _ in _reads(unit))
 
 
-async def test_after_an_absent_register_the_span_is_read_from_one_at_a_time_doubling_while_it_answers() -> None:
-    unit = _unit()
+async def test_after_an_absent_register_the_read_goes_on_one_at_a_time_doubling_while_it_answers() -> None:
+    unit = _unit(inputs=range(10))
     client = await _connected(_model(max_registers=8), unit)
     await client.map_areas(limit=1)
     inputs = [(address, count) for function, address, count in _reads(unit)
               if function is FunctionCode.READ_INPUT_REGISTERS]
-    # 10-17 is refused and halved down to 15 and 16; then 18 alone, 19-20, 21-24, 25-29.
-    assert inputs[0] == (10, 8)
-    assert inputs[-4:] == [(18, 1), (19, 2), (21, 4), (25, 5)]
+    # 0-7 answers whole; 8-15 is refused and halved down to 15; then 16 alone, absent too, and 17
+    # alone, 18-19, 20-23 and 24-29, doubling while each answers.
+    assert inputs == [(0, 8), (8, 8), (8, 4), (12, 4), (12, 2), (14, 2), (14, 1), (15, 1),
+                      (16, 1), (17, 1), (18, 2), (20, 4), (24, 6)]
 
 
-async def test_a_span_that_answers_whole_costs_one_request_of_the_models_size_each() -> None:
-    unit = _unit(inputs=(15, 16))
+async def test_a_space_that_answers_whole_costs_one_request_of_the_models_size_each() -> None:
+    unit = _unit(inputs=(*range(10), 15, 16))
     client = await _connected(_model(max_registers=8), unit)
     await client.map_areas(limit=1)
-    assert [(a, c) for f, a, c in _reads(unit) if f is FunctionCode.READ_INPUT_REGISTERS] == [(10, 8), (18, 8), (26, 4)]
+    assert [(a, c) for f, a, c in _reads(unit) if f is FunctionCode.READ_INPUT_REGISTERS] == [
+        (0, 8), (8, 8), (16, 8), (24, 6)]
 
 
-async def test_above_the_span_one_register_in_ten_is_asked_for_and_only_the_stretches_around_an_answer_read() -> None:
-    unit = _unit(inputs=(52, 53), holding=())
-    model = modbus_model([Section([Point(LOW, read=InputRegister(10), poll_rate=PollRate.FAST),
-                                   Point(HIGH, read=InputRegister(29), poll_rate=PollRate.FAST)])], max_registers=8)
-    unit.input_registers[50] = 150
+SPARSE = {
+    "lone registers between long absent runs": {205: 1, 299: 2},
+    "runs at the very start and the very end": {**{a: 1 for a in range(6)}, **{a: 2 for a in range(290, 300)}},
+    "every other address": {a: a for a in range(0, 300, 2)},
+    "nothing at all": {},
+}
+"""Holding registers a unit has besides its point's, at holding 5: each layout a read could miss."""
+
+
+@pytest.mark.parametrize("holding", list(SPARSE.values()), ids=list(SPARSE))
+async def test_every_address_up_to_the_limit_is_read_or_found_missing_and_nothing_is_missed(
+        holding: dict[int, int]) -> None:
+    unit = SimulatedModbusDevice(input_registers={10: 7, 350: 9}, holding_registers={5: 3, **holding})
+    model = modbus_model([Section([
+        Point(LOW, read=InputRegister(10), poll_rate=PollRate.FAST),
+        Point(HIGH, read=InputRegister(350), poll_rate=PollRate.FAST),
+        Point(Key("setting", int), read=HoldingRegister(5), write=HoldingRegister(5), poll_rate=PollRate.FAST),
+    ])], max_registers=8)
     client = await _connected(model, unit)
-    snapshot = await client.map_areas(limit=90)
-    probes = list(range(30, 90, PROBE_STRIDE))
-    reads = _reads(unit)
-    assert [(a, c) for _, a, c in reads if c == 1 and a in probes] == [(a, 1) for a in probes]
-    assert {ir(50), ir(52), ir(53)} <= set(snapshot.values)
-    # The stretches 40-49, 50-59 and 60-69 are read; those of 30-39 and 70-89 only by their probe.
-    assert ir(45) in snapshot.missing and ir(65) in snapshot.missing
-    assert ir(35) not in snapshot.missing and ir(35) not in snapshot.values
-    assert ir(30) in snapshot.missing and ir(80) in snapshot.missing
+    snapshot = await client.map_areas(limit=300)
+    for space, top, image in (("input", 351, unit.input_registers), ("holding", 300, unit.holding_registers)):
+        for number in range(top):
+            address = RawAddress(space, number)
+            assert (address in snapshot.values) != (address in snapshot.missing), address
+            assert snapshot.values.get(address) == image.get(number), address
+    assert len(snapshot.values) + len(snapshot.missing) == 351 + 300
+
+
+async def test_a_later_read_asks_for_exactly_the_addresses_that_answered() -> None:
+    unit = SimulatedModbusDevice(input_registers={10: 7, 11: 8, 205: 1, 299: 2},
+                                 holding_registers={5: 3, **{a: a for a in range(0, 300, 2)}})
+    client = await _connected(_model(max_registers=8), unit)
+    found = await client.map_areas(limit=300)
+    unit.requests.clear()
+    await client.read_mapped(found)
+    asked = {RawAddress("input" if f is FunctionCode.READ_INPUT_REGISTERS else "holding", a)
+             for f, start, count in _reads(unit) for a in range(start, start + count)}
+    assert asked == set(found.values)
 
 
 async def test_a_mapped_unit_is_read_again_only_where_it_answered_in_requests_of_the_models_size() -> None:
@@ -203,7 +248,7 @@ async def test_a_mapped_unit_is_read_again_only_where_it_answered_in_requests_of
     unit.input_registers[12] = 7
     del unit.input_registers[13]
     again = await client.read_mapped(found)
-    # 10-14 and 17-19, then 20-27, then 28-29 and holding 5; 10-14 refused for 13, and halved.
+    # 10-14 and 17-19, then 20-27, then 28-29, and holding 5; 10-14 refused for 13, and halved.
     assert [(a, c) for _, a, c in _reads(unit)][:3] == [(10, 5), (10, 2), (12, 3)]
     assert {(a, c) for _, a, c in _reads(unit)} >= {(17, 3), (20, 8), (28, 2), (5, 1)}
     assert not {a for _, a, c in _reads(unit) if c == 1} & {15, 16}
@@ -213,9 +258,9 @@ async def test_a_mapped_unit_is_read_again_only_where_it_answered_in_requests_of
     assert not again.missing - {ir(13)}
 
 
-async def test_a_register_of_a_table_the_model_does_not_read_is_not_read_again() -> None:
+async def test_a_register_of_a_space_the_model_does_not_read_is_not_read_again() -> None:
     client = await _connected(_model(), _unit())
-    with pytest.raises(ValueError, match="reads no table 'datapoint'"):
+    with pytest.raises(ValueError, match="reads no space 'datapoint'"):
         await client.read_mapped(Snapshot(FakeClock().now(), {RawAddress("datapoint", 1): 0}, []))
 
 
@@ -240,7 +285,7 @@ async def test_a_busy_answer_after_its_tries_stops_the_mapping() -> None:
 async def test_a_request_left_unanswered_stops_the_mapping_at_once() -> None:
     unit = _unit()
     client = await _connected(_model(), unit)
-    unit.faults[(FunctionCode.READ_INPUT_REGISTERS, 11)] = NO_ANSWER
+    unit.faults[(FunctionCode.READ_INPUT_REGISTERS, 0)] = NO_ANSWER
     with pytest.raises(CannotConnectError, match="no_answer"):
         await client.map_areas(limit=300)
     assert len(unit.requests) == 1
@@ -309,8 +354,79 @@ async def test_a_micro_nabto_unit_is_mapped_in_its_own_numbering_and_read_again_
     assert dict(found.values) == {**{RawAddress("datapoint", a): 10 + a for a in range(10) if a != 4},
                                   RawAddress("setpoint", 30): 1, RawAddress("setpoint", 31): 2}
     assert RawAddress("datapoint", 4) in found.missing
-    assert first == 13      # 0-3; 4-7 halved to 4; 8; 9; probes 10, 20 and 30; setpoint 30; probe 31
+    every = {RawAddress(space, a) for space in ("datapoint", "setpoint") for a in range(32)}
+    assert set(found.values) | found.missing == every
+    assert first == 66      # every one of the 52 absent addresses is asked for, most of them alone
     assert [(c.code, len(c.items)) for c in simulated.commands] == [
         (DATAPOINT_READ, 4), (DATAPOINT_READ, 4), (DATAPOINT_READ, 1), (SETPOINT_READ, 2)]
     assert dict(again.values) == dict(found.values)
     assert not simulated.received(SETPOINT_WRITE)
+
+
+# ================================================================================== zeros
+
+
+def _zeros_model() -> Any:
+    """A model of two datapoints, taking zeros 2 s after they came."""
+    return micro_nabto_model([Section([Point(LOW, read=DatapointRegister(0), poll_rate=PollRate.FAST),
+                                        Point(HIGH, read=DatapointRegister(1), poll_rate=PollRate.FAST)])],
+                              answer_wait=0.5, later_answer_wait=0.0,
+                              zeros=RereadZeros(within=2.0, wait=Fixed(0.5), at_once=True, halves=False))
+
+
+def _zeros_unit(clock: FakeClock) -> SimulatedMicroNabtoDevice:
+    """A unit whose two datapoints read 5 and 6."""
+    return SimulatedMicroNabtoDevice(emails=frozenset({EMAIL}), clock=clock, datapoint_registers={(0, 0): 5, (0, 1): 6})
+
+
+def _zeros_client(simulated: SimulatedMicroNabtoDevice, clock: FakeClock) -> Client:
+    model = _zeros_model()
+    return Client(_micro_nabto_device(simulated, model, clock), model, offline_after_intervals=OFFLINE_AFTER_INTERVALS,
+                  level=Level.DOCUMENTED, clock=clock)
+
+
+def _micro_nabto_device(simulated: SimulatedMicroNabtoDevice, model: Any, clock: FakeClock) -> MicroNabtoDevice:
+    host, port = simulated.address
+    return MicroNabtoDevice(MicroNabtoConnection(EMAIL, host=host, port=port, timeout=0.05, retries=1,
+                                                 answer_wait=0.5, clock=clock, reconnect=HANDSHAKE_NEVER_AGAIN,
+                                                 session_idle=12.0, rediscovery_timeout=0.1, rediscovery_resend=0.5),
+                            models=[model], owns_connection=True)
+
+
+async def test_zeros_the_unit_really_answers_are_taken_once_its_model_takes_them() -> None:
+    """Two settings switched off at once answer only zeros where they held values."""
+    clock = FakeClock(autojump=True)
+    simulated = _zeros_unit(clock)
+    async with simulated:
+        client = _zeros_client(simulated, clock)
+        await client.connect()
+        simulated.datapoint_registers.update({(0, 0): 0, (0, 1): 0})
+        found = await client.map_areas(limit=2)
+        await client.disconnect()
+    assert dict(found.values) == {RawAddress("datapoint", 0): 0, RawAddress("datapoint", 1): 0}
+
+
+async def test_zeros_of_a_gateway_that_holds_nothing_yet_are_not_taken_as_values() -> None:
+    clock = FakeClock(autojump=True)
+    simulated = _zeros_unit(clock)
+    async with simulated:
+        client = _zeros_client(simulated, clock)
+        await client.connect()
+        simulated.zeros_until = clock.monotonic() + 1.0
+        found = await client.map_areas(limit=2)
+        await client.disconnect()
+    assert dict(found.values) == {RawAddress("datapoint", 0): 5, RawAddress("datapoint", 1): 6}
+
+
+async def test_zeros_read_again_too_often_stop_the_mapping() -> None:
+    unit = _unit()
+    client = await _connected(_model(), unit)
+    model = client.model
+
+    async def only_zeros(points: Sequence[Point[Any]]) -> Mapping[str, ReadResult]:
+        return {point.key: ReadResult(Outcome.BUSY, detail="only zeros", retry_after=0.5) for point in points}
+
+    setattr(client, "_read_raw", only_zeros)
+    with pytest.raises(CannotConnectError, match="busy, only zeros"):
+        await client.map_areas(limit=1)
+    assert model is client.model

@@ -21,21 +21,33 @@ MAX_REGISTERS_PER_WRITE = 123
 @dataclass(frozen=True)
 class InputRegister(Access):
     """InputRegister register - function code 0x04, read-only, 16 bits."""
-    table_name: ClassVar[str] = "input"
+
+    @property
+    def space(self) -> str:
+        """input."""
+        return "input"
 
 
 @dataclass(frozen=True)
 class HoldingRegister(Access):
     """HoldingRegister register - 0x03 to read, 0x06 / 0x10 / 0x16 to write, 16 bits."""
     writable: ClassVar[bool] = True
-    table_name: ClassVar[str] = "holding"
+
+    @property
+    def space(self) -> str:
+        """holding."""
+        return "holding"
 
 
 @dataclass(frozen=True)
 class DiscreteInput(Access):
     """DiscreteInput input - 0x02, read-only, one bit."""
     bits: ClassVar[bool] = True
-    table_name: ClassVar[str] = "discrete_input"
+
+    @property
+    def space(self) -> str:
+        """discrete_input."""
+        return "discrete_input"
 
 
 @dataclass(frozen=True)
@@ -43,7 +55,11 @@ class Coil(Access):
     """Coil - 0x01 to read, 0x05 / 0x0F to write, one bit."""
     writable: ClassVar[bool] = True
     bits: ClassVar[bool] = True
-    table_name: ClassVar[str] = "coil"
+
+    @property
+    def space(self) -> str:
+        """coil."""
+        return "coil"
 
 
 TABLES: tuple[type[Access], ...] = (Coil, DiscreteInput, InputRegister, HoldingRegister)

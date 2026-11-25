@@ -538,28 +538,33 @@ section through.
 What a register means is found on a unit by its owner: they change one thing at a time on the
 unit's own panel, and the registers are read as raw words before and after, so that what changed
 can be told from what did not. Which registers are read follows from the model, so no model
-states them: for each table its points read, from the lowest to the highest address they read,
-the gaps included, as the gaps are where the unknown registers lie, and writes counted too; and above it, up to a limit
-the caller states, as how far a device's numbering goes is not known. For micro_nabto these are
-the gateway's own numbers, never a manual's Modbus numbers.
+states them: for each address space its points read or write, every address from 0 up to a limit
+the caller states, or up to the highest address a point reads or writes where that is higher. No
+address in between is skipped, as a register no one knows can be anywhere; for micro_nabto these
+are the gateway's own numbers, never a manual's Modbus numbers.
 
 `Client.map_areas(limit=...)` and `Client.read_mapped(found)` are the only things that read them,
 so a unit nobody maps is read exactly as before. Each runs as a polling pass of its own, through
 the device's requests, paced and tried again when busy as every read is, and never writes. A
 request answered busy after its tries, left unanswered, or answered so that it cannot be read
 stops it with `CannotConnectError`: a mapping is worth less than the unit's own work, and the
-owner decides when to try again.
+owner decides when to try again. Over Modbus a 0x04 answer stops it too, which is a limit for
+mapping a Modbus unit.
 
-A device refuses a whole request for one register it does not have, and the device halves a
-refused request until each refusal is pinned to one register: two requests for each absent
-register in a run of them. So `map_areas` reads the span in requests as large as the model reads,
-and after a request that held an absent register from one register at a time, doubling while
-each answers: a run of absent registers costs one request each, and a run of present ones a few.
-Above the span, where most registers are absent, one in ten is asked for alone, and only the
-stretches around one that answers are read: a run of ten or more is always found, a shorter one
-only near another. On simulated gateways of Nilan's and Genvex's units, with a limit of 300, the
-first read costs between about 15 and 500 requests; `read_mapped` then reads only the registers
-found, in two to seven requests.
+A device refuses a whole request for one register it does not have, and halves a refused request
+until each refusal is pinned to one register: two requests for each absent register in a run of
+them. So `map_areas` reads in requests as large as the model reads, and after a request that held
+an absent register from one register at a time, doubling while each answers: a run of absent
+registers costs one request each, and a run of present ones a few. With a limit of 300 the first
+read of a unit whose registers are sparse costs several hundred requests, a few seconds on a
+quick gateway and a few minutes on a slow one; `read_mapped` then reads only the registers found,
+in a few requests.
+
+Registers answered with only zeros where they held values open an episode of zeros on the
+micro_nabto device: it answers `BUSY` with a `retry_after`. A mapping waits that long and
+reads them again, until the device takes the zeros as its model's `RereadZeros` says, or values
+come. So zeros the owner's change brought are taken, and the zeros of a gateway that holds nothing
+yet at the start of a session are not recorded as values.
 
 What a read found is an `event_connect.Snapshot`, and `difference()` gives what changed between
 two; both are protocol-free.
