@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import ClassVar, Hashable
+from typing import ClassVar
 
 from .._point import Access
 
@@ -18,8 +18,9 @@ class DatapointRegister(Access):
             raise ValueError(f"an object number cannot be negative, got {self.obj}")
 
     @property
-    def space(self) -> Hashable:
-        return (type(self), self.obj)
+    def space(self) -> str:
+        """datapoint; of an object other than 0, datapoint:<obj>, such as datapoint:1."""
+        return "datapoint" if self.obj == 0 else f"datapoint:{self.obj}"
 
 
 @dataclass(frozen=True)
@@ -34,5 +35,6 @@ class SetpointRegister(Access):
             raise ValueError(f"an object number cannot be negative, got {self.obj}")
 
     @property
-    def space(self) -> Hashable:
-        return (type(self), self.obj)
+    def space(self) -> str:
+        """setpoint; of an object other than 0, setpoint:<obj>, such as setpoint:1."""
+        return "setpoint" if self.obj == 0 else f"setpoint:{self.obj}"

@@ -6,7 +6,7 @@ from __future__ import annotations
 import dataclasses
 from abc import ABC, abstractmethod
 from collections import Counter
-from collections.abc import Awaitable, Callable, Hashable, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import KW_ONLY, dataclass, field
 from types import MappingProxyType
 from typing import Any, Protocol
@@ -144,7 +144,7 @@ class Model(ABC):
         object.__setattr__(self, "identity_points", tuple(self.identity_points))
         object.__setattr__(self, "scan_steps", tuple(self.scan_steps))
         object.__setattr__(self, "poll_intervals", MappingProxyType(dict(self.poll_intervals)))
-        declared = _declared_points(self)
+        declared = declared_points(self)
         object.__setattr__(self, "keys", frozenset(point.key for point in declared))
         object.__setattr__(self, "_keys_at", MappingProxyType({
             level: self.keys if level is Level.TEST else frozenset(point.key for point in points_at(declared, level))
@@ -183,6 +183,14 @@ class Model(ABC):
         """
 
     @abstractmethod
+    def read_limit(self, access: Access) -> int:
+        """Most registers, or bits, of the space of `access` one read asks for."""
+
+    @abstractmethod
+    def numbers(self, access: Access) -> tuple[range, ...]:
+        """The numbers of the space of `access` that have an address, lowest first."""
+
+    @abstractmethod
     def declaration_problems(self, points: Sequence[Point[Any]]) -> list[str]:
         """What is wrong with the model over its protocol, given every point it declares. Empty when
         nothing is."""
@@ -194,7 +202,7 @@ def _scans(model: Model) -> bool:
                                          for section in model.sections)
 
 
-def _declared_points(model: Model) -> list[Point[Any]]:
+def declared_points(model: Model) -> list[Point[Any]]:
     """Every point `model` declares, whatever the identity; an instance whose factory raises is left
     out, as resolving reports it."""
     points = list(model.identity_points)
@@ -216,7 +224,7 @@ def _candidate_problems(model: Model) -> list[str]:
     refreshes that name by key a point a candidate of another key replaces."""
     found = [f"identity point {point.key!r} is a candidate, but identity points are read at every level"
              for point in model.identity_points if point.candidate is not None]
-    sections = _declared_points(model)[len(model.identity_points):]
+    sections = declared_points(model)[len(model.identity_points):]
     replaceable: dict[str, set[type[object]]] = {}
     for point in sections:
         if point.candidate is None:
@@ -238,7 +246,7 @@ def _candidate_problems(model: Model) -> list[str]:
                  for replaced, keys in replacing.items() if len(keys) > 1)
     # At the Test level such a point is gone: a refresh naming it by key would read nothing there.
     renamed = {replaced for replaced, keys in replacing.items() if any(key != replaced for key in keys)}
-    for point in _declared_points(model):
+    for point in declared_points(model):
         for name, refresh in (("on_write", point.on_write), ("on_change", point.on_change)):
             if refresh is not None and isinstance(refresh.targets, tuple):
                 for target in sorted(renamed.intersection(refresh.targets)):
@@ -374,11 +382,6 @@ def section_label(index: int, section: Section | RepeatedSection) -> str:
     return f"sections[{index}] (Section)"
 
 
-def _space_name(space: Hashable) -> str:
-    name = getattr(space, "__name__", None)
-    return name if isinstance(name, str) else str(space)
-
-
 def _selection_problem(points: Mapping[str, Point[Any]], targets: Selector) -> str | None:
     """What is wrong with a selector used inside a model (`on_write` / `on_change`): it must
     select at least one point of *this* resolved model. None means it is fine."""
@@ -393,7 +396,7 @@ def _overlap_problems(all_points: Sequence[Point[Any]], model: Model) -> list[st
     """Partial overlaps of addresses within one access space, read and write sides separately."""
     found: list[str] = []
     for side in ("read", "write"):
-        by_space: dict[Hashable, list[tuple[str, int, int]]] = {}
+        by_space: dict[str, list[tuple[str, int, int]]] = {}
         for point in all_points:
             access = point.read if side == "read" else point.write
             if access is None or access.bits:
@@ -414,7 +417,7 @@ def _overlap_problems(all_points: Sequence[Point[Any]], model: Model) -> list[st
                     if intersects and not identical:
                         found.append(
                             f"the {side} sides of {key_i!r} [{start_i}, {end_i}) and {key_j!r} "
-                            f"[{start_j}, {end_j}) overlap in {_space_name(space)}")
+                            f"[{start_j}, {end_j}) overlap in {space}")
     return found
 
 

@@ -4,6 +4,7 @@ from importlib.metadata import version as _installed_version
 from event_connect import (
     NO_RETRY,
     AnyOf,
+    Area,
     Attempts,
     AuthenticationError,
     CannotConnectError,
@@ -31,10 +32,13 @@ from event_connect import (
     PollRate,
     Pulse,
     Quality,
+    RawAddress,
     ReadOnlyError,
     Refresh,
+    RegisterChange,
     Retry,
     Selector,
+    Snapshot,
     Status,
     StatusCallback,
     Steps,
@@ -49,6 +53,7 @@ from event_connect import (
     Write,
     WriteRange,
     WriteKind,
+    difference,
 )
 
 from ._client import Client
@@ -59,6 +64,7 @@ from ._point import Point
 __version__ = _installed_version("modbus_event_connect")
 __all__ = [
     "AnyOf",
+    "Area",
     "Attempts",
     "AuthenticationError",
     "ByteOrder",
@@ -95,14 +101,17 @@ __all__ = [
     "PollRate",
     "Pulse",
     "Quality",
+    "RawAddress",
     "ReadOnlyError",
     "Refresh",
+    "RegisterChange",
     "RepeatedSection",
     "Retry",
     "Scan",
     "ScanStep",
     "Section",
     "Selector",
+    "Snapshot",
     "Status",
     "StatusCallback",
     "Steps",
@@ -118,4 +127,5 @@ __all__ = [
     "Write",
     "WriteRange",
     "WriteKind",
+    "difference",
 ]

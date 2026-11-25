@@ -533,6 +533,45 @@ section through.
 
 ---
 
+### 4.6 Mapping a unit
+
+What a register means is found on a unit by its owner: they change one thing at a time on the
+unit's own panel, and the registers are read as raw words before and after, so that what changed
+can be told from what did not. Which registers are read follows from the model, so no model
+states them: for each address space its points read or write, every number its numbering gives
+an address, from the space's lowest number for as many numbers as the caller states, or up to the
+highest number a point reads or writes where that is higher. No number in between is skipped, as
+a register no one knows can be anywhere; for micro_nabto these are the gateway's own numbers, from
+0, never a manual's Modbus numbers.
+
+`Client.map_areas(limit=...)` and `Client.read_mapped(found)` are the only things that read them,
+so a unit nobody maps is read exactly as before. Each runs as a polling pass of its own, through
+the device's requests, paced and tried again when busy as every read is, and never writes. A
+request answered busy after its tries, left unanswered, or answered so that it cannot be read
+stops it with `CannotConnectError`: a mapping is worth less than the unit's own work, and the
+owner decides when to try again. Over Modbus a 0x04 answer stops it too, which is a limit for
+mapping a Modbus unit.
+
+A device refuses a whole request for one register it does not have, and halves a refused request
+until each refusal is pinned to one register: two requests for each absent register in a run of
+them. So `map_areas` reads in requests as large as the model reads, and after a request that held
+an absent register from one register at a time, doubling while each answers: a run of absent
+registers costs one request each, and a run of present ones a few. With a limit of 300 the first
+read of a unit whose registers are sparse costs several hundred requests, a few seconds on a
+quick gateway and a few minutes on a slow one; `read_mapped` then reads only the registers found,
+in a few requests.
+
+Registers answered with only zeros where they held values open an episode of zeros on the
+micro_nabto device: it answers `BUSY` with a `retry_after`. A mapping waits that long and
+reads them again, until values come or the device takes the zeros at its model's
+`RereadZeros.within`. So zeros the owner's change brought are taken, and the zeros of a gateway
+that holds nothing yet at the start of a session are recorded only if they last that long: 7.5 s
+for a Nilan gateway, whose session start was once seen answering zeros for about 10 s. As the
+client's polls keep a session going, a mapping rarely meets a new one.
+
+What a read found is an `event_connect.Snapshot`, and `difference()` gives what changed between
+two; both are protocol-free.
+
 ## 5. Freshness and scheduling
 
 ### 5.1 The idea

@@ -333,6 +333,42 @@ rooms. After `connect()`:
 | `client.unavailable_reasons` | keys the unit does not have, with the reason; not those its level leaves out |
 | `client.subscribe_points(callback)` | told when the unit gains or loses points, such as a room set up later |
 
+## Mapping a unit
+
+To find out what a unit's registers mean, its owner changes one thing at a time on the unit's own
+panel, and the registers are read as raw words before and after each change. For each address
+space the model's points read or write, every number of it that has an address is read once: from
+the space's lowest number, as the model's numbering gives it, for as many numbers as the limit you
+state - or up to the highest number a point reads or writes, where that is higher:
+
+```python
+found = await client.map_areas(limit=300)       # the first 300 numbers of each space: a word, or missing
+# ... the owner opens the bypass damper on the unit's panel ...
+after = await client.read_mapped(found)          # only the addresses that answered
+for change in difference(found, after):
+    print(change.address, change.before, change.after, change.bits)   # datapoint 23 0 1 (0,)
+```
+
+- `client.mapping_areas(limit=300)` gives the areas, as `Area`s of the protocol's own address
+  spaces: `"input"`, `"holding"`, `"coil"` and `"discrete_input"` over Modbus, numbered as the
+  model's points are, and `"datapoint"` and `"setpoint"` over micro_nabto - `"datapoint:N"` and
+  `"setpoint:N"` for an object other than 0 - in the gateway's own numbers.
+- Every address of them ends in the snapshot with its word, or in `missing`: none is skipped.
+- Nothing is read until one of them is called: reads only, never a write, as a polling pass of
+  their own, through the device's requests, paced and tried again when busy as every read is.
+- A device refuses a whole request for one register it does not have. After such a request,
+  `map_areas` asks for one register at a time again, doubling while each answers, so a run of
+  absent registers costs one request each.
+- Registers answered with only zeros where they held values are read again when the device
+  says, until values come or the device takes the zeros at its model's `RereadZeros.within` -
+  7.5 s for a Nilan gateway: zeros the owner's change brought are taken, and the zeros of a
+  gateway that holds nothing yet at the start of a session are taken only if they last that long.
+- `read_mapped(found)` reads only the registers `found` holds a word for, as many in one request
+  as the model reads.
+- A request answered busy after its tries, left unanswered, or answered so that it cannot be read
+  stops the read with `CannotConnectError`. Over Modbus that includes 0x04, so a unit that
+  answers 0x04 for an address cannot be mapped yet.
+
 ## Levels and candidates
 
 Every point says how certain it is that it is what it claims, as its `certainty`: `VERIFIED`,

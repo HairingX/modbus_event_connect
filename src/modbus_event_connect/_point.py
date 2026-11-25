@@ -12,7 +12,7 @@ from dataclasses import KW_ONLY, dataclass
 from datetime import date, datetime
 from enum import IntEnum
 from types import MappingProxyType
-from typing import Any, ClassVar, Hashable
+from typing import Any, ClassVar
 
 from event_connect import VALUE_TYPES, Transform, WriteRange, is_key, is_state_type
 from event_connect import Point as BasePoint
@@ -41,9 +41,10 @@ class Access:
             raise ValueError(f"an address cannot be negative, got {self.address}")
 
     @property
-    def space(self) -> Hashable:
-        """Identifies the address space; two accesses can share a request only when it's equal."""
-        return type(self)
+    def space(self) -> str:
+        """The address space by name; two accesses can share a request only when it's equal. The
+        kind's name, unless the protocol names it."""
+        return type(self).__name__
 
 
 # ================================================================================== point

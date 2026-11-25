@@ -410,7 +410,7 @@ class ModbusDevice:
 def _table(access: Access, point: Point[Any], side: str) -> type[Access]:
     table = type(access)
     if table not in _READ_FUNCTION:
-        raise TypeError(f"point {point.key!r}: the {side} side is {table.__name__}, not a Modbus table")
+        raise TypeError(f"point {point.key!r}: the {side} side is {table.__name__}, not a Modbus space")
     return table
 
 

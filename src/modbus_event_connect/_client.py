@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, NoReturn
 
 from event_connect import (
+    Area,
     CannotConnectError,
     Clock,
     DataValue,
@@ -27,6 +28,7 @@ from event_connect import (
     ReadOnlyError,
     Scheduler,
     Selector,
+    Snapshot,
     Status,
     StatusBoard,
     StatusCallback,
@@ -48,6 +50,7 @@ from event_connect import (
 
 from ._conversion import decode, encode
 from ._device import Device, Outcome, ReadResult
+from ._mapping import Mapper, areas
 from ._model import InstanceScanStep, Model, ModelSelector, RepeatedSection, ResolvedModel, resolve
 from ._point import Point
 from ._writes import WriteQueue
@@ -722,6 +725,61 @@ class Client:
         self._wake.set()
         if after == 0:
             await self.poll()
+
+    def mapping_areas(self, *, limit: int) -> tuple[Area, ...]:
+        """The areas `map_areas(limit=limit)` reads: for each address space the model's points read
+        or write, every number of it that has an address, from its lowest for `limit` numbers, or
+        up to the highest number they read or write where that is higher.
+
+        Raises:
+            NotConnectedError: the device has not been scanned.
+            ValueError: `limit` is below 1.
+        """
+        return areas(self._require_model().model, limit)
+
+    async def map_areas(self, *, limit: int) -> Snapshot:
+        """Read every address of `mapping_areas(limit=limit)` once: each ends in the snapshot with
+        its raw word, or as missing where the unit has nothing. Nothing else is read, and nothing
+        is written.
+
+        It reads in requests as large as the model reads; after a request that held an address
+        the unit has nothing at, from one address at a time again, doubling while every one
+        answers. It runs as a polling pass of its own, through the device's requests, paced and
+        tried again when busy as every read is. Registers answered with only zeros where they held
+        values are read again when the device says, until it takes the zeros or values come.
+
+        Raises:
+            NotConnectedError: the client is not connected.
+            ValueError: `limit` is below 1.
+            CannotConnectError: a request was answered busy after its tries, left unanswered, or
+                answered in a way that could not be read; the read stops there.
+        """
+        self._require_connected()
+        model = self._require_model().model
+        areas(model, limit)
+        mapper = Mapper(model, self._read_raw, self._clock.sleep)
+        await self._passes.run(lambda: mapper.map(limit), due=lambda: True)
+        return Snapshot(self._clock.now(), mapper.words, mapper.missing)
+
+    async def read_mapped(self, found: Snapshot) -> Snapshot:
+        """Read again, as raw words, every register `found` holds a word for, as many in one
+        request as the model reads, as a polling pass of its own.
+
+        Raises:
+            NotConnectedError: the client is not connected.
+            ValueError: `found` holds a register of a space the model does not read.
+            CannotConnectError: a request was answered busy after its tries, left unanswered, or
+                answered in a way that could not be read; the read stops there.
+        """
+        self._require_connected()
+        mapper = Mapper(self._require_model().model, self._read_raw, self._clock.sleep)
+        await self._passes.run(lambda: mapper.reread(found.values), due=lambda: True)
+        return Snapshot(self._clock.now(), mapper.words, mapper.missing)
+
+    async def _read_raw(self, points: Sequence[Point[Any]]) -> Mapping[str, ReadResult]:
+        answers = await self._device.read(points)
+        self._update_reachability(any(a.outcome is not Outcome.NO_ANSWER for a in answers.values()))
+        return answers
 
     async def _read_and_publish(self, points: Sequence[Point[Any]]) -> None:
         marks = self._writes.marks()

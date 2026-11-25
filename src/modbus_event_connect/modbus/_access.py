@@ -22,17 +22,32 @@ MAX_REGISTERS_PER_WRITE = 123
 class InputRegister(Access):
     """InputRegister register - function code 0x04, read-only, 16 bits."""
 
+    @property
+    def space(self) -> str:
+        """input."""
+        return "input"
+
 
 @dataclass(frozen=True)
 class HoldingRegister(Access):
     """HoldingRegister register - 0x03 to read, 0x06 / 0x10 / 0x16 to write, 16 bits."""
     writable: ClassVar[bool] = True
 
+    @property
+    def space(self) -> str:
+        """holding."""
+        return "holding"
+
 
 @dataclass(frozen=True)
 class DiscreteInput(Access):
     """DiscreteInput input - 0x02, read-only, one bit."""
     bits: ClassVar[bool] = True
+
+    @property
+    def space(self) -> str:
+        """discrete_input."""
+        return "discrete_input"
 
 
 @dataclass(frozen=True)
@@ -41,8 +56,14 @@ class Coil(Access):
     writable: ClassVar[bool] = True
     bits: ClassVar[bool] = True
 
+    @property
+    def space(self) -> str:
+        """coil."""
+        return "coil"
 
-TABLES: tuple[type[Access], ...] = (Coil, DiscreteInput, InputRegister, HoldingRegister)
+
+SPACES: tuple[type[Access], ...] = (Coil, DiscreteInput, InputRegister, HoldingRegister)
+"""Modbus's four address spaces, which its specification calls tables."""
 
 
 @dataclass(frozen=True)
