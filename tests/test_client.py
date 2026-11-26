@@ -4,7 +4,7 @@ import asyncio
 import gc
 from dataclasses import replace
 import logging
-from collections.abc import Awaitable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import timedelta
 from typing import Any, TypeVar, cast
 
@@ -1307,6 +1307,59 @@ def test_the_latest_writes_of_a_key_are_kept() -> None:
     for n in range(client_module._WRITES_KEPT + 1):
         asyncio.run(client.write(RELAY, n % 2 == 0))
     assert [r["number"] for r in _logged(client, "relay")] == list(range(2, client_module._WRITES_KEPT + 2))
+
+
+PASSWORD = Key("password", int)
+PIN = Key("pin", int)
+UNLOCK = Key("unlock", int)
+CODE = Key("code", int)
+SECRETS = modbus_model([Section([
+    Point(PASSWORD, write=HoldingRegister(60), secret=True),
+    Point(PIN, read=HoldingRegister(61), write=HoldingRegister(61), poll_rate=PollRate.MEDIUM, secret=True),
+    Point(UNLOCK, write=HoldingRegister(62), write_kind=WriteKind.COMMAND, secret=True),
+    Point(CODE, write=HoldingRegister(63), write_kind=WriteKind.COMMAND, pulse=Pulse(idle=0, after=0.01),
+          secret=True),
+])], name="SECRETS", manufacturer="TEST")
+
+
+async def _write_password(client: Client) -> None:
+    await client.write(PASSWORD, 54321)
+
+
+async def _write_pin(client: Client) -> None:
+    await client.write(PIN, 54321)
+
+
+async def _write_in_sequence(client: Client) -> None:
+    await client.write_sequence([Write(PIN, 54321), Write(PASSWORD, 54321)])
+
+
+async def _command(client: Client) -> None:
+    await client.write(UNLOCK, 54321)
+
+
+async def _pulse(client: Client) -> None:
+    await client.write(CODE, 54321)
+    await asyncio.sleep(0.05)
+
+
+@pytest.mark.parametrize("write", [_write_password, _write_pin, _write_in_sequence, _command, _pulse])
+def test_the_diagnostics_hold_no_trace_of_a_secret_points_value(write: Callable[[Client], Awaitable[None]]) -> None:
+    device = FakeDevice({"pin": (12345,)}, models=(SECRETS,))
+    clock = FakeClock(autojump=True)
+    client = Client(device, SECRETS, offline_after_intervals=OFFLINE_AFTER_INTERVALS, level=Level.DOCUMENTED,
+                    clock=clock)
+    asyncio.run(client.connect())
+    client.subscribe(PIN, Recorder())
+    asyncio.run(write(client))
+    clock.advance(SECRETS.timing.read_back_after)
+    asyncio.run(client.poll())
+    assert device.writes, "the value was sent"
+    writes = cast(dict[str, list[dict[str, Any]]], client.diagnostics()["writes"])
+    records = [record for key_records in writes.values() for record in key_records]
+    assert records and all(record["outcome"] == "taken" for record in records)
+    assert all((record["value"], record["raw"], record["read_back"]) == (None, [], None) for record in records)
+    assert "54321" not in repr(client.diagnostics())
 
 
 # ===================================================== regression scenarios
