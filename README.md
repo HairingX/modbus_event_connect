@@ -292,7 +292,9 @@ against the point's limits, or its states, and `InvalidValueError` says why it w
   times, how it ended - `taken`, `refused`, `no_answer`, `overtaken` or `error`, with the
   device's answer and exception code in `detail` - when, and the first answered read of the key
   after it, as its `read_back`. A value refused before sending, or overtaken before it was first
-  sent, is not among them.
+  sent, is not among them. A write to a point marked `secret=True`, such as a password, shows
+  only when it was sent, how often and how it ended: its `value` is None, its `raw` empty, and
+  it has no `read_back`.
 
 `Client(device, model, offline_after_intervals=3, level=Level.DOCUMENTED, read_only=True)` refuses every write with
 `ReadOnlyError` before it reaches the device. Use it while developing against a real

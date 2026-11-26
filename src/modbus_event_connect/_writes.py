@@ -156,7 +156,7 @@ class WriteQueue:
         """Write, and send again as `retry` says while the device answers `BUSY`; None once
         `overtaken()`. How it ended is recorded in the log."""
         encoded = encode(point, value)
-        record = self._log.sent(point.key, value, _raw(encoded))
+        record = self._log.sent(point.key, value, _raw(encoded), secret=point.secret)
         try:
             result = await self._send_until_taken(point, encoded, overtaken, record)
         except BaseException as err:

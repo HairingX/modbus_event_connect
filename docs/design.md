@@ -930,8 +930,10 @@ last quality and when it was last good. The client adds its level, the certainty
 the unit has and each candidate it uses (4.4), and the writes it sent: the latest five per key,
 each with the value asked for, what was sent, how many times, how it ended with the device's
 answer, and the first answered read of the key after it. A tester's report then shows whether a
-write reached the unit and held, without the tester describing it. This is what a bug report
-needs — without a host address in it.
+write reached the unit and held, without the tester describing it. Of a point marked `secret`,
+such as a password, only when it was sent, how often and how it ended are kept: never the value,
+what was sent or what was read after it, so a report can be shared as it is. This is what a bug
+report needs — without a host address in it.
 
 micro_nabto logs each read's answer at debug: how old the session is, why it was established and
 how long after the answer before it, which of its requests this was, the sequence number, how many
