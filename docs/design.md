@@ -538,7 +538,9 @@ section through.
 What a register means is found on a unit by its owner: they change one thing at a time on the
 unit's own panel, and the registers are read as raw words before and after, so that what changed
 can be told from what did not. Which registers are read follows from the model, so no model
-states them: for each address space its points read or write, every number its numbering gives
+states them: for each address space its points read or write, and each space its protocol has on
+every unit (`Model.mapped_spaces`: over micro_nabto both, as every gateway numbers its datapoints
+and setpoints from 0, so a model with no points maps a controller no model knows), every number its numbering gives
 an address, from the space's lowest number for as many numbers as the caller states, or up to the
 highest number a point reads or writes where that is higher. No number in between is skipped, as
 a register no one knows can be anywhere; for micro_nabto these are the gateway's own numbers, from
