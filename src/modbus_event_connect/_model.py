@@ -190,6 +190,11 @@ class Model(ABC):
     def numbers(self, access: Access) -> tuple[range, ...]:
         """The numbers of the space of `access` that have an address, lowest first."""
 
+    def mapped_spaces(self) -> tuple[Access, ...]:
+        """An access in each space every unit of the model has, mapped even where no point of the
+        model is in it; none unless the protocol says so."""
+        return ()
+
     @abstractmethod
     def declaration_problems(self, points: Sequence[Point[Any]]) -> list[str]:
         """What is wrong with the model over its protocol, given every point it declares. Empty when

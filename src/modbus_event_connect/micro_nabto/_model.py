@@ -102,6 +102,11 @@ class MicroNabtoModel(Model):
         """Every address a read of the space of `access` can carry, from 0."""
         return (range(0, _MAX_ADDRESS[("read", type(access))] + 1),)
 
+    def mapped_spaces(self) -> tuple[Access, ...]:
+        """Both spaces: every gateway numbers its datapoints and setpoints from 0, whatever the
+        controller behind it."""
+        return (DatapointRegister(0), SetpointRegister(0))
+
     def address(self, access: Access) -> int:
         """The address sent for `access`: the one it carries."""
         return access.address

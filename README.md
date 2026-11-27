@@ -339,7 +339,9 @@ rooms. After `connect()`:
 
 To find out what a unit's registers mean, its owner changes one thing at a time on the unit's own
 panel, and the registers are read as raw words before and after each change. For each address
-space the model's points read or write, every number of it that has an address is read once: from
+space the model's points read or write - and over micro_nabto always both, datapoints and
+setpoints, so that a model with no points can map a unit no model knows yet - every number of it
+that has an address is read once: from
 the space's lowest number, as the model's numbering gives it, for as many numbers as the limit you
 state - or up to the highest number a point reads or writes, where that is higher:
 

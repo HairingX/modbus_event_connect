@@ -727,9 +727,10 @@ class Client:
             await self.poll()
 
     def mapping_areas(self, *, limit: int) -> tuple[Area, ...]:
-        """The areas `map_areas(limit=limit)` reads: for each address space the model's points read
-        or write, every number of it that has an address, from its lowest for `limit` numbers, or
-        up to the highest number they read or write where that is higher.
+        """The areas `map_areas(limit=limit)` reads: for each address space the model's protocol has
+        on every unit, and each its points read or write, every number of it that has an address,
+        from its lowest for `limit` numbers, or up to the highest number they read or write where
+        that is higher.
 
         Raises:
             NotConnectedError: the device has not been scanned.

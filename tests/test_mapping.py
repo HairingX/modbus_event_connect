@@ -136,6 +136,37 @@ def test_a_space_starts_at_the_lowest_number_its_numbering_gives_and_skips_numbe
     assert micro_nabto_model().numbers(SetpointRegister(0)) == (range(0, 0x10000),)
 
 
+def test_a_micro_nabto_unit_is_mapped_in_both_its_spaces_whatever_its_points_are_in() -> None:
+    only_datapoints = micro_nabto_model([Section([Point(LOW, read=DatapointRegister(320), poll_rate=PollRate.FAST)])])
+    assert areas(only_datapoints, 300) == (Area("datapoint", 0, 321), Area("setpoint", 0, 300))
+    assert areas(micro_nabto_model(), 300) == (Area("datapoint", 0, 300), Area("setpoint", 0, 300))
+
+
+def test_a_modbus_unit_is_mapped_only_in_the_spaces_its_points_are_in() -> None:
+    assert _model().mapped_spaces() == ()
+    assert areas(modbus_model(), 300) == ()
+
+
+async def test_a_micro_nabto_unit_with_no_points_is_mapped_in_both_its_spaces() -> None:
+    model = micro_nabto_model()
+    async with SimulatedMicroNabtoDevice(emails=frozenset({EMAIL}), datapoint_registers={(0, 0): 15, (0, 299): 3},
+                                         setpoint_registers={(0, 5): 59}) as simulated:
+        host, port = simulated.address
+        device = MicroNabtoDevice(MicroNabtoConnection(EMAIL, host=host, port=port, timeout=0.05, retries=1,
+                                                       answer_wait=0.5, reconnect=HANDSHAKE_NEVER_AGAIN,
+                                                       session_idle=12.0, rediscovery_timeout=0.1,
+                                                       rediscovery_resend=0.5),
+                                  models=[model], owns_connection=True)
+        client = Client(device, model, offline_after_intervals=OFFLINE_AFTER_INTERVALS, level=Level.DOCUMENTED,
+                        read_only=True)
+        await client.connect()
+        found = await client.map_areas(limit=300)
+        await client.disconnect()
+    assert {str(address): word for address, word in found.values.items()} == {
+        "datapoint 0": 15, "datapoint 299": 3, "setpoint 5": 59}
+    assert not simulated.received(SETPOINT_WRITE)
+
+
 @pytest.mark.parametrize(("numbering", "number", "image"), [
     (plain(first_address=0), 1, {0: 1, 5: 2, 299: 3}),
     (modicon(digits=5, first_address=0), 30005, {4: 1, 150: 2, 299: 3}),

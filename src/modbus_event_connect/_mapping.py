@@ -30,8 +30,8 @@ Sleep = Callable[[float], Awaitable[None]]
 
 @dataclass(frozen=True)
 class _Space:
-    """One address space a model reads or writes: an access in it, and the highest address its
-    points read or write."""
+    """One address space a model maps: an access in it, and the highest address its points read or
+    write; -1 where none is in it."""
     access: Access
     high: int
 
@@ -45,9 +45,10 @@ class _Space:
 
 
 def _spaces(model: Model) -> dict[str, _Space]:
-    """Each space the model's points read or write, whatever the unit and the level, by name, in
-    the order they first appear."""
-    found: dict[str, _Space] = {}
+    """Each space the model maps, by name: those its protocol has on every unit first, then each
+    other space its points read or write, whatever the unit and the level, in the order they first
+    appear."""
+    found: dict[str, _Space] = {access.space: _Space(access, -1) for access in model.mapped_spaces()}
     for point in declared_points(model):
         for access in (point.read, point.write):
             if access is None:
@@ -60,7 +61,7 @@ def _spaces(model: Model) -> dict[str, _Space]:
 
 
 def areas(model: Model, limit: int) -> tuple[Area, ...]:
-    """For each space `model` reads or writes, every number of it that has an address, from its
+    """For each space `model` maps, every number of it that has an address, from its
     lowest for `limit` numbers, or up to the highest number its points read or write where that is
     higher; an area for each run of numbers that have one.
 
